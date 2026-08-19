@@ -71,7 +71,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   calls gain their register arguments and the function itself declares them, under
   the register's own name (notepad x86: 208 thiscall-shaped, 81 fastcall-shaped)
 - ⬜ Float arguments: needs a signature to say which of `xmm0`-`xmm3` an argument
-  sits in, which is the API database above
+  sits in, so it waits on the item below
 - ✅ Control‑flow structuring: `if`/`else if`/`else`, `while`, `do`/`while`,
   `break`/`continue`, from dominators and post-dominators. Edges no structure
   covers keep a `goto`, and only those blocks keep a label; every block is still
@@ -82,7 +82,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Global data named instead of printed as addresses: `data_XXXX` (or the
   symbol), `&data_XXXX` for a pointer, `sub_XXXX` for a function pointer, and the
   text itself for a string literal
-- ⬜ Type propagation from import signatures (small Win32 API DB)
+- ⬜ Type propagation from import signatures. Deliberately not a hand-typed Win32
+  table: see DECISIONS.md for what would have to change first
 - ✅ Switch-table recovery: the 32-bit `jmp [idx*4 + table]` form and the 64-bit
   `lea base,[rip+X]` / `mov e,[base+idx*4+rva]` / `add`/`jmp` form, bounded by the
   range check in front of them and validated entry by entry; the case bodies are

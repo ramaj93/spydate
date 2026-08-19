@@ -66,3 +66,29 @@ the DOS stub and the entries. Spydate recomputes it: a match is evidence the
 header is genuine, and a mismatch means it was edited or forged, which is a
 signal worth surfacing. If a verified prodid table is ever added to the repo as
 data, naming can be layered on top without changing this decision.
+
+## No hand-typed Win32 signature database
+
+Typing call arguments from the API being called is the obvious next step for
+readability: `SendMessageW(hwnd, WM_SETTEXT, 0, lParam)` beats four bare
+registers. It needs a table mapping an import name to its parameter list, and
+the usual way to get one is to type it in.
+
+Spydate does not, for the same reason it does not name Rich header product ids:
+nothing on the machine can check the table, and a wrong signature is not a
+cosmetic error — it drops arguments the code really passes, or invents ones it
+does not, in output an analyst is reading to decide what a binary does.
+
+Two things would make it viable, and either is worth doing before the table is:
+
+- **Read the arity from the DLL.** An x86 `__stdcall` export cleans its own
+  stack, so the `ret N` at the end of `user32!SendMessageW` states the argument
+  count exactly. Resolving imports against the DLLs on disk gives verified arity
+  for 32-bit binaries, with no table at all. It costs the ability to analyse a
+  binary whose DLLs are not present, so it belongs behind an option.
+- **Ship a checked data file.** A signature table generated from the SDK
+  headers, kept as data rather than code, with its provenance recorded — the
+  same shape as an IDA type library.
+
+Until then argument *values* are shown, which is what the recovery can prove,
+and the parameter names are left out.
