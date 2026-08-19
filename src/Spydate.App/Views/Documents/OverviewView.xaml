@@ -74,6 +74,13 @@
                 </Border>
             </StackPanel>
 
+            <StackPanel Visibility="{Binding HasSignature, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="Code signature" Style="{StaticResource SectionHeader}" />
+                <Border Style="{StaticResource Card}">
+                    <ItemsControl ItemsSource="{Binding Signature}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
+                </Border>
+            </StackPanel>
+
             <StackPanel Visibility="{Binding HasBuild, Converter={StaticResource BoolToVisibility}}">
                 <TextBlock Text="Build toolchain (Rich header)" Style="{StaticResource SectionHeader}" />
                 <Border Style="{StaticResource Card}">

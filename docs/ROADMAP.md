@@ -43,7 +43,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   "referenced only" filter in the Strings view, the Xrefs panel following the
   selected string, and string literals annotated inline in disassembly
 - ⬜ PDB symbol loading (MSF/DBI) for local symbol names
-- ⬜ Authenticode signature summary (the certificate directory in the overlay)
+- ✅ Authenticode summary: the certificate table decoded to signer, issuer, serial,
+  digest algorithm, validity window and RFC 3161 timestamp (described, not verified)
 
 ## Phase 2 — Decompiler quality ⬜
 - ⬜ SSA construction (cross-block propagation), register aliasing normalisation

@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
 using Spydate.Core.Binary;
 
 namespace Spydate.Core.PE;
@@ -65,6 +67,7 @@ public sealed class PeImage
         LoadConfig = Guard(ParseLoadConfig, "load config directory", null);
         Resources = Guard(ParseResources, "resource directory", null);
         RichHeader = Guard(ParseRichHeader, "Rich header", null);
+        Signature = Guard(ParseSignature, "certificate table", null);
 
         Overlay = ComputeOverlay();
     }
@@ -139,6 +142,8 @@ public sealed class PeImage
     public ResourceNode? Resources { get; }
     /// <summary>Microsoft linker build stamp hidden in the DOS stub, or null.</summary>
     public RichHeader? RichHeader { get; }
+    /// <summary>Embedded code signature, described but not verified. Null when unsigned.</summary>
+    public AuthenticodeSignature? Signature { get; }
     public IReadOnlyList<string> Warnings => new ReadOnlyCollection<string>(_warnings);
 
     /// <summary>File offset and length of any data past the last section (0,0 if none).</summary>
@@ -1310,6 +1315,118 @@ public sealed class PeImage
         }
 
         return new RichHeader { Offset = (uint)startOffset, Checksum = key, Entries = entries };
+    }
+
+/// <summary>
+    /// Reads the certificate table. Unlike every other directory, its "RVA" is a raw file offset:
+    /// the data sits in the overlay, outside any section, so the loader never maps it.
+    /// </summary>
+    private AuthenticodeSignature? ParseSignature()
+    {
+        var dir = GetDirectory(DataDirectoryIndex.Security);
+        if (!dir.IsPresent)
+        {
+            return null;
+        }
+
+        long offset = dir.Rva;
+        if (offset + 8 > _data.Length)
+        {
+            _warnings.Add($"Certificate table at file offset 0x{offset:X} is outside the file.");
+            return null;
+        }
+
+        var r = new SpanReader(_data.Span, (int)offset);
+        uint length = r.ReadU32();
+        ushort revision = r.ReadU16();
+        var type = (CertificateType)r.ReadU16();
+
+        if (length < 8 || offset + length > _data.Length)
+        {
+            _warnings.Add($"Certificate table declares {length} bytes but only {_data.Length - offset} are present.");
+            length = (uint)Math.Max(8, Math.Min(length, _data.Length - offset));
+        }
+
+        var signature = new AuthenticodeSignature
+        {
+            Offset = offset,
+            Length = length,
+            Revision = revision,
+            Type = type,
+        };
+
+        if (type != CertificateType.PkcsSignedData)
+        {
+            return signature;
+        }
+
+        var blob = _data.Slice((int)offset + 8, (int)(length - 8));
+        return DescribeSignedData(signature, blob);
+    }
+
+    /// <summary>
+    /// Describes the PKCS#7 blob for display. Failure is never fatal: a malformed or unusual
+    /// signature still tells the user the file is signed, it just cannot be summarised.
+    /// </summary>
+    private static AuthenticodeSignature DescribeSignedData(AuthenticodeSignature signature, ReadOnlyMemory<byte> blob)
+    {
+        try
+        {
+            var cms = new SignedCms();
+            cms.Decode(blob.Span);
+
+            var signer = cms.SignerInfos.Count > 0 ? cms.SignerInfos[0] : null;
+            var certificate = signer?.Certificate;
+
+            return signature with
+            {
+                CertificateCount = cms.Certificates.Count,
+                SignerSubject = certificate?.Subject,
+                SignerIssuer = certificate?.Issuer,
+                SignerSerialNumber = certificate?.SerialNumber,
+                NotBefore = certificate is null ? null : new DateTimeOffset(certificate.NotBefore.ToUniversalTime()),
+                NotAfter = certificate is null ? null : new DateTimeOffset(certificate.NotAfter.ToUniversalTime()),
+                DigestAlgorithm = signer?.DigestAlgorithm.FriendlyName ?? signer?.DigestAlgorithm.Value,
+                Timestamp = signer is null ? null : FindTimestamp(signer),
+            };
+        }
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException or FormatException)
+        {
+            return signature with { ParseError = ex.Message };
+        }
+    }
+
+    /// <summary>
+    /// When the signature was timestamped. Two mechanisms exist: the modern RFC 3161 token, which
+    /// is what Windows binaries carry, and the legacy PKCS#9 countersignature.
+    /// </summary>
+    private static DateTimeOffset? FindTimestamp(SignerInfo signer)
+    {
+        const string Rfc3161TokenOid = "1.3.6.1.4.1.311.3.3.1";
+        const string SigningTimeOid = "1.2.840.113549.1.9.5";
+
+        foreach (var attribute in signer.UnsignedAttributes)
+        {
+            if (attribute.Oid.Value == Rfc3161TokenOid
+                && attribute.Values.Count > 0
+                && Rfc3161TimestampToken.TryDecode(attribute.Values[0].RawData, out var token, out _))
+            {
+                return token.TokenInfo.Timestamp;
+            }
+        }
+
+        foreach (var counter in signer.CounterSignerInfos)
+        {
+            foreach (var attribute in counter.SignedAttributes)
+            {
+                if (attribute.Oid.Value == SigningTimeOid && attribute.Values.Count > 0)
+                {
+                    return new Pkcs9SigningTime(attribute.Values[0].RawData).SigningTime;
+                }
+            }
+        }
+
+        return null;
     }
 
     private (uint, uint) ComputeOverlay()

@@ -12,6 +12,14 @@
     <PackageVersion Include="ICSharpCode.Decompiler" Version="9.1.0.7988" />
   </ItemGroup>
 
+  <ItemGroup Label="Runtime extensions">
+    <!--
+      PKCS#7 decoding for Authenticode summaries. Microsoft-owned and shipped with the runtime -
+      the only reason it needs a reference is that its contract lives outside the default set.
+    -->
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.11" />
+  </ItemGroup>
+
   <ItemGroup Label="UI">
     <!-- Fluent / WinUI-style controls for WPF (MIT). -->
     <PackageVersion Include="WPF-UI" Version="4.3.0" />

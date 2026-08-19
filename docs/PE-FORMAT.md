@@ -165,3 +165,20 @@ DWORDs, the pairs, then the literal `Rich` followed by the XOR key. Product ids
 are undocumented and build numbers are **not** ordered across Visual Studio
 releases (30729 = VS2008 SP1, 23026 = VS2015), so do not infer a version from
 them — the optional header's linker version is the reliable signal.
+
+## Certificate table (dir 4)
+
+The one directory whose "RVA" is really a **file offset**: the data sits in the
+overlay, past every section, so the loader never maps it. Layout is a chain of
+`WIN_CERTIFICATE` entries: dwLength u32 · wRevision u16 (0x0200) ·
+wCertificateType u16 (2 = PKCS#7 SignedData) · the blob, 8-byte aligned.
+
+The blob is a PKCS#7 SignedData whose content is a `SpcIndirectDataContent`
+holding the file's Authenticode hash. Timestamps come in two forms: the modern
+RFC 3161 token in the unsigned attribute `1.3.6.1.4.1.311.3.3.1` (what Windows
+binaries carry) and the legacy PKCS#9 countersignature with signing time
+`1.2.840.113549.1.9.5`.
+
+Spydate decodes and describes the signature; it does not verify it, which would
+mean re-hashing the file under the Authenticode rules (headers, the checksum
+field, the certificate directory itself and the overlay are excluded).

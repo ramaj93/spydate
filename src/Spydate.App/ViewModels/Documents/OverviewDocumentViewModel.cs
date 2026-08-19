@@ -38,6 +38,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             new("Exports", pe.Exports is { } ex ? $"{ex.Entries.Count} entries ({ex.Name})" : "(none)"),
             new("Resources", pe.Resources is { Children.Count: > 0 } res ? $"{res.Children.Count} types" : "(none)"),
             new("Relocations", pe.Relocations.Count > 0 ? $"{pe.RelocationCount:N0} fix-ups in {pe.Relocations.Count:N0} blocks" : "(none)"),
+            new("Signature", pe.Signature is { } s ? $"{s.CertificateCount} certificate(s), {s.Length:N0} bytes" : "(unsigned or catalog-signed)"),
             new("Overlay", pe.Overlay.Length > 0 ? $"{pe.Overlay.Length:N0} bytes at 0x{pe.Overlay.Offset:X}" : "(none)"),
         };
 
@@ -64,6 +65,31 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 "TLS callbacks",
                 tls.CallbackVas.Count == 0 ? "(none)" : string.Join(", ", tls.CallbackVas.Select(v => $"0x{v:X}")),
                 tls.CallbackVas.Count > 0 ? "run before the entry point" : null));
+        }
+
+        Signature = new List<PropertyRow>();
+        if (pe.Signature is { } sig)
+        {
+            Signature.Add(new PropertyRow("Format", $"{sig.Type} (revision 0x{sig.Revision:X4})", $"{sig.Length:N0} bytes at 0x{sig.Offset:X}"));
+            if (sig.ParseError is { } error)
+            {
+                Signature.Add(new PropertyRow("Signature", "could not be decoded", error));
+            }
+            else
+            {
+                Signature.Add(new PropertyRow("Signed by", sig.SignerSubject ?? "(unknown)"));
+                Signature.Add(new PropertyRow("Issued by", sig.SignerIssuer ?? "(unknown)"));
+                Signature.Add(new PropertyRow("Serial", sig.SignerSerialNumber ?? "(none)"));
+                Signature.Add(new PropertyRow("Digest", sig.DigestAlgorithm ?? "(unknown)", $"{sig.CertificateCount} certificate(s) in the chain"));
+                Signature.Add(new PropertyRow(
+                    "Certificate valid",
+                    sig.NotBefore is { } from && sig.NotAfter is { } to ? $"{from:yyyy-MM-dd} … {to:yyyy-MM-dd}" : "(unknown)",
+                    sig.CertificateCurrentlyValid switch { true => "current", false => "expired or not yet valid", null => null }));
+                Signature.Add(new PropertyRow("Timestamped", sig.Timestamp is { } signedAt ? $"{signedAt:yyyy-MM-dd HH:mm:ss} UTC" : "(not timestamped)"));
+            }
+
+            // Being explicit: parsing the certificate is not the same as checking the file's hash.
+            Signature.Add(new PropertyRow("Verification", "not performed", "the embedded certificate is described, not validated against the file"));
         }
 
         Build = pe.RichHeader is { } rich
@@ -122,6 +148,9 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
     /// <summary>Mitigations and loader-visible security data (load config, CFG, TLS).</summary>
     public List<PropertyRow> Security { get; }
     public bool HasSecurity => Security.Count > 0;
+    /// <summary>Embedded Authenticode signature, described but not verified.</summary>
+    public List<PropertyRow> Signature { get; }
+    public bool HasSignature => Signature.Count > 0;
     /// <summary>Toolchain stamp decoded from the Rich header.</summary>
     public List<PropertyRow> Build { get; }
     public bool HasBuild => Build.Count > 0;
