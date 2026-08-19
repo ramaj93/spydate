@@ -18,8 +18,19 @@ public sealed class BinaryAnalysis
     /// <summary>How many times the gap sweep re-runs; each round can expose calls into new gaps.</summary>
     private const int MaxSweepRounds = 3;
 
+    /// <summary>
+    /// Instruction budget for a swept candidate. Decoding data produces plausible-looking x86 that
+    /// branches all over the section, so an unbounded probe spends most of its time proving that
+    /// bytes are not code. A candidate that needs more than this is rejected rather than truncated.
+    /// </summary>
+    private const int CandidateInstructionBudget = 2000;
+
     private readonly ConcurrentDictionary<ulong, Function> _functions = new();
     private readonly FunctionDiscovery _discovery;
+    /// <summary>Discovery for swept candidates, with a tight budget: see TryDiscoverCandidate.</summary>
+    private readonly FunctionDiscovery _candidateDiscovery;
+    /// <summary>Addresses already proven not to be functions, so later sweep rounds skip them.</summary>
+    private readonly HashSet<ulong> _rejectedCandidates = new();
     private readonly XrefExtractor _xrefExtractor;
     private readonly Lazy<StringIndex> _strings;
     private readonly DiscoveryOptions _options;
@@ -54,7 +65,9 @@ public sealed class BinaryAnalysis
         Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
         options ??= DiscoveryOptions.Default;
         _options = options;
-        _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, options.IsNoReturn is null ? options with { IsNoReturn = IsNoReturn } : options);
+        var discoveryOptions = options.IsNoReturn is null ? options with { IsNoReturn = IsNoReturn } : options;
+        _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, discoveryOptions);
+        _candidateDiscovery = new FunctionDiscovery(Source, Disassembler, Symbols, discoveryOptions with { MaxInstructionsPerFunction = CandidateInstructionBudget });
         _xrefExtractor = new XrefExtractor(Source);
         // Scanning touches every byte of the file, so it waits until something asks for a string.
         _strings = new Lazy<StringIndex>(
@@ -275,6 +288,8 @@ public sealed class BinaryAnalysis
     private int SweepGaps(int maxFunctions, Queue<(ulong Va, string? Name)> queue, HashSet<ulong> queued, IProgress<AnalysisProgress>? progress, CancellationToken cancellationToken)
     {
         int found = 0;
+        int probed = 0;
+
         foreach (var section in Image.Sections)
         {
             if (!section.IsExecutable || section.SizeOfRawData == 0)
@@ -286,24 +301,45 @@ public sealed class BinaryAnalysis
             ulong sectionStart = Image.RvaToVa(section.VirtualAddress);
             var covered = BuildCoverage(sectionStart, size);
 
-            for (int offset = 0; offset < size && _functions.Count < maxFunctions; offset++)
+            // Read the section once: probing through the code source per byte would repeat a
+            // section lookup for every candidate offset and dominate the runtime.
+            var body = Image.ReadAtRva(section.VirtualAddress, (int)size);
+            if (body.IsEmpty)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (covered[offset])
+                continue;
+            }
+
+            var span = body.Span;
+            bool atLimit = false;
+            for (int offset = 0; offset < span.Length && !atLimit; offset++)
+            {
+                // ConcurrentDictionary.Count takes every lock, so it is checked periodically rather
+                // than per byte - the loop runs once for each byte of every executable section.
+                if ((offset & 0xFFF) == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    atLimit = _functions.Count >= maxFunctions;
+                }
+
+                if (covered[offset] || FunctionPrologues.IsPadding(span[offset]))
+                {
+                    continue;
+                }
+
+                int window = Math.Min(16, span.Length - offset);
+                if (!FunctionPrologues.LooksLikeFunctionStart(span.Slice(offset, window), Image.Bitness))
                 {
                     continue;
                 }
 
                 ulong va = sectionStart + (ulong)offset;
-                var bytes = Source.Read(va, 16);
-                if (bytes.IsEmpty)
+                if (_rejectedCandidates.Contains(va))
                 {
-                    break;
+                    continue;
                 }
 
-                if (FunctionPrologues.IsPadding(bytes.Span[0])
-                    || !FunctionPrologues.LooksLikeFunctionStart(bytes.Span, Image.Bitness)
-                    || TryDiscoverCandidate(va) is not { } function)
+                probed++;
+                if (TryDiscoverCandidate(va) is not { } function)
                 {
                     continue;
                 }
@@ -322,6 +358,10 @@ public sealed class BinaryAnalysis
             }
         }
 
+        progress?.Report(new AnalysisProgress(
+            _functions.Count,
+            queue.Count,
+            $"gap sweep: {probed} candidates, {found} accepted"));
         return found;
     }
 
@@ -363,11 +403,14 @@ public sealed class BinaryAnalysis
             return existing;
         }
 
-        var candidate = NameHelpers(_discovery.Discover(va, null, BoundsFor(va)), null);
-        if (!IsPlausibleFunction(candidate))
+        var candidate = _candidateDiscovery.Discover(va, null, BoundsFor(va));
+        if (candidate.InstructionCount >= CandidateInstructionBudget || !IsPlausibleFunction(candidate))
         {
+            _rejectedCandidates.Add(va);
             return null;
         }
+
+        candidate = NameHelpers(candidate, null);
 
         if (_functions.TryAdd(va, candidate))
         {
