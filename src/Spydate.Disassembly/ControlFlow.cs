@@ -72,6 +72,10 @@ public sealed class Function
         BlockByVa = blocks.ToDictionary(b => b.StartVa);
     }
 
+    /// <summary>A copy under a different name, for when the body identifies the function.</summary>
+    public Function WithName(string name)
+        => new(EntryVa, name, Blocks, CallTargets, IndirectCallSlots, Notes) { BoundsEnd = BoundsEnd };
+
     public ulong EntryVa { get; }
 
     public string Name { get; }

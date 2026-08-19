@@ -29,10 +29,13 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ ARM64 unwind format
 - ⬜ Decode resource leaves (version info, manifests, string tables) instead of raw bytes
 - ⬜ Map Rich header product ids to tool names (needs the undocumented prodid table)
-- ⬜ Linear‑sweep gap filling + prologue heuristics for function discovery
+- ✅ Gap sweeping: after seeds and calls are exhausted, the leftover bytes of executable
+  sections are scanned for prologues (x86 notepad: 606 → 677 functions)
 - ✅ No-return functions (`ExitProcess`, `__fastfail`, `abort`, …, and thunks that
   tail-jump to one) end a code path instead of decoding the bytes after the call
-- ⬜ Recognise CRT frame helpers (`__SEH_prolog4`, `__EH_prolog`, `__chkstk`)
+- ✅ CRT helpers named from the load config (`__security_cookie`, `_guard_check_icall`,
+  `_guard_dispatch_icall`) and from instruction signatures (`__chkstk`/`_chkstk`,
+  `__security_check_cookie`, `__SEH_prolog4`, `__EH_prolog`)
 - ✅ Cross‑references (calls, jumps, reads, writes, address-taken, IAT usage),
   Xrefs panel and a per-function reference count
 - ✅ String scanning (ASCII + UTF‑16, both parities) with a Strings document

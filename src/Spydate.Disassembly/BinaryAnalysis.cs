@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using Spydate.Core.PE;
 using Spydate.Core.Strings;
@@ -14,10 +15,14 @@ public readonly record struct AnalysisProgress(int FunctionsFound, int Pending, 
 /// </summary>
 public sealed class BinaryAnalysis
 {
+    /// <summary>How many times the gap sweep re-runs; each round can expose calls into new gaps.</summary>
+    private const int MaxSweepRounds = 3;
+
     private readonly ConcurrentDictionary<ulong, Function> _functions = new();
     private readonly FunctionDiscovery _discovery;
     private readonly XrefExtractor _xrefExtractor;
     private readonly Lazy<StringIndex> _strings;
+    private readonly DiscoveryOptions _options;
 
     /// <summary>
     /// Functions the CRT and the Win32 API never return from. A call to one of these ends a code
@@ -48,6 +53,7 @@ public sealed class BinaryAnalysis
         Source = new PeCodeSource(image);
         Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
         options ??= DiscoveryOptions.Default;
+        _options = options;
         _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, options.IsNoReturn is null ? options with { IsNoReturn = IsNoReturn } : options);
         _xrefExtractor = new XrefExtractor(Source);
         // Scanning touches every byte of the file, so it waits until something asks for a string.
@@ -64,6 +70,8 @@ public sealed class BinaryAnalysis
                 _noReturn.Add(symbol.Va);
             }
         }
+
+        CrtHelpers.ApplyLoadConfigSymbols(image, Symbols);
 
         foreach (var rf in image.ExceptionTable)
         {
@@ -110,7 +118,7 @@ public sealed class BinaryAnalysis
     {
         return _functions.GetOrAdd(entryVa, va =>
         {
-            var f = _discovery.Discover(va, name, BoundsFor(va));
+            var f = NameHelpers(_discovery.Discover(va, name, BoundsFor(va)), name);
             Symbols.Add(new Symbol(va, f.Name, SymbolKind.Function, f.CodeSize));
             RecordIfNoReturnThunk(f);
             // The extractor is not thread-safe, but GetOrAdd's factory may run concurrently.
@@ -207,13 +215,48 @@ public sealed class BinaryAnalysis
         }
 
         progress?.Report(new AnalysisProgress(0, queue.Count, $"{queue.Count} seeds"));
+        Drain();
 
-        int processed = 0;
-        while (queue.Count > 0 && _functions.Count < maxFunctions)
+        // Everything reachable from a seed is now known. What is left in executable memory is
+        // either data or a function nothing points at directly: leaf functions on x64, and most of
+        // an x86 image, which has no unwind table to seed from.
+        if (_options.SweepGapsForFunctions)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var (va, name) = queue.Dequeue();
-            var f = GetOrDiscoverFunction(va, name);
+            for (int round = 0; round < MaxSweepRounds && _functions.Count < maxFunctions; round++)
+            {
+                int found = SweepGaps(maxFunctions, queue, queued, progress, cancellationToken);
+                if (found == 0)
+                {
+                    break;
+                }
+
+                progress?.Report(new AnalysisProgress(_functions.Count, queue.Count, $"gap sweep found {found}"));
+                Drain();
+            }
+        }
+
+        progress?.Report(new AnalysisProgress(_functions.Count, queue.Count, "Discovery complete"));
+        return Functions;
+
+        void Drain()
+        {
+            int processed = 0;
+            while (queue.Count > 0 && _functions.Count < maxFunctions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var (va, name) = queue.Dequeue();
+                var f = GetOrDiscoverFunction(va, name);
+                Enqueue(f);
+
+                if (++processed % 64 == 0)
+                {
+                    progress?.Report(new AnalysisProgress(_functions.Count, queue.Count, $"Analyzing {f.Name}"));
+                }
+            }
+        }
+
+        void Enqueue(Function f)
+        {
             foreach (ulong target in f.CallTargets)
             {
                 if (queued.Add(target) && Source.IsExecutable(target))
@@ -221,15 +264,158 @@ public sealed class BinaryAnalysis
                     queue.Enqueue((target, null));
                 }
             }
+        }
+    }
 
-            if (++processed % 64 == 0)
+    /// <summary>
+    /// Scans the uncovered bytes of every executable section for function prologues. Padding is
+    /// skipped and candidates that do not decode into a plausible function are discarded rather
+    /// than cached, because a false positive attributes real code to the wrong function.
+    /// </summary>
+    private int SweepGaps(int maxFunctions, Queue<(ulong Va, string? Name)> queue, HashSet<ulong> queued, IProgress<AnalysisProgress>? progress, CancellationToken cancellationToken)
+    {
+        int found = 0;
+        foreach (var section in Image.Sections)
+        {
+            if (!section.IsExecutable || section.SizeOfRawData == 0)
             {
-                progress?.Report(new AnalysisProgress(_functions.Count, queue.Count, $"Analyzing {f.Name}"));
+                continue;
+            }
+
+            uint size = section.VirtualSize == 0 ? section.SizeOfRawData : Math.Min(section.VirtualSize, section.SizeOfRawData);
+            ulong sectionStart = Image.RvaToVa(section.VirtualAddress);
+            var covered = BuildCoverage(sectionStart, size);
+
+            for (int offset = 0; offset < size && _functions.Count < maxFunctions; offset++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (covered[offset])
+                {
+                    continue;
+                }
+
+                ulong va = sectionStart + (ulong)offset;
+                var bytes = Source.Read(va, 16);
+                if (bytes.IsEmpty)
+                {
+                    break;
+                }
+
+                if (FunctionPrologues.IsPadding(bytes.Span[0])
+                    || !FunctionPrologues.LooksLikeFunctionStart(bytes.Span, Image.Bitness)
+                    || TryDiscoverCandidate(va) is not { } function)
+                {
+                    continue;
+                }
+
+                found++;
+                Mark(covered, sectionStart, size, function);
+                foreach (ulong target in function.CallTargets)
+                {
+                    if (queued.Add(target) && Source.IsExecutable(target))
+                    {
+                        queue.Enqueue((target, null));
+                    }
+                }
+
+                offset = (int)Math.Max((long)offset, (long)(function.EndVa - sectionStart) - 1);
             }
         }
 
-        progress?.Report(new AnalysisProgress(_functions.Count, queue.Count, "Discovery complete"));
-        return Functions;
+        return found;
+    }
+
+    /// <summary>Bitmap of the section's bytes that already belong to a discovered function.</summary>
+    private BitArray BuildCoverage(ulong sectionStart, uint size)
+    {
+        var covered = new BitArray((int)size);
+        foreach (var f in _functions.Values)
+        {
+            Mark(covered, sectionStart, size, f);
+        }
+
+        return covered;
+    }
+
+    private static void Mark(BitArray covered, ulong sectionStart, uint size, Function function)
+    {
+        foreach (var block in function.Blocks)
+        {
+            if (block.EndVa <= sectionStart || block.StartVa >= sectionStart + size)
+            {
+                continue;
+            }
+
+            int from = (int)Math.Max(0, (long)(block.StartVa - sectionStart));
+            int to = (int)Math.Min(size, block.EndVa - sectionStart);
+            for (int i = from; i < to; i++)
+            {
+                covered[i] = true;
+            }
+        }
+    }
+
+    /// <summary>Discovers a swept candidate, caching it only if it decodes into something believable.</summary>
+    private Function? TryDiscoverCandidate(ulong va)
+    {
+        if (_functions.TryGetValue(va, out var existing))
+        {
+            return existing;
+        }
+
+        var candidate = NameHelpers(_discovery.Discover(va, null, BoundsFor(va)), null);
+        if (!IsPlausibleFunction(candidate))
+        {
+            return null;
+        }
+
+        if (_functions.TryAdd(va, candidate))
+        {
+            Symbols.Add(new Symbol(va, candidate.Name, SymbolKind.Function, candidate.CodeSize));
+            RecordIfNoReturnThunk(candidate);
+        }
+
+        return _functions[va];
+    }
+
+    /// <summary>
+    /// Replaces an auto-generated name with the CRT helper the body identifies, when it does. A
+    /// caller-supplied name (an export, a TLS callback) always wins: it came from the image itself.
+    /// </summary>
+    private Function NameHelpers(Function function, string? requestedName)
+    {
+        if (requestedName is not null || Symbols.TryGet(function.EntryVa, out var known) && known.Kind != SymbolKind.Section)
+        {
+            return function;
+        }
+
+        return CrtHelpers.Identify(function, Image) is { } helper ? function.WithName(helper) : function;
+    }
+
+    /// <summary>
+    /// A swept candidate has to look like real code: no invalid instructions, and either a proper
+    /// terminator or enough instructions that a chance byte sequence is unlikely. A lone jump is
+    /// accepted because import thunks are exactly that.
+    /// </summary>
+    private static bool IsPlausibleFunction(Function candidate)
+    {
+        if (candidate.InstructionCount == 0)
+        {
+            return false;
+        }
+
+        if (candidate.Instructions.Any(i => i.Flow == InstructionFlow.Invalid))
+        {
+            return false;
+        }
+
+        if (candidate.InstructionCount == 1)
+        {
+            return candidate.Blocks[0].Last.Flow is InstructionFlow.UnconditionalBranch or InstructionFlow.IndirectBranch;
+        }
+
+        return candidate.Blocks.Any(b => b.Last.Flow is InstructionFlow.Return or InstructionFlow.IndirectBranch or InstructionFlow.UnconditionalBranch)
+               || candidate.InstructionCount >= 4;
     }
 
     /// <summary>Linear disassembly of up to <paramref name="byteCount"/> bytes starting at <paramref name="va"/>.</summary>

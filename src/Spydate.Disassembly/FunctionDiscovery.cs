@@ -27,6 +27,13 @@ public sealed record DiscoveryOptions
     /// </summary>
     public bool SweepUnreachedBytes { get; init; } = true;
 
+    /// <summary>
+    /// After following every seed and call, scan the leftover bytes of executable sections for
+    /// function prologues. Finds leaf functions on x64 and most of an x86 image, which has no
+    /// unwind table to seed from.
+    /// </summary>
+    public bool SweepGapsForFunctions { get; init; } = true;
+
     public static DiscoveryOptions Default { get; } = new();
 }
 
