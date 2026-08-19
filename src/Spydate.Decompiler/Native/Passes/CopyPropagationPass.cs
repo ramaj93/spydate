@@ -3,9 +3,10 @@ using Spydate.Decompiler.Native.IR;
 namespace Spydate.Decompiler.Native.Passes;
 
 /// <summary>
-/// Per-block forward substitution: when a register/temp/local is assigned an expression and later read
-/// before being redefined (and none of the expression's inputs changed in between), the read is replaced
-/// by the expression. Cheap values (constants, registers, symbols) are forwarded to every reader; complex
+/// Forward substitution: when a register/temp/local is assigned an expression and later read before being
+/// redefined (and none of the expression's inputs changed in between), the read is replaced by the
+/// expression. Values that every predecessor agrees on reach a block from outside it (see
+/// <see cref="ReachingValues"/>), so a register set in one block can be read as its value in the next. Cheap values (constants, registers, symbols) are forwarded to every reader; complex
 /// expressions only when there is exactly one reader, to avoid duplicating work in the output.
 /// Definitions whose readers were all replaced and that are redefined later in the block are removed;
 /// a call's dead result register is dropped instead of removing the call.
@@ -16,17 +17,23 @@ public sealed class CopyPropagationPass : IIrPass
 
     public void Run(IrFunction function)
     {
+        var incoming = ReachingValues.Compute(function);
         foreach (var block in function.Blocks)
         {
+            var seeds = incoming.TryGetValue(block.StartVa, out var values) ? values : NoSeeds;
+
             // Dry run to learn how many readers each definition has and whether it dies inside the
             // block, then the real pass.
-            var facts = Process(block, function.Bitness, dryRun: true, null);
-            Process(block, function.Bitness, dryRun: false, facts);
+            var facts = Process(block, function.Bitness, dryRun: true, null, seeds);
+            Process(block, function.Bitness, dryRun: false, facts, seeds);
         }
     }
 
+    private static readonly List<(IrExpr Var, IrExpr Value)> NoSeeds = new();
+
     private sealed class Def
     {
+        /// <summary>Index of the defining statement, or negative for a value that arrived from another block.</summary>
         public required int Index;
         public required IrExpr Var;
         public required IrExpr Value;
@@ -38,11 +45,23 @@ public sealed class CopyPropagationPass : IIrPass
         public bool Redefined;
     }
 
-    private static Dictionary<int, Def> Process(IrBlock block, int bitness, bool dryRun, Dictionary<int, Def>? facts)
+    private static Dictionary<int, Def> Process(IrBlock block, int bitness, bool dryRun, Dictionary<int, Def>? facts, List<(IrExpr Var, IrExpr Value)> seeds)
     {
         var stmts = block.Statements;
         var live = new List<Def>();
         var all = new List<Def>();
+
+        // Values the block inherits. They have no defining statement here, so they are never removed.
+        int seedIndex = 0;
+        foreach (var (variable, value) in seeds)
+        {
+            var seed = new Def
+            {
+                Index = --seedIndex, Var = variable, Value = value, ReadsMemory = false, IsCallResult = false,
+            };
+            live.Add(seed);
+            all.Add(seed);
+        }
 
         for (int i = 0; i < stmts.Count; i++)
         {
@@ -217,6 +236,11 @@ public sealed class CopyPropagationPass : IIrPass
         var dropResult = new HashSet<int>();
         foreach (var def in all)
         {
+            if (def.Index < 0)
+            {
+                continue; // defined in another block
+            }
+
             bool allReadersReplaced = def.Reads == def.Substituted;
             bool deadAtEnd = def.Redefined || def.Var is IrTemp;
             if (!allReadersReplaced || !deadAtEnd)

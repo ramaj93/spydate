@@ -112,7 +112,7 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    spell `"@SVWH"` in ASCII, and naming a call target after them would be worse
    than useless. Runs before copy propagation so a literal reaches the call that
    uses it.
-3. `CopyPropagationPass` (per block) — two-pass forward substitution: cheap
+3. `ReachingValues` + `CopyPropagationPass` — two-pass forward substitution: cheap
    values (constants, registers, symbols, locals) are forwarded to every reader,
    complex expressions only to a single reader, and a call result only into the
    very next statement. Tracks kills with register aliasing (`al` vs `eax` vs
@@ -124,9 +124,22 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    possible fastcall arguments). A call result only moves into its reader when
    the result register is dead afterwards: otherwise the call would be left
    behind as well as moved, and the output would show it happening twice.
+   `ReachingValues` carries values into a block from outside it: a value survives a
+   join only when every predecessor agrees on it and it is one that cannot change
+   behind our back (constant, register, frame address, literal — never a memory read
+   or a call). Predecessors not yet processed, i.e. the back edge of a loop, count as
+   agreeing on nothing, which costs some propagation at loop headers and needs no
+   fixpoint. This is the sound half of SSA; phi nodes and renaming are not built.
 4. `AlgebraicSimplificationPass` — constant folding, `(x - 40) + 40 → x`,
    `x + 0 → x`, `x * 0`, `x & 0`, no-op casts, drops `mov edi, edi`-style self
    assignments.
+5. `DeadCodeEliminationPass` — liveness over the whole function (backward fixpoint,
+   registers keyed by their widest alias), removing assignments nothing reads again
+   and dropping the result register of a call nobody consumes. Conservative where it
+   has to be: a call keeps the argument registers live (on x86 always, on x64 only
+   when argument recovery found nothing), a partial write such as `al` never kills
+   the register it sits in, and a block whose successors are unknown — an unresolved
+   indirect jump — is treated as though every register were live after it.
 
 Planned: full SSA (cross-block propagation), return‑value inference, type
 propagation from imports (uses `PeImage.Imports` names + a small Win32 API type

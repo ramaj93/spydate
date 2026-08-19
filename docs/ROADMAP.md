@@ -55,7 +55,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   digest algorithm, validity window and RFC 3161 timestamp (described, not verified)
 
 ## Phase 2 — Decompiler quality 🚧
-- ⬜ SSA construction (cross-block propagation), register aliasing normalisation
+- ✅ Cross-block propagation: values every predecessor agrees on reach a block from
+  outside it, so a register set in one block reads as its value in the next. Only
+  values that cannot change behind the analysis (constants, registers, frame
+  addresses, literals) cross a boundary; a loop header inherits nothing rather than
+  guessing. Phi nodes and full SSA renaming are still not built
+- ✅ Dead-code elimination over whole-function liveness: assignments no one reads
+  again go, and a call result nobody wants loses its `rax =`. A call keeps its
+  argument registers alive, and a block with unknown successors keeps everything
 - ⬜ x86 fastcall/thiscall register arguments; return-value inference; float args
 - ✅ Control‑flow structuring: `if`/`else if`/`else`, `while`, `do`/`while`,
   `break`/`continue`, from dominators and post-dominators. Edges no structure
