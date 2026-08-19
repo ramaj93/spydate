@@ -74,7 +74,7 @@ public sealed class Function
 
     /// <summary>A copy under a different name, for when the body identifies the function.</summary>
     public Function WithName(string name)
-        => new(EntryVa, name, Blocks, CallTargets, IndirectCallSlots, Notes) { BoundsEnd = BoundsEnd };
+        => new(EntryVa, name, Blocks, CallTargets, IndirectCallSlots, Notes) { BoundsEnd = BoundsEnd, JumpTables = JumpTables };
 
     public ulong EntryVa { get; }
 
@@ -93,6 +93,9 @@ public sealed class Function
 
     /// <summary>Human-readable analysis notes (paths that could not be followed etc.).</summary>
     public IReadOnlyList<string> Notes { get; }
+
+    /// <summary>Switch tables recovered from indirect jumps in this function.</summary>
+    public IReadOnlyList<JumpTable> JumpTables { get; init; } = Array.Empty<JumpTable>();
 
     /// <summary>
     /// End address from the x64 unwind table when the image declares one. Authoritative, unlike

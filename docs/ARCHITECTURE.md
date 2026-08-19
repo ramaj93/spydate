@@ -129,6 +129,16 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   entry point, TLS callbacks, exports, non-chained `.pdata` entries, then the
   Control Flow Guard and SafeSEH tables (addresses the image itself declares as
   legal indirect-call targets). Deduplicated and filtered to executable memory.
+- `JumpTables` — switch dispatch recovery. Reads back over the instructions
+  physically preceding an indirect jump (the linear run only: following branches
+  backwards would mean guessing which path set the index) and matches two MSVC
+  forms — 32-bit `jmp [idx*4 + table]`, where the entry is the address, and
+  64-bit `lea base,[rip+X]` / `mov e,[base+idx*4+rva]` / `add`/`jmp`, where the
+  entry is a delta from the base the `lea` loaded. The `cmp`/`ja` pair in front
+  of the dispatch bounds the read; without one, entries are read until one is not
+  executable or leaves the function. `FunctionDiscovery` follows the recovered
+  targets, so the case bodies belong to the function instead of being left to the
+  gap sweep, and `Function.JumpTables` records what was found.
 - `XrefTable` / `XrefExtractor` — the cross-reference index. Every function that
   gets discovered is scanned for references: direct calls and jumps, indirect
   ones through a known slot (`call [iat]`), memory operands with a statically

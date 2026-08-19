@@ -66,7 +66,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   symbol), `&data_XXXX` for a pointer, `sub_XXXX` for a function pointer, and the
   text itself for a string literal
 - ⬜ Type propagation from import signatures (small Win32 API DB)
-- ⬜ Switch‑table (jump table) recovery
+- ✅ Switch-table recovery: the 32-bit `jmp [idx*4 + table]` form and the 64-bit
+  `lea base,[rip+X]` / `mov e,[base+idx*4+rva]` / `add`/`jmp` form, bounded by the
+  range check in front of them and validated entry by entry; the case bodies are
+  then followed as part of the function (kernel32 x64: 8 tables, shell32: 14)
 - ⬜ SSE/AVX float lifting subset
 
 ## Phase 3 — UI ⬜

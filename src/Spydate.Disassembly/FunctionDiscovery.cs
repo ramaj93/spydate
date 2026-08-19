@@ -34,6 +34,12 @@ public sealed record DiscoveryOptions
     /// </summary>
     public bool SweepGapsForFunctions { get; init; } = true;
 
+    /// <summary>
+    /// Recover the targets behind an indirect jump that reads a switch table, and follow them. Off,
+    /// the path simply ends and the case bodies are left to the gap sweep.
+    /// </summary>
+    public bool FollowJumpTables { get; init; } = true;
+
     public static DiscoveryOptions Default { get; } = new();
 }
 
@@ -71,6 +77,9 @@ public sealed class FunctionDiscovery
         var leaders = new HashSet<ulong> { entryVa };
         var callTargets = new List<ulong>();
         var indirectSlots = new List<ulong>();
+        var jumpTables = new List<JumpTable>();
+        // Physical predecessor of each decoded instruction, for reading back over a switch dispatch.
+        var previousOf = new Dictionary<ulong, ulong>();
         var notes = new List<string>();
         var work = new Stack<ulong>();
         work.Push(entryVa);
@@ -111,6 +120,7 @@ public sealed class FunctionDiscovery
                 }
 
                 instructions[ins.Va] = ins;
+                previousOf[ins.NextVa] = ins.Va;
 
                 if (ins.Flow == InstructionFlow.Invalid)
                 {
@@ -145,6 +155,18 @@ public sealed class FunctionDiscovery
                         {
                             indirectSlots.Add(slot);
                             // jmp [iat] is a tail-call thunk – path ends here.
+                        }
+                        else if (RecoverJumpTable(ins, previousOf, instructions, entryVa, boundsEnd) is { } table)
+                        {
+                            jumpTables.Add(table);
+                            foreach (ulong caseTarget in table.Targets)
+                            {
+                                leaders.Add(caseTarget);
+                                work.Push(caseTarget);
+                            }
+
+                            notes.Add($"Switch table at 0x{table.TableVa:X}: {table.Targets.Count} target(s) followed"
+                                      + (table.CountFromBoundsCheck ? " (bounded by the range check)." : " (entry count inferred from the entries themselves)."));
                         }
                         else
                         {
@@ -215,7 +237,40 @@ public sealed class FunctionDiscovery
         }
 
         var blocks = BuildBlocks(instructions, leaders);
-        return new Function(entryVa, name, blocks, callTargets, indirectSlots, notes) { BoundsEnd = boundsEnd };
+        return new Function(entryVa, name, blocks, callTargets, indirectSlots, notes)
+        {
+            BoundsEnd = boundsEnd,
+            JumpTables = jumpTables,
+        };
+    }
+
+    /// <summary>
+    /// Reads back over the instructions physically preceding an indirect jump and asks whether they are a
+    /// switch dispatch. Only the linear run is considered: that is how the compiler emits the range check
+    /// and the table load, and following branches backwards would mean guessing which path set the index.
+    /// </summary>
+    private JumpTable? RecoverJumpTable(DecodedInstruction jump, Dictionary<ulong, ulong> previousOf, SortedDictionary<ulong, DecodedInstruction> instructions, ulong entryVa, ulong? boundsEnd)
+    {
+        if (!_options.FollowJumpTables)
+        {
+            return null;
+        }
+
+        const int window = 16;
+        var trailing = new List<DecodedInstruction>(window) { jump };
+        ulong va = jump.Va;
+        while (trailing.Count < window && previousOf.TryGetValue(va, out ulong previous) && instructions.TryGetValue(previous, out var earlier))
+        {
+            trailing.Add(earlier);
+            va = previous;
+        }
+
+        trailing.Reverse();
+
+        // Without a range check, the function's own extent is the only thing keeping an over-long read
+        // from picking up the next switch's targets.
+        Func<ulong, bool>? accept = boundsEnd is { } end ? target => target >= entryVa && target < end : null;
+        return JumpTables.TryRecover(trailing, _source, accept);
     }
 
     private bool IsNoReturn(ulong va) => _options.IsNoReturn?.Invoke(va) ?? false;
