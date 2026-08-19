@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Spydate.Core.Strings;
 using Spydate.Decompiler.Native.IR;
 
 namespace Spydate.Decompiler.Native.CodeGen;
@@ -54,7 +55,14 @@ public static class IrPrinter
                 sb.Append(s.Name);
                 break;
             case IrAddressOf a:
-                sb.Append('&').Append(a.Local.Name);
+                sb.Append('&');
+                Write(sb, a.Target, PrecUnary);
+                break;
+            case IrGlobal g:
+                sb.Append(g.Name);
+                break;
+            case IrStringLiteral s:
+                sb.Append(s.Wide ? "L\"" : "\"").Append(StringLiterals.Escape(s.Text)).Append('"');
                 break;
             case IrUnknown u:
                 sb.Append('<').Append(u.Description).Append('>');

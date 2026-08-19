@@ -359,12 +359,12 @@ public sealed class StackFramePass : IIrPass
             {
                 // Rewriting is bottom-up, so by the time we see the IrMem its sp±k address has already
                 // become &local; turn the dereference of that into the local itself.
-                case IrMem { Address: IrAddressOf ao } m:
-                    return Local(ao.Local.FrameOffset, m.Bits);
-                case IrBinary { Op: IrBinaryOp.Add, Left: IrAddressOf ao, Right: IrConst c }:
-                    return new IrAddressOf(Local(ao.Local.FrameOffset + c.Value, 0), _fn.Bitness);
-                case IrBinary { Op: IrBinaryOp.Sub, Left: IrAddressOf ao, Right: IrConst c }:
-                    return new IrAddressOf(Local(ao.Local.FrameOffset - c.Value, 0), _fn.Bitness);
+                case IrMem { Address: IrAddressOf { Target: IrLocal ao } } m:
+                    return Local(ao.FrameOffset, m.Bits);
+                case IrBinary { Op: IrBinaryOp.Add, Left: IrAddressOf { Target: IrLocal ao }, Right: IrConst c }:
+                    return new IrAddressOf(Local(ao.FrameOffset + c.Value, 0), _fn.Bitness);
+                case IrBinary { Op: IrBinaryOp.Sub, Left: IrAddressOf { Target: IrLocal ao }, Right: IrConst c }:
+                    return new IrAddressOf(Local(ao.FrameOffset - c.Value, 0), _fn.Bitness);
                 case IrBinary or IrReg when FrameOffset(e, depth, aliases) is { } fo:
                     // A bare frame address (lea rax, [rsp+20h]) → &local.
                     return new IrAddressOf(Local(fo, 0), _fn.Bitness);
@@ -633,10 +633,10 @@ public sealed class StackFramePass : IIrPass
                         {
                             Add(reads, rl.Name, (block, i));
                         }
-                        else if (e is IrAddressOf ao)
+                        else if (e is IrAddressOf { Target: IrLocal ao })
                         {
-                            Add(reads, ao.Local.Name, (block, i));
-                            Add(reads, ao.Local.Name, (block, i)); // address taken: never elide
+                            Add(reads, ao.Name, (block, i));
+                            Add(reads, ao.Name, (block, i)); // address taken: never elide
                         }
                     }
                 }

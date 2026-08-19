@@ -17,22 +17,33 @@ public sealed class NativeDecompiler
     private readonly SymbolTable? _symbols;
     private readonly IReadOnlyList<IIrPass> _passes;
 
-    public NativeDecompiler(int bitness, SymbolTable? symbols = null, IReadOnlyList<IIrPass>? passes = null)
+    public NativeDecompiler(int bitness, SymbolTable? symbols = null, IReadOnlyList<IIrPass>? passes = null, GlobalNames? names = null)
     {
         _bitness = bitness;
         _symbols = symbols;
-        _passes = passes ?? DefaultPasses;
+        _passes = passes ?? DefaultPasses(names);
     }
 
-    public static IReadOnlyList<IIrPass> DefaultPasses { get; } = new IIrPass[]
+    public NativeDecompiler(BinaryAnalysis analysis)
+        : this(analysis.Image.Bitness, analysis.Symbols, names: GlobalNames.For(analysis))
     {
-        new StackFramePass(),
-        new CopyPropagationPass(),
-        new AlgebraicSimplificationPass(),
-    };
+    }
 
-    public NativeDecompiler(BinaryAnalysis analysis) : this(analysis.Image.Bitness, analysis.Symbols)
+    /// <summary>
+    /// The standard pipeline. Naming runs before copy propagation so a named global or a string literal
+    /// is what gets forwarded into the expression that uses it.
+    /// </summary>
+    public static IReadOnlyList<IIrPass> DefaultPasses(GlobalNames? names = null)
     {
+        var passes = new List<IIrPass> { new StackFramePass() };
+        if (names is not null)
+        {
+            passes.Add(new GlobalNamingPass(names));
+        }
+
+        passes.Add(new CopyPropagationPass());
+        passes.Add(new AlgebraicSimplificationPass());
+        return passes;
     }
 
     public DecompiledFunction Decompile(Function function)

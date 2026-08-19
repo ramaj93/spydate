@@ -37,10 +37,15 @@ public sealed class AlgebraicSimplificationPass : IIrPass
                 return Truncate(c.Value, cast.Bits, cast.Signed);
             case IrCast { Operand: var inner } cast when inner.Bits == cast.Bits && !cast.Signed:
                 return inner; // zero-extension to the same width is a no-op
-            case IrBinary { Op: IrBinaryOp.Mul, Right: IrConst { Value: 1 } } m:
+            case IrBinary { Op: IrBinaryOp.Mul or IrBinaryOp.SMul, Right: IrConst { Value: 1 } } m:
                 return m.Left;
+            // `imul rax, 0` is real code in the CRT's unrolled stores; folding it makes the store readable.
+            case IrBinary { Op: IrBinaryOp.Mul or IrBinaryOp.SMul, Right: IrConst { Value: 0 } } z:
+                return new IrConst(0, z.Bits);
             case IrBinary { Op: IrBinaryOp.And, Right: IrConst rc } a when rc.Bits > 0 && rc.Value == -1:
                 return a.Left;
+            case IrBinary { Op: IrBinaryOp.And, Right: IrConst { Value: 0 } } a0:
+                return new IrConst(0, a0.Bits);
             default:
                 return e;
         }

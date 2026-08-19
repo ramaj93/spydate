@@ -73,8 +73,24 @@ internal static class SyntheticPe
         return PeImage.Parse(file);
     }
 
-    /// <summary>A PE32+ image with one read-only section and one populated data directory.</summary>
-    private static byte[] NewImage(DataDirectoryIndex directory, uint directoryRva, uint directorySize, MachineType machine = MachineType.Amd64)
+    /// <summary>
+    /// An image whose single section is read-only data rather than code, for the analyses that ask what
+    /// kind of address they are looking at.
+    /// </summary>
+    public static PeImage WithDataSection(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length > SectionDataSize)
+        {
+            throw new ArgumentException($"payload must fit in {SectionDataSize} bytes", nameof(payload));
+        }
+
+        var file = NewImage(DataDirectoryIndex.BaseRelocation, 0, 0, executable: false);
+        payload.CopyTo(file.AsSpan(SectionDataOffset));
+        return PeImage.Parse(file);
+    }
+
+    /// <summary>A PE32+ image with one section and one populated data directory.</summary>
+    private static byte[] NewImage(DataDirectoryIndex directory, uint directoryRva, uint directorySize, MachineType machine = MachineType.Amd64, bool executable = true)
     {
         var file = new byte[FileSize];
         var span = file.AsSpan();
@@ -111,12 +127,21 @@ internal static class SyntheticPe
 
         // --- Section table ----------------------------------------------
         var section = opt[0xF0..];
-        ".text"u8.CopyTo(section);
+        if (executable)
+        {
+            ".text"u8.CopyTo(section);
+        }
+        else
+        {
+            ".rdata"u8.CopyTo(section);
+        }
+
         BinaryPrimitives.WriteUInt32LittleEndian(section[8..], SectionDataSize);      // VirtualSize
         BinaryPrimitives.WriteUInt32LittleEndian(section[12..], SectionRva);          // VirtualAddress
         BinaryPrimitives.WriteUInt32LittleEndian(section[16..], SectionDataSize);     // SizeOfRawData
         BinaryPrimitives.WriteUInt32LittleEndian(section[20..], SectionDataOffset);   // PointerToRawData
-        BinaryPrimitives.WriteUInt32LittleEndian(section[36..], 0x6000_0020);         // code, execute, read
+        // code+execute+read, or initialised data that is only readable.
+        BinaryPrimitives.WriteUInt32LittleEndian(section[36..], executable ? 0x6000_0020u : 0x4000_0040u);
 
         return file;
     }

@@ -49,7 +49,7 @@ public sealed class PseudoCEmitter
                 switch (e)
                 {
                     case IrLocal l: referenced.Add(l.Name); break;
-                    case IrAddressOf a: referenced.Add(a.Local.Name); break;
+                    case IrAddressOf { Target: IrLocal l2 }: referenced.Add(l2.Name); break;
                 }
             }
 

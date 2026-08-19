@@ -102,7 +102,17 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    registers fill gaps in the entry block); on x86 the values pushed since the
    previous call (forwarded into the call when unchanged in between, otherwise
    the named slot is passed).
-2. `CopyPropagationPass` (per block) — two-pass forward substitution: cheap
+2. `GlobalNamingPass` — replaces absolute addresses with names, using a
+   `GlobalNames` view of the image (symbols, discovered functions, scanned
+   strings). `*(uint32_t*)(0x14003A100)` becomes `data_14003A100`, a store to
+   one becomes an assignment to the name, an immediate that points at data
+   becomes `&data_XXXX`, one that points at a function becomes `sub_XXXX`, and
+   one that points at text becomes the text: `GetModuleHandleW(L"ntdll.dll")`.
+   Strings are only recognised outside executable sections — x64 prologue bytes
+   spell `"@SVWH"` in ASCII, and naming a call target after them would be worse
+   than useless. Runs before copy propagation so a literal reaches the call that
+   uses it.
+3. `CopyPropagationPass` (per block) — two-pass forward substitution: cheap
    values (constants, registers, symbols, locals) are forwarded to every reader,
    complex expressions only to a single reader, and a call result only into the
    very next statement. Tracks kills with register aliasing (`al` vs `eax` vs
@@ -111,9 +121,12 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    locals alive across calls (callees may read them), and removes definitions
    whose readers were all replaced and that are dead afterwards (redefined,
    clobbered, or a register at `return`; on x86 `ecx`/`edx` are kept as
-   possible fastcall arguments).
-3. `AlgebraicSimplificationPass` — constant folding, `(x - 40) + 40 → x`,
-   `x + 0 → x`, no-op casts, drops `mov edi, edi`-style self assignments.
+   possible fastcall arguments). A call result only moves into its reader when
+   the result register is dead afterwards: otherwise the call would be left
+   behind as well as moved, and the output would show it happening twice.
+4. `AlgebraicSimplificationPass` — constant folding, `(x - 40) + 40 → x`,
+   `x + 0 → x`, `x * 0`, `x & 0`, no-op casts, drops `mov edi, edi`-style self
+   assignments.
 
 Planned: full SSA (cross-block propagation), return‑value inference, type
 propagation from imports (uses `PeImage.Imports` names + a small Win32 API type

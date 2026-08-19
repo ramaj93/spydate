@@ -12,6 +12,7 @@ public static class IrRewriter
         IrExpr rebuilt = expr switch
         {
             IrMem m => Same(m, m.Address, Rewrite(m.Address, map), a => m with { Address = a }),
+            IrAddressOf ao => Same(ao, ao.Target, Rewrite(ao.Target, map), t => ao with { Target = t }),
             IrUnary u => Same(u, u.Operand, Rewrite(u.Operand, map), o => u with { Operand = o }),
             IrBinary b => RewriteBinary(b, map),
             IrCast c => Same(c, c.Operand, Rewrite(c.Operand, map), o => c with { Operand = o }),
@@ -89,6 +90,7 @@ public static class IrRewriter
             switch (e)
             {
                 case IrMem m: stack.Push(m.Address); break;
+                case IrAddressOf ao: stack.Push(ao.Target); break;
                 case IrUnary u: stack.Push(u.Operand); break;
                 case IrBinary b: stack.Push(b.Left); stack.Push(b.Right); break;
                 case IrCast c: stack.Push(c.Operand); break;
@@ -139,7 +141,8 @@ public static class IrRewriter
         _ => null,
     };
 
-    public static bool ContainsMemoryRead(IrExpr expr) => Descendants(expr).Any(e => e is IrMem);
+    /// <summary>A named global is a memory read too, so a store must invalidate anything that holds one.</summary>
+    public static bool ContainsMemoryRead(IrExpr expr) => Descendants(expr).Any(e => e is IrMem or IrGlobal);
 
     public static bool ContainsCallOrUnknown(IrExpr expr) => Descendants(expr).Any(e => e is IrCall or IrUnknown);
 }

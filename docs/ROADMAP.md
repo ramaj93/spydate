@@ -62,7 +62,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   covers keep a `goto`, and only those blocks keep a label; every block is still
   emitted exactly once (asserted over every function of both notepads)
 - ⬜ Switch statements (needs jump-table recovery below)
-- ⬜ Name global data (`data_XXXX`, string literals) instead of raw addresses
+- ✅ Global data named instead of printed as addresses: `data_XXXX` (or the
+  symbol), `&data_XXXX` for a pointer, `sub_XXXX` for a function pointer, and the
+  text itself for a string literal
 - ⬜ Type propagation from import signatures (small Win32 API DB)
 - ⬜ Switch‑table (jump table) recovery
 - ⬜ SSE/AVX float lifting subset

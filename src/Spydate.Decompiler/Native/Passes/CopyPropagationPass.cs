@@ -18,9 +18,10 @@ public sealed class CopyPropagationPass : IIrPass
     {
         foreach (var block in function.Blocks)
         {
-            // Dry run to learn how many readers each definition has, then the real pass.
-            var reads = Process(block, function.Bitness, dryRun: true, null);
-            Process(block, function.Bitness, dryRun: false, reads);
+            // Dry run to learn how many readers each definition has and whether it dies inside the
+            // block, then the real pass.
+            var facts = Process(block, function.Bitness, dryRun: true, null);
+            Process(block, function.Bitness, dryRun: false, facts);
         }
     }
 
@@ -37,7 +38,7 @@ public sealed class CopyPropagationPass : IIrPass
         public bool Redefined;
     }
 
-    private static Dictionary<int, int> Process(IrBlock block, int bitness, bool dryRun, Dictionary<int, int>? readCounts)
+    private static Dictionary<int, Def> Process(IrBlock block, int bitness, bool dryRun, Dictionary<int, Def>? facts)
     {
         var stmts = block.Statements;
         var live = new List<Def>();
@@ -79,12 +80,15 @@ public sealed class CopyPropagationPass : IIrPass
                     return e;
                 }
 
-                int expected = readCounts is not null && readCounts.TryGetValue(def.Index, out int n) ? n : int.MaxValue;
+                var known = facts is not null && facts.TryGetValue(def.Index, out var f) ? f : null;
+                int expected = known?.Reads ?? int.MaxValue;
                 if (def.IsCallResult)
                 {
                     // A call may only move into its single reader when that reader is the very next statement,
-                    // so no side effect is reordered.
-                    if (stmts[def.Index] is IrCallStmt { Result: not null } cs && expected == 1 && i == def.Index + 1)
+                    // so no side effect is reordered - and only when the result register is dead afterwards,
+                    // or the call would be left behind as well as moved, and appear to happen twice.
+                    bool diesInBlock = known is not null && (known.Redefined || def.Var is IrTemp);
+                    if (stmts[def.Index] is IrCallStmt { Result: not null } cs && expected == 1 && i == def.Index + 1 && diesInBlock)
                     {
                         def.Substituted++;
                         return cs.Call;
@@ -93,7 +97,7 @@ public sealed class CopyPropagationPass : IIrPass
                     return e;
                 }
 
-                bool cheap = def.Value is IrConst or IrReg or IrTemp or IrLocal or IrSymbol;
+                bool cheap = def.Value is IrConst or IrReg or IrTemp or IrLocal or IrSymbol or IrStringLiteral or IrAddressOf;
                 if (!cheap && expected != 1)
                 {
                     return e;
@@ -111,7 +115,9 @@ public sealed class CopyPropagationPass : IIrPass
 
             // 2. Kills.
             var written = IrRewriter.Destination(stmt);
-            bool storesMemory = stmt is IrStore;
+            // A write through a named global is still a memory write, so it must invalidate the same
+            // definitions an IrStore would.
+            bool storesMemory = stmt is IrStore or IrAssign { Dst: IrMem or IrGlobal };
             bool hasCall = stmt is IrCallStmt;
             foreach (var def in live)
             {
@@ -203,7 +209,7 @@ public sealed class CopyPropagationPass : IIrPass
 
         if (dryRun)
         {
-            return all.ToDictionary(d => d.Index, d => d.Reads);
+            return all.ToDictionary(d => d.Index);
         }
 
         // 4. Remove dead definitions.
@@ -247,7 +253,7 @@ public sealed class CopyPropagationPass : IIrPass
             }
         }
 
-        return new Dictionary<int, int>();
+        return new Dictionary<int, Def>();
     }
 
     private static bool Same(IrExpr a, IrExpr b) => (a, b) switch

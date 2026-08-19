@@ -89,11 +89,29 @@ public sealed record IrLocal(string Name, int Bits, long FrameOffset) : IrExpr
     public override string ToString() => Name;
 }
 
-/// <summary>Address of a named stack slot (<c>&amp;local_20</c>), produced when <c>lea</c> takes a frame address.</summary>
-public sealed record IrAddressOf(IrLocal Local, int Bits) : IrExpr
+/// <summary>Address of a named object: a stack slot from <c>lea</c>, or a global an immediate points at.</summary>
+public sealed record IrAddressOf(IrExpr Target, int Bits) : IrExpr
 {
     public override int Bits { get; } = Bits;
-    public override string ToString() => $"&{Local.Name}";
+    public override string ToString() => $"&{Target}";
+}
+
+/// <summary>
+/// A named object in the image - the thing at an address, not the address itself. Produced by
+/// <c>GlobalNamingPass</c> for absolute memory operands: <c>*(uint32_t*)(0x14003A100)</c> reads better
+/// as <c>data_14003A100</c>, and named when the symbol table knows what lives there.
+/// </summary>
+public sealed record IrGlobal(string Name, ulong Va, int Bits) : IrExpr
+{
+    public override int Bits { get; } = Bits;
+    public override string ToString() => Name;
+}
+
+/// <summary>A pointer to a scanned string literal, printed as the text it points at.</summary>
+public sealed record IrStringLiteral(string Text, ulong Va, bool Wide, int Bits) : IrExpr
+{
+    public override int Bits { get; } = Bits;
+    public override string ToString() => $"{(Wide ? "L" : string.Empty)}\"{Text}\"";
 }
 
 public sealed record IrMem(IrExpr Address, int Bits) : IrExpr

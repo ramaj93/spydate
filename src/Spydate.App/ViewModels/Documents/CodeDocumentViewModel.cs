@@ -164,47 +164,13 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
                 continue;
             }
 
-            string text = Escape(literal.Text);
+            string text = StringLiterals.Escape(literal.Text);
             ulong offset = xref.ToVa - start;
             string prefix = literal.Encoding == StringEncodingKind.Utf16 ? "L" : string.Empty;
             return offset == 0 ? $"{prefix}\"{text}\"" : $"{prefix}\"{text}\"+{offset}";
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Trims literal text and escapes what would break the line. Backslashes are left alone:
-    /// doubling them turns every Windows path in the listing into noise.
-    /// </summary>
-    private static string Escape(string text)
-    {
-        const int max = 60;
-        string trimmed = text.Length <= max ? text : text[..max] + "…";
-        var sb = new StringBuilder(trimmed.Length + 2);
-        foreach (char c in trimmed)
-        {
-            switch (c)
-            {
-                case '"':
-                    sb.Append("\\\"");
-                    break;
-                case '\r':
-                    sb.Append("\\r");
-                    break;
-                case '\n':
-                    sb.Append("\\n");
-                    break;
-                case '\t':
-                    sb.Append("\\t");
-                    break;
-                default:
-                    sb.Append(char.IsControl(c) ? '.' : c);
-                    break;
-            }
-        }
-
-        return sb.ToString();
     }
 
     private static string FormatFunction(BinaryAnalysis analysis, Function function)
