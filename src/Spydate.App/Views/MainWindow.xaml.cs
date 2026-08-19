@@ -96,6 +96,14 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    private void OnXrefDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (XrefGrid.SelectedItem is XrefRow row)
+        {
+            _viewModel.GoToXrefCommand.Execute(row);
+        }
+    }
+
     private void OnHideExplorerClick(object sender, RoutedEventArgs e) => IsExplorerVisible = false;
 
     private void OnHideOutputClick(object sender, RoutedEventArgs e) => IsOutputVisible = false;

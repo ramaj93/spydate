@@ -11,6 +11,9 @@ using Spydate.Disassembly;
 
 namespace Spydate.App.ViewModels;
 
+/// <summary>One row in the Xrefs panel: a site that refers to the current address.</summary>
+public sealed record XrefRow(string From, string Function, string Kind, string Instruction, ulong FromVa, ulong? FunctionEntryVa);
+
 /// <summary>Root view model: file commands, explorer tree, document tabs, output log, status.</summary>
 public sealed partial class MainViewModel : ObservableObject
 {
@@ -42,6 +45,12 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>Parser and analysis warnings for the current file.</summary>
     public ObservableCollection<string> Warnings { get; } = new();
+
+    /// <summary>References to the address the active document is about.</summary>
+    public ObservableCollection<XrefRow> Xrefs { get; } = new();
+
+    [ObservableProperty]
+    private string _xrefsCaption = "Xrefs";
 
     public bool HasDocuments => Documents.Count > 0;
 
@@ -77,6 +86,54 @@ public sealed partial class MainViewModel : ObservableObject
         if (value is not null)
         {
             _ = value.EnsureLoadedAsync();
+        }
+
+        RefreshXrefs(value?.Address);
+    }
+
+    /// <summary>Fills the Xrefs panel with every site that refers to <paramref name="va"/>.</summary>
+    private void RefreshXrefs(ulong? va)
+    {
+        Xrefs.Clear();
+        if (va is not { } target || Binary?.Analysis is not { } analysis)
+        {
+            XrefsCaption = "Xrefs";
+            return;
+        }
+
+        foreach (var (xref, from) in analysis.XrefsTo(target))
+        {
+            string instruction = analysis.DisassembleRange(xref.FromVa, 16, maxInstructions: 1) is [{ } ins]
+                ? ins.Text
+                : string.Empty;
+            Xrefs.Add(new XrefRow(
+                $"0x{xref.FromVa:X}",
+                from?.Name ?? analysis.NameFor(xref.FromVa),
+                xref.Kind.ToString().ToLowerInvariant(),
+                instruction,
+                xref.FromVa,
+                from?.EntryVa));
+        }
+
+        XrefsCaption = Xrefs.Count == 0 ? "Xrefs" : $"Xrefs ({Xrefs.Count})";
+    }
+
+    /// <summary>Opens the referring code: the containing function when known, otherwise a raw listing.</summary>
+    [RelayCommand]
+    private void GoToXref(XrefRow? row)
+    {
+        if (row is null || Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        if (row.FunctionEntryVa is { } entry)
+        {
+            OpenTarget(new DisassemblyTarget(entry, analysis.NameFor(entry)));
+        }
+        else
+        {
+            OpenTarget(new RangeDisassemblyTarget(row.FromVa, 128, $"0x{row.FromVa:X}"));
         }
     }
 
@@ -363,6 +420,7 @@ public sealed partial class MainViewModel : ObservableObject
             SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
             ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe),
             ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, offset => OpenTarget(new HexTarget(offset))),
+            StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, offset => OpenTarget(new HexTarget(offset))),
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),

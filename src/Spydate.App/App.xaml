@@ -19,6 +19,7 @@
             <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
             <v:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility" />
             <v:NullToCollapsedConverter x:Key="NullToCollapsed" />
+            <v:ZeroToVisibleConverter x:Key="ZeroToVisible" />
             <v:SymbolToIconConverter x:Key="SymbolToIcon" />
 
             <!-- Document view selection by ViewModel type -->
@@ -39,6 +40,9 @@
             </DataTemplate>
             <DataTemplate DataType="{x:Type docs:ResourcesDocumentViewModel}">
                 <views:ResourcesView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:StringsDocumentViewModel}">
+                <views:StringsView />
             </DataTemplate>
             <DataTemplate DataType="{x:Type docs:HexDocumentViewModel}">
                 <views:HexView />

@@ -24,6 +24,16 @@ public sealed class SymbolToIconConverter : IValueConverter
         => throw new NotSupportedException();
 }
 
+/// <summary>Shows an element only while a collection is empty (empty-state placeholders).</summary>
+public sealed class ZeroToVisibleConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is int and 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}
+
 /// <summary>null/empty → Collapsed, otherwise Visible.</summary>
 public sealed class NullToCollapsedConverter : IValueConverter
 {

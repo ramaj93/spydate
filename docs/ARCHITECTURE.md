@@ -35,6 +35,7 @@
 │ Spydate.Core (net10.0, no external deps)                    │
 │  PE: PeImage + headers/sections/imports/exports/CLR/debug   │
 │      + relocations/TLS/load config/resources/Rich           │
+│  Strings: StringScanner · Binary: SpanReader                │
 │  Binary: SpanReader · Symbols: SymbolTable                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -81,13 +82,20 @@ Key members:
 | `Warnings` | Non‑fatal parse issues. |
 | `Overlay` | Data past the last section. |
 
-### 3.2 `SpanReader`
+### 3.2 `StringScanner`
+
+Finds printable ASCII and UTF-16LE runs in the raw file bytes (so the overlay is
+covered too) and maps each hit back to RVA/VA and its section. UTF-16 is scanned
+at both parities — packers do place wide strings at odd offsets. Bounded by
+`MinLength` / `MaxLength` / `MaxResults` so a huge file cannot exhaust memory.
+
+### 3.3 `SpanReader`
 
 A `ref struct` cursor over `ReadOnlySpan<byte>` with little‑endian
 `ReadU16/U32/U64`, `ReadBytes`, `ReadAsciiZ`, `Position/Remaining`. Throws
 `PeParseException` on overrun.
 
-### 3.3 Symbols
+### 3.4 Symbols
 
 `SymbolTable` maps VA → `Symbol(Name, Kind, Address, Size)`. Populated from
 exports, import thunks (`kernel32!CreateFileW`), the entry point, and later PDB
@@ -106,6 +114,13 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   entry point, TLS callbacks, exports, non-chained `.pdata` entries, then the
   Control Flow Guard and SafeSEH tables (addresses the image itself declares as
   legal indirect-call targets). Deduplicated and filtered to executable memory.
+- `XrefTable` / `XrefExtractor` — the cross-reference index. Every function that
+  gets discovered is scanned for references: direct calls and jumps, indirect
+  ones through a known slot (`call [iat]`), memory operands with a statically
+  known address (RIP-relative or absolute) classified as read/write, `lea` and
+  in-image immediates as address-taken. `XrefTable` indexes both directions and
+  is locked, because discovery runs on a background thread while the UI reads it.
+  `BinaryAnalysis.XrefsTo(va)` also resolves the enclosing function per site.
 - `FunctionDiscovery` — recursive‑descent from a single entry VA; follows
   direct branches, records (does not follow) calls, splits basic blocks at
   branch targets, stops at `ret`/indirect jumps/invalid bytes. Produces

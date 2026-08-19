@@ -14,6 +14,7 @@ public sealed record ImportsTarget : NodeTarget;
 public sealed record ExportsTarget : NodeTarget;
 public sealed record FunctionsTarget : NodeTarget;
 public sealed record ResourcesTarget : NodeTarget;
+public sealed record StringsTarget : NodeTarget;
 public sealed record HexTarget(long Offset) : NodeTarget;
 public sealed record DisassemblyTarget(ulong Va, string Name) : NodeTarget;
 public sealed record RangeDisassemblyTarget(ulong Va, int Bytes, string Title) : NodeTarget;

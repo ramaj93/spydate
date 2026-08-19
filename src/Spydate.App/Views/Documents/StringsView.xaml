@@ -1,0 +1,42 @@
+<UserControl x:Class="Spydate.App.Views.Documents.StringsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:StringsDocumentViewModel}"
+             Background="{DynamicResource Document.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Text="Filter:" VerticalAlignment="Center" Margin="2,0,4,0"
+                           Foreground="{DynamicResource Text.Secondary}" />
+                <TextBox x:Name="FilterBox" DockPanel.Dock="Left" Width="260" Tag="text, section or address"
+                         TextChanged="OnFilterChanged" />
+                <CheckBox x:Name="IncludeCode" DockPanel.Dock="Left" Content="Code sections" Margin="10,0,0,0"
+                          ToolTip="Executable sections are mostly instruction bytes that happen to be printable"
+                          Checked="OnFilterChanged" Unchecked="OnFilterChanged" />
+                <TextBlock Text="{Binding Summary}" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Foreground="{DynamicResource Text.Secondary}" />
+                <TextBlock Text="  ·  double-click to view the bytes" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Text.Tertiary}" />
+            </DockPanel>
+        </Border>
+        <DataGrid Grid.Row="1" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}"
+                  MouseDoubleClick="OnRowDoubleClick">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Address" Binding="{Binding Va}" Width="130" />
+                <DataGridTextColumn Header="File offset" Binding="{Binding Offset}" Width="100" />
+                <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="80" />
+                <DataGridTextColumn Header="Type" Binding="{Binding Encoding}" Width="62" />
+                <DataGridTextColumn Header="Len" Binding="{Binding Length}" Width="52" />
+                <DataGridTextColumn Header="Text" Binding="{Binding Text}" Width="*" />
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

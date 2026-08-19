@@ -260,6 +260,24 @@
                             <TabItem Header="Output">
                                 <ListBox x:Name="OutputList" ItemsSource="{Binding Output}" />
                             </TabItem>
+                            <TabItem Header="{Binding XrefsCaption}">
+                                <Grid>
+                                    <DataGrid x:Name="XrefGrid" ItemsSource="{Binding Xrefs}" Style="{StaticResource DocGrid}"
+                                              Background="{DynamicResource Panel.Background}"
+                                              MouseDoubleClick="OnXrefDoubleClick">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Address" Binding="{Binding From}" Width="130" />
+                                            <DataGridTextColumn Header="In function" Binding="{Binding Function}" Width="240" />
+                                            <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="90" />
+                                            <DataGridTextColumn Header="Instruction" Binding="{Binding Instruction}" Width="*" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <TextBlock Text="Open a function to see what references it."
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource Text.Tertiary}"
+                                               Visibility="{Binding Xrefs.Count, Converter={StaticResource ZeroToVisible}}" />
+                                </Grid>
+                            </TabItem>
                             <TabItem Header="Warnings">
                                 <ListBox ItemsSource="{Binding Warnings}">
                                     <ListBox.ItemTemplate>

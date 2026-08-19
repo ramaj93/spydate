@@ -86,7 +86,10 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             SymbolRegular.Code24,
             HighlightingService.Asm,
             _ => new CodeContent(FormatFunction(analysis, function), function.Notes),
-            actions.ToArray());
+            actions.ToArray())
+        {
+            Address = function.EntryVa,
+        };
     }
 
     public static CodeDocumentViewModel ForRangeDisassembly(BinaryAnalysis analysis, ulong va, int byteCount, string title)
@@ -96,6 +99,7 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             title,
             SymbolRegular.Code24,
             HighlightingService.Asm,
+            // ReSharper disable once ConvertClosureToMethodGroup
             _ =>
             {
                 var insns = analysis.DisassembleRange(va, byteCount);
@@ -108,7 +112,10 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
                 }
 
                 return new CodeContent(sb.ToString(), Array.Empty<string>());
-            });
+            })
+        {
+            Address = va,
+        };
     }
 
     public static CodeDocumentViewModel ForPseudoC(NativeDecompiler decompiler, Function function, Action<Function>? openDisassembly)
@@ -129,7 +136,10 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
                 var result = decompiler.Decompile(function);
                 return new CodeContent(result.Text, result.Warnings);
             },
-            actions.ToArray());
+            actions.ToArray())
+        {
+            Address = function.EntryVa,
+        };
     }
 
     // ------------------------------------------------------------------
@@ -149,6 +159,14 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
         if (section is not null)
         {
             sb.Append("; section ").Append(section.Name).AppendLine();
+        }
+
+        var callers = analysis.Xrefs.To(function.EntryVa);
+        if (callers.Count > 0)
+        {
+            sb.Append("; referenced by ").Append(callers.Count).Append(callers.Count == 1 ? " site: " : " sites: ")
+              .Append(string.Join(", ", callers.Take(8).Select(x => $"0x{x.FromVa:X} ({x.Kind})")))
+              .Append(callers.Count > 8 ? ", …" : string.Empty).AppendLine();
         }
 
         sb.Append(function.Name).Append(" proc").AppendLine();

@@ -30,6 +30,9 @@ public abstract partial class DocumentViewModel : ObservableObject
 
     public bool CanClose { get; init; } = true;
 
+    /// <summary>The address this document is about, when it has one. Drives the Xrefs panel.</summary>
+    public ulong? Address { get; init; }
+
     /// <summary>Called once when the document becomes visible for the first time; heavy work goes here.</summary>
     public virtual Task LoadAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 

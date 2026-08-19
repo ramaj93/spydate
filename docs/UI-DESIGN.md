@@ -40,12 +40,17 @@ FluentWindow  (WindowBackdropType=None, ExtendsContentIntoTitleBar)
  │       ├─ Document TabControl      square tabs, accent line on the selected one
  │       ├─ GridSplitter (4px)
  │       └─ Output tool window       header + tab strip *below* the content
- │                                    (Output = timestamped log, Warnings)
+ │                                    (Output = timestamped log, Xrefs, Warnings)
  └─ Status bar             file summary · function count, 2px progress bar when busy
 ```
 
 Both tool windows can be hidden from the **View** menu or their own ✕; the
 window remembers the last size of each panel (`MainWindow.xaml.cs`).
+
+The **Xrefs** tab follows the active document: every document may carry an
+`Address`, and code documents set it to their function entry, so opening a
+function lists the sites that reference it (address, enclosing function, kind,
+instruction). Double-clicking navigates to the referring function.
 
 ## 3. MVVM
 
@@ -73,6 +78,7 @@ window remembers the last size of each panel (`MainWindow.xaml.cs`).
     `OverviewDocumentViewModel`, `HeadersDocumentViewModel`,
     `SectionsDocumentViewModel`, `ImportsDocumentViewModel`,
     `ExportsDocumentViewModel`, `FunctionsDocumentViewModel`,
+    `ResourcesDocumentViewModel`, `StringsDocumentViewModel` (scan runs off-thread),
     `HexDocumentViewModel` (virtual `HexRowList`),
     `CodeDocumentViewModel` (disassembly / pseudo‑C, with toolbar `CodeAction`s
     such as "Decompile" ↔ "Disassembly"),
@@ -91,6 +97,8 @@ notepad.exe  PE32+ · Amd64
  ├─ Imports            KERNEL32.dll → CreateFileW …
  ├─ Exports
  ├─ Functions          entry, exports, discovered sub_xxxx → click: disassembly
+ ├─ Resources         type → name → language → click: hex at the data
+ ├─ Strings           ascii + utf-16
  └─ Hex dump
 ```
 
@@ -117,6 +125,8 @@ Type → Member** nodes that open C#/IL documents.
 - Dark theme only (light theme needs light syntax palettes).
 - The Functions tree node lists up to 50 000 discovered functions eagerly;
   the Functions *document* has a filter box and should become the primary list.
-- No navigation history / xrefs yet; go‑to accepts VA, RVA, offset or symbol name.
+- No navigation history yet; go‑to accepts VA, RVA, offset or symbol name.
+- The Strings view hides hits in executable sections by default (they are mostly
+  instruction bytes); it does not yet show which code references each string.
 - Toolbar/menu items expose `AutomationProperties.Name`, but buttons inside
   document toolbars do not yet appear in the UI Automation tree.

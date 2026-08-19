@@ -47,6 +47,7 @@
                 <DataGridTextColumn Header="Blocks" Binding="{Binding Blocks}" Width="60" />
                 <DataGridTextColumn Header="Insns" Binding="{Binding Instructions}" Width="60" />
                 <DataGridTextColumn Header="Calls" Binding="{Binding Calls}" Width="60" />
+                <DataGridTextColumn Header="Refs" Binding="{Binding Refs}" Width="60" />
             </DataGrid.Columns>
         </DataGrid>
     </Grid>

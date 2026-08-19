@@ -35,6 +35,19 @@ internal static class SyntheticPe
         return PeImage.Parse(file);
     }
 
+    /// <summary>An image whose single .rdata section contains the given bytes.</summary>
+    public static PeImage WithSectionData(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length > SectionDataSize)
+        {
+            throw new ArgumentException($"payload must fit in {SectionDataSize} bytes", nameof(payload));
+        }
+
+        var file = NewImage(DataDirectoryIndex.BaseRelocation, 0, 0);
+        payload.CopyTo(file.AsSpan(SectionDataOffset));
+        return PeImage.Parse(file);
+    }
+
     /// <summary>A PE32+ image with one read-only section and one populated data directory.</summary>
     private static byte[] NewImage(DataDirectoryIndex directory, uint directoryRva, uint directorySize)
     {

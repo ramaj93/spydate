@@ -30,8 +30,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Linear‑sweep gap filling + prologue heuristics for function discovery
 - ⬜ Recognise CRT frame helpers (`__SEH_prolog4`, `__EH_prolog`, `__chkstk`)
   and no-return functions (`ExitProcess`, `__fastfail`) in discovery
-- ⬜ Cross‑references (code→code, code→data, IAT usages) and Xrefs panel
-- ⬜ String scanning (ASCII/UTF‑16) with xrefs
+- ✅ Cross‑references (calls, jumps, reads, writes, address-taken, IAT usage),
+  Xrefs panel and a per-function reference count
+- ✅ String scanning (ASCII + UTF‑16, both parities) with a Strings document
+- ⬜ Link strings to the code that references them (xref column in the Strings view)
 - ⬜ PDB symbol loading (MSF/DBI) for local symbol names
 - ⬜ Authenticode signature summary (the certificate directory in the overlay)
 

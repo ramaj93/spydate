@@ -15,6 +15,7 @@ public sealed class BinaryAnalysis
 {
     private readonly ConcurrentDictionary<ulong, Function> _functions = new();
     private readonly FunctionDiscovery _discovery;
+    private readonly XrefExtractor _xrefExtractor;
 
     public BinaryAnalysis(PeImage image, AsmSyntax syntax = AsmSyntax.Intel, DiscoveryOptions? options = null)
     {
@@ -23,6 +24,7 @@ public sealed class BinaryAnalysis
         Source = new PeCodeSource(image);
         Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
         _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, options);
+        _xrefExtractor = new XrefExtractor(Source);
     }
 
     public PeImage Image { get; }
@@ -32,6 +34,9 @@ public sealed class BinaryAnalysis
     public ICodeSource Source { get; }
 
     public X86Disassembler Disassembler { get; }
+
+    /// <summary>Cross-references collected from every function discovered so far.</summary>
+    public XrefTable Xrefs { get; } = new();
 
     /// <summary>Whether the image's machine type is supported by the x86 disassembler.</summary>
     public bool CanDisassemble => Image.IsX86Family;
@@ -50,6 +55,12 @@ public sealed class BinaryAnalysis
         {
             var f = _discovery.Discover(va, name);
             Symbols.Add(new Symbol(va, f.Name, SymbolKind.Function, f.CodeSize));
+            // The extractor is not thread-safe, but GetOrAdd's factory may run concurrently.
+            lock (_xrefExtractor)
+            {
+                _xrefExtractor.Extract(f, Xrefs);
+            }
+
             return f;
         });
     }
@@ -168,6 +179,30 @@ public sealed class BinaryAnalysis
     {
         var bytes = Source.Read(va, byteCount);
         return Disassembler.Decode(bytes, va, Image.ImageBase, maxInstructions);
+    }
+
+    /// <summary>Functions that reference <paramref name="va"/>, nearest enclosing function per reference.</summary>
+    public IReadOnlyList<(Xref Xref, Function? From)> XrefsTo(ulong va)
+        => Xrefs.To(va).Select(x => (x, FunctionContaining(x.FromVa))).ToList();
+
+    /// <summary>The discovered function whose blocks cover <paramref name="va"/>, if any.</summary>
+    public Function? FunctionContaining(ulong va)
+    {
+        if (_functions.TryGetValue(va, out var exact))
+        {
+            return exact;
+        }
+
+        // Functions are sparse and can have gaps, so match on block ranges rather than entry..end.
+        foreach (var f in _functions.Values)
+        {
+            if (va >= f.EntryVa && va < f.EndVa && f.Blocks.Any(b => va >= b.StartVa && va < b.EndVa))
+            {
+                return f;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Best-effort name for a VA: symbol, function, or <c>loc_XXXX</c>.</summary>

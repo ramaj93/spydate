@@ -1,6 +1,8 @@
 using System.Globalization;
+using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.Core.PE;
+using Spydate.Core.Strings;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
 
@@ -178,6 +180,61 @@ public sealed partial class ResourcesDocumentViewModel : DocumentViewModel
 }
 
 // ---------------------------------------------------------------------------
+// Strings
+// ---------------------------------------------------------------------------
+
+public sealed record StringRow(string Va, string Rva, string Offset, string Section, string Encoding, int Length, string Text, long FileOffset, bool InCodeSection);
+
+public sealed partial class StringsDocumentViewModel : DocumentViewModel
+{
+    private readonly PeImage _pe;
+    private readonly Action<long> _openHex;
+
+    public StringsDocumentViewModel(PeImage pe, Action<long> openHex) : base("strings", "Strings", SymbolRegular.TextT24)
+    {
+        _pe = pe;
+        _openHex = openHex;
+    }
+
+    public List<StringRow> Rows { get; private set; } = new();
+
+    [ObservableProperty]
+    private string _summary = "scanning…";
+
+    /// <summary>Scanning a large image touches every byte, so it happens off the UI thread.</summary>
+    public override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        var found = await Task.Run(() => StringScanner.Scan(_pe, StringScanOptions.Default, cancellationToken), cancellationToken).ConfigureAwait(true);
+
+        var codeSections = _pe.Sections.Where(s => s.IsExecutable).Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        Rows = found.Select(s => new StringRow(
+            s.Va is { } va ? $"0x{va:X}" : "-",
+            s.Rva is { } rva ? $"0x{rva:X8}" : "-",
+            $"0x{s.Offset:X8}",
+            s.Section,
+            s.Encoding == StringEncodingKind.Utf16 ? "utf-16" : "ascii",
+            s.Length,
+            s.Text,
+            s.Offset,
+            codeSections.Contains(s.Section))).ToList();
+
+        int wide = found.Count(s => s.Encoding == StringEncodingKind.Utf16);
+        int inCode = Rows.Count(r => r.InCodeSection);
+        Summary = $"{Rows.Count:N0} strings ({wide:N0} utf-16, {inCode:N0} in code)";
+        OnPropertyChanged(nameof(Rows));
+    }
+
+    [RelayCommand]
+    private void OpenHex(StringRow? row)
+    {
+        if (row is not null)
+        {
+            _openHex(row.FileOffset);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
 
@@ -249,7 +306,7 @@ public sealed partial class ExportsDocumentViewModel : DocumentViewModel
 // Functions
 // ---------------------------------------------------------------------------
 
-public sealed record FunctionRow(string Name, string Va, string Size, int Blocks, int Instructions, int Calls, Function Function);
+public sealed record FunctionRow(string Name, string Va, string Size, int Blocks, int Instructions, int Calls, int Refs, Function Function);
 
 public sealed partial class FunctionsDocumentViewModel : DocumentViewModel
 {
@@ -279,6 +336,7 @@ public sealed partial class FunctionsDocumentViewModel : DocumentViewModel
             f.Blocks.Count,
             f.InstructionCount,
             f.CallTargets.Count + f.IndirectCallSlots.Count,
+            _analysis.Xrefs.CountTo(f.EntryVa),
             f)).ToList();
         OnPropertyChanged(nameof(Rows));
         OnPropertyChanged(nameof(Summary));

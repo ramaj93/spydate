@@ -86,6 +86,7 @@ public static class ExplorerTreeBuilder
             node.ChildrenFactory = () => resources.Children.Select(t => ResourceNodeVm(pe, t));
         }
 
+        root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "ascii + utf-16"));
         root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{pe.Length:N0} bytes"));
         return root;
     }

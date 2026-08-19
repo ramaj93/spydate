@@ -960,6 +960,42 @@
     <!-- Misc                                                              -->
     <!-- ================================================================ -->
 
+    <Style TargetType="{x:Type CheckBox}">
+        <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+        <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
+        <Setter Property="FontSize" Value="{DynamicResource App.FontSize}" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type CheckBox}">
+                    <StackPanel Orientation="Horizontal" Background="Transparent">
+                        <Border x:Name="Box" Width="13" Height="13" VerticalAlignment="Center"
+                                Background="{DynamicResource Control.Background}"
+                                BorderBrush="{DynamicResource Control.Border}" BorderThickness="1"
+                                SnapsToDevicePixels="True">
+                            <Path x:Name="Check" Visibility="Collapsed" Stretch="Uniform" Margin="2"
+                                  Stroke="{DynamicResource Accent.Hover}" StrokeThickness="1.6"
+                                  Data="M 0,4 L 3,7 L 8,0" />
+                        </Border>
+                        <ContentPresenter Margin="5,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Check" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{DynamicResource Text.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style TargetType="{x:Type ProgressBar}">
         <Setter Property="Height" Value="2" />
         <Setter Property="Background" Value="Transparent" />
