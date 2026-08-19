@@ -151,6 +151,12 @@ public sealed record IrSymbol(string Name, ulong Va, int Bits) : IrExpr
 
 public sealed record IrCall(IrExpr Target, IReadOnlyList<IrExpr> Args, int Bits) : IrExpr
 {
+    /// <summary>
+    /// True when the callee's calling convention was established rather than assumed, so passes need not
+    /// keep argument registers alive on the chance that one of them carries an argument.
+    /// </summary>
+    public bool ConventionKnown { get; init; }
+
     public override int Bits { get; } = Bits;
     public override string ToString() => $"{Target}({string.Join(", ", Args)})";
 }

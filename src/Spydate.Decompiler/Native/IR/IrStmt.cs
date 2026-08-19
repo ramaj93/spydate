@@ -111,6 +111,13 @@ public sealed class IrFunction
     /// </summary>
     public bool ReturnsValue { get; set; } = true;
 
+    /// <summary>
+    /// Leading arguments this function is handed in registers: on x86, <c>ecx</c> for <c>__thiscall</c>
+    /// and <c>ecx</c>, <c>edx</c> for <c>__fastcall</c>. They are declared under the register's own name,
+    /// which is what the body already calls them.
+    /// </summary>
+    public int RegisterParameters { get; set; }
+
     /// <summary>Set of VAs that are targets of a goto/branch (need labels).</summary>
     public HashSet<ulong> LabelTargets { get; } = new();
 

@@ -66,7 +66,11 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Return-value inference: a function that never writes the accumulator was
   returning whatever its caller left there, so it is typed `void` and its `ret`
   loses the value (notepad: 49 of 672 functions on x86, 15 of 520 on x64)
-- ⬜ x86 fastcall/thiscall register arguments; float args
+- ✅ x86 `__fastcall` / `__thiscall`: the question is put to the callee — a function
+  whose entry block reads `ecx` before writing it was handed something in it — so
+  calls gain their register arguments and the function itself declares them, under
+  the register's own name (notepad x86: 208 thiscall-shaped, 81 fastcall-shaped)
+- ⬜ Float arguments (needs the SSE lifting subset below)
 - ✅ Control‑flow structuring: `if`/`else if`/`else`, `while`, `do`/`while`,
   `break`/`continue`, from dominators and post-dominators. Edges no structure
   covers keep a `goto`, and only those blocks keep a label; every block is still

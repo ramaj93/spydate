@@ -156,9 +156,10 @@ public sealed class DeadCodeEliminationPass : IIrPass
 
             // A call whose arguments were never recovered may still be reading them out of registers.
             // Once the frame pass has named them, what is left in an argument register is not an argument
-            // - but only on x64, where it models the whole convention. On x86 a value in ecx or edx may
-            // be a fastcall argument the pass did not recover, so it stays.
-            if (statement is IrCallStmt call2 && (bitness == 32 || call2.Call.Args.Count == 0))
+            // - but only where the convention is settled: on x64 by the ABI, on x86 by having read the
+            // callee. Otherwise a value in ecx or edx may be a fastcall argument nobody recovered.
+            if (statement is IrCallStmt call2
+                && ((bitness == 32 && !call2.Call.ConventionKnown) || call2.Call.Args.Count == 0))
             {
                 foreach (string register in ArgumentRegisters(bitness))
                 {

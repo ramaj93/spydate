@@ -102,7 +102,17 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    registers fill gaps in the entry block); on x86 the values pushed since the
    previous call (forwarded into the call when unchanged in between, otherwise
    the named slot is passed).
-2. `GlobalNamingPass` — replaces absolute addresses with names, using a
+2. `X86RegisterArgumentsPass` — gives x86 calls their register arguments. Neither
+   `__thiscall` nor `__fastcall` leaves a trace at the call site, so `RegisterUse`
+   asks the callee: a function whose **entry block** reads `ecx` before writing it is
+   being handed something in it, and `edx` as well makes it `__fastcall`. Only the
+   entry block counts (with enough blocks almost any function reads `ecx` somewhere),
+   and `push ecx` does not count (it is how MSVC reserves four bytes of stack) — the
+   cost is missing a convention, and the alternative is inventing arguments. Calls
+   answered this way are marked `ConventionKnown`, which is what lets dead-code
+   elimination stop keeping `ecx`/`edx` alive at them. The function being decompiled
+   declares its own register parameters the same way, under the register's name.
+3. `GlobalNamingPass` — replaces absolute addresses with names, using a
    `GlobalNames` view of the image (symbols, discovered functions, scanned
    strings). `*(uint32_t*)(0x14003A100)` becomes `data_14003A100`, a store to
    one becomes an assignment to the name, an immediate that points at data
@@ -112,7 +122,7 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    spell `"@SVWH"` in ASCII, and naming a call target after them would be worse
    than useless. Runs before copy propagation so a literal reaches the call that
    uses it.
-3. `ReachingValues` + `CopyPropagationPass` — two-pass forward substitution: cheap
+4. `ReachingValues` + `CopyPropagationPass` — two-pass forward substitution: cheap
    values (constants, registers, symbols, locals) are forwarded to every reader,
    complex expressions only to a single reader, and a call result only into the
    very next statement. Tracks kills with register aliasing (`al` vs `eax` vs
@@ -130,17 +140,17 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    or a call). Predecessors not yet processed, i.e. the back edge of a loop, count as
    agreeing on nothing, which costs some propagation at loop headers and needs no
    fixpoint. This is the sound half of SSA; phi nodes and renaming are not built.
-4. `AlgebraicSimplificationPass` — constant folding, `(x - 40) + 40 → x`,
+5. `AlgebraicSimplificationPass` — constant folding, `(x - 40) + 40 → x`,
    `x + 0 → x`, `x * 0`, `x & 0`, no-op casts, drops `mov edi, edi`-style self
    assignments.
-5. `DeadCodeEliminationPass` — liveness over the whole function (backward fixpoint,
+6. `DeadCodeEliminationPass` — liveness over the whole function (backward fixpoint,
    registers keyed by their widest alias), removing assignments nothing reads again
    and dropping the result register of a call nobody consumes. Conservative where it
    has to be: a call keeps the argument registers live (on x86 always, on x64 only
    when argument recovery found nothing), a partial write such as `al` never kills
    the register it sits in, and a block whose successors are unknown — an unresolved
    indirect jump — is treated as though every register were live after it.
-6. `ReturnValuePass` — `ret` lifts to "return the accumulator", because that is what
+7. `ReturnValuePass` — `ret` lifts to "return the accumulator", because that is what
    the instruction does; a function that never writes the accumulator was returning
    whatever its caller left there, and is typed `void` instead. Sound only after dead
    code elimination: a call result the function passes straight through is read by the

@@ -16,26 +16,54 @@ public sealed class NativeDecompiler
     private readonly int _bitness;
     private readonly SymbolTable? _symbols;
     private readonly IReadOnlyList<IIrPass> _passes;
+    private readonly Func<ulong, int>? _registerArguments;
 
-    public NativeDecompiler(int bitness, SymbolTable? symbols = null, IReadOnlyList<IIrPass>? passes = null, GlobalNames? names = null)
+    public NativeDecompiler(int bitness, SymbolTable? symbols = null, IReadOnlyList<IIrPass>? passes = null, GlobalNames? names = null, Func<ulong, int>? registerArguments = null)
     {
         _bitness = bitness;
         _symbols = symbols;
-        _passes = passes ?? DefaultPasses(names);
+        _registerArguments = registerArguments;
+        _passes = passes ?? DefaultPasses(names, registerArguments);
     }
 
     public NativeDecompiler(BinaryAnalysis analysis)
-        : this(analysis.Image.Bitness, analysis.Symbols, names: GlobalNames.For(analysis))
+        : this(analysis.Image.Bitness, analysis.Symbols, names: GlobalNames.For(analysis), registerArguments: va => RegisterArgumentsFor(analysis, va))
     {
+    }
+
+    /// <summary>
+    /// How many register arguments the function at <paramref name="va"/> takes, or -1 when it is not a
+    /// function this analysis can read - an import thunk, or an address outside the code.
+    /// </summary>
+    private static int RegisterArgumentsFor(BinaryAnalysis analysis, ulong va)
+    {
+        if (analysis.Image.Bitness != 32 || analysis.Image.SectionFromVa(va) is not { IsExecutable: true })
+        {
+            return -1;
+        }
+
+        try
+        {
+            return RegisterUse.FastcallArgumentCount(analysis.GetOrDiscoverFunction(va));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return -1;
+        }
     }
 
     /// <summary>
     /// The standard pipeline. Naming runs before copy propagation so a named global or a string literal
     /// is what gets forwarded into the expression that uses it.
     /// </summary>
-    public static IReadOnlyList<IIrPass> DefaultPasses(GlobalNames? names = null)
+    public static IReadOnlyList<IIrPass> DefaultPasses(GlobalNames? names = null, Func<ulong, int>? registerArguments = null)
     {
         var passes = new List<IIrPass> { new StackFramePass() };
+        if (registerArguments is not null)
+        {
+            passes.Add(new X86RegisterArgumentsPass(registerArguments));
+        }
+
         if (names is not null)
         {
             passes.Add(new GlobalNamingPass(names));
@@ -52,6 +80,13 @@ public sealed class NativeDecompiler
     {
         var lifter = new X86Lifter(_bitness, _symbols);
         var ir = lifter.Lift(function);
+
+        // A function that reads ecx before writing it was handed something in it; the same analysis that
+        // gives calls their register arguments gives this one its register parameters.
+        if (_registerArguments?.Invoke(function.EntryVa) is > 0 and var registers)
+        {
+            ir.RegisterParameters = registers;
+        }
         foreach (var pass in _passes)
         {
             try

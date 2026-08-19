@@ -14,6 +14,9 @@ public sealed class PseudoCEmitter
 {
     private const string Indent = "    ";
 
+    /// <summary>x86 register arguments, in the order they are passed.</summary>
+    private static readonly string[] RegisterParameterNames = { "ecx", "edx" };
+
     public bool IncludeAddressComments { get; init; } = true;
 
     public string Emit(IrFunction fn)
@@ -63,8 +66,18 @@ public sealed class PseudoCEmitter
         var parameters = fn.Locals.Values.Where(l => l.FrameOffset > 0 && l.Name.StartsWith("arg_", StringComparison.Ordinal) && referenced.Contains(l.Name)).OrderBy(l => l.FrameOffset).ToList();
         var locals = fn.Locals.Values.Where(l => !parameters.Contains(l) && l.Name != "return_address" && referenced.Contains(l.Name)).OrderByDescending(l => l.FrameOffset).ToList();
 
+        // Register parameters come first, under the register's own name — which is what the body calls
+        // them, so nothing has to be renamed for the signature to line up with the code.
+        var declared = new List<string>();
+        for (int i = 0; i < fn.RegisterParameters && i < RegisterParameterNames.Length; i++)
+        {
+            declared.Add($"{IrTypes.NameFor(32)} {RegisterParameterNames[i]}");
+        }
+
+        declared.AddRange(parameters.Select(p => $"{IrTypes.NameFor(p.Bits)} {p.Name}"));
+
         sb.Append(retType).Append(' ').Append(SanitizeIdentifier(fn.Name)).Append('(');
-        sb.Append(parameters.Count == 0 ? "void" : string.Join(", ", parameters.Select(p => $"{IrTypes.NameFor(p.Bits)} {p.Name}")));
+        sb.Append(declared.Count == 0 ? "void" : string.Join(", ", declared));
         sb.Append(')').AppendLine();
         sb.AppendLine("{");
 
