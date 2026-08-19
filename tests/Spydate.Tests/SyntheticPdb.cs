@@ -45,15 +45,17 @@ internal static class SyntheticPdb
         return info;
     }
 
-    private static byte[] BuildDbiHeader(ushort symbolRecordStream)
+    private static byte[] BuildDbiHeader(ushort symbolRecordStream, byte[]? moduleInfo = null)
     {
-        var dbi = new byte[64];
+        var dbi = new byte[64 + (moduleInfo?.Length ?? 0)];
         BinaryPrimitives.WriteInt32LittleEndian(dbi, -1);                          // version signature
         BinaryPrimitives.WriteUInt32LittleEndian(dbi.AsSpan(4), 19990903);         // version header
         BinaryPrimitives.WriteUInt32LittleEndian(dbi.AsSpan(8), 1);                // age
         BinaryPrimitives.WriteUInt16LittleEndian(dbi.AsSpan(12), 5);               // global stream
         BinaryPrimitives.WriteUInt16LittleEndian(dbi.AsSpan(16), 6);               // public stream
         BinaryPrimitives.WriteUInt16LittleEndian(dbi.AsSpan(20), symbolRecordStream);
+        BinaryPrimitives.WriteInt32LittleEndian(dbi.AsSpan(24), moduleInfo?.Length ?? 0);
+        moduleInfo?.CopyTo(dbi.AsSpan(64));
         return dbi;
     }
 
@@ -139,5 +141,68 @@ internal static class SyntheticPdb
         }
 
         return file;
+    }
+
+    /// <summary>A procedure to place in a module's symbol stream.</summary>
+    internal readonly record struct Procedure(string Name, ushort Segment, uint Offset, uint CodeSize, bool IsGlobal);
+
+    /// <summary>An MSF with a module whose symbol stream holds the given procedures.</summary>
+    public static byte[] BuildWithModule(Guid guid, uint age, IEnumerable<Procedure> procedures)
+    {
+        var moduleSymbols = BuildModuleStream(procedures);
+        var moduleInfo = BuildModuleInfo(streamIndex: 5, symbolBytes: (uint)moduleSymbols.Length);
+        var dbi = BuildDbiHeader(symbolRecordStream: 4, moduleInfo);
+
+        // Streams: 0 old directory, 1 info, 2 TPI, 3 DBI, 4 records (empty), 5 module symbols.
+        return Assemble(new[]
+        {
+            Array.Empty<byte>(),
+            BuildInfoStream(guid, age),
+            Array.Empty<byte>(),
+            dbi,
+            Array.Empty<byte>(),
+            moduleSymbols,
+        });
+    }
+
+    /// <summary>One ModInfo entry: the fixed part, then the module and object file names.</summary>
+    private static byte[] BuildModuleInfo(short streamIndex, uint symbolBytes)
+    {
+        var name = Encoding.UTF8.GetBytes("module.obj\0");
+        var obj = Encoding.UTF8.GetBytes("module.obj\0");
+        int size = 64 + name.Length + obj.Length;
+        size = (size + 3) & ~3;
+
+        var entry = new byte[size];
+        BinaryPrimitives.WriteInt16LittleEndian(entry.AsSpan(34), streamIndex);
+        BinaryPrimitives.WriteUInt32LittleEndian(entry.AsSpan(36), symbolBytes);
+        name.CopyTo(entry.AsSpan(64));
+        obj.CopyTo(entry.AsSpan(64 + name.Length));
+        return entry;
+    }
+
+    private static byte[] BuildModuleStream(IEnumerable<Procedure> procedures)
+    {
+        var buffer = new List<byte>();
+        buffer.AddRange(BitConverter.GetBytes(4u)); // CV_SIGNATURE_C13
+
+        foreach (var procedure in procedures)
+        {
+            var name = Encoding.UTF8.GetBytes(procedure.Name);
+            int payload = 2 + 35 + name.Length + 1; // kind + fixed fields + name
+            int padding = (4 - ((payload + 2) % 4)) % 4;
+            int length = payload + padding;
+
+            var record = new byte[length + 2];
+            BinaryPrimitives.WriteUInt16LittleEndian(record, (ushort)length);
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(2), procedure.IsGlobal ? (ushort)0x1110 : (ushort)0x110F);
+            BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(16), procedure.CodeSize);
+            BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(32), procedure.Offset);
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(36), procedure.Segment);
+            name.CopyTo(record.AsSpan(39));
+            buffer.AddRange(record);
+        }
+
+        return buffer.ToArray();
     }
 }

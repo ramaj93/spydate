@@ -34,30 +34,42 @@ public static class PdbSymbols
         ArgumentNullException.ThrowIfNull(symbols);
 
         int added = 0;
+
+        // Procedures first: they carry the code size, and a name from the module stream is the
+        // source-level one rather than a decorated public.
+        foreach (var procedure in pdb.Functions)
+        {
+            if (Resolve(image, procedure.Segment, procedure.Offset) is { } va
+                && symbols.Add(new Symbol(va, procedure.Name, SymbolKind.Function, procedure.CodeSize)))
+            {
+                added++;
+            }
+        }
+
         foreach (var symbol in pdb.PublicSymbols)
         {
-            // Segments are 1-based indices into the image's section table.
-            if (symbol.Segment == 0 || symbol.Segment > image.Sections.Count)
-            {
-                continue;
-            }
-
-            var section = image.Sections[symbol.Segment - 1];
-            uint limit = Math.Max(section.VirtualSize, section.SizeOfRawData);
-            if (symbol.Offset >= limit)
-            {
-                continue; // the record points past the section it names
-            }
-
-            uint rva = section.VirtualAddress + symbol.Offset;
             var kind = symbol.IsFunction ? SymbolKind.Function : SymbolKind.Data;
-            if (symbols.Add(new Symbol(image.RvaToVa(rva), symbol.Name, kind)))
+            if (Resolve(image, symbol.Segment, symbol.Offset) is { } va
+                && symbols.Add(new Symbol(va, symbol.Name, kind)))
             {
                 added++;
             }
         }
 
         return added;
+    }
+
+    /// <summary>Turns a 1-based section index and an offset into a virtual address.</summary>
+    private static ulong? Resolve(PeImage image, ushort segment, uint offset)
+    {
+        if (segment == 0 || segment > image.Sections.Count)
+        {
+            return null;
+        }
+
+        var section = image.Sections[segment - 1];
+        uint limit = Math.Max(section.VirtualSize, section.SizeOfRawData);
+        return offset >= limit ? null : image.RvaToVa(section.VirtualAddress + offset);
     }
 
     /// <summary>

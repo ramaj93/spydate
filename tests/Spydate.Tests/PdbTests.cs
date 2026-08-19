@@ -297,4 +297,59 @@ public class PdbTests
         Assert.False(result.Loaded);
         Assert.Contains("CodeView", result.Reason!, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void ModuleStreamProceduresCarryNamesAndSizes()
+    {
+        // Publics only cover externally visible symbols; procedures include file-local ones.
+        var pdb = PdbFile.Parse(SyntheticPdb.BuildWithModule(Guid.NewGuid(), 1, new[]
+        {
+            new SyntheticPdb.Procedure("PublicEntry", 1, 0x100, 0x80, IsGlobal: true),
+            new SyntheticPdb.Procedure("static_helper", 1, 0x180, 0x40, IsGlobal: false),
+        }));
+
+        Assert.Equal(2, pdb.Functions.Count);
+
+        var global = pdb.Functions[0];
+        Assert.Equal("PublicEntry", global.Name);
+        Assert.Equal(0x100u, global.Offset);
+        Assert.Equal(0x80u, global.CodeSize);
+        Assert.True(global.IsGlobal);
+
+        var local = pdb.Functions[1];
+        Assert.Equal("static_helper", local.Name);
+        Assert.Equal(0x40u, local.CodeSize);
+        Assert.False(local.IsGlobal);
+
+        // Nothing in the public record stream, so publics stay empty.
+        Assert.Empty(pdb.PublicSymbols);
+    }
+
+    [Fact]
+    public void ProcedureSizesReachTheSymbolTable()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0x90 });
+        var pdb = PdbFile.Parse(SyntheticPdb.BuildWithModule(Guid.NewGuid(), 1, new[]
+        {
+            new SyntheticPdb.Procedure("static_helper", 1, 0x60, 0x30, IsGlobal: false),
+        }));
+
+        var symbols = new SymbolTable();
+        int added = PdbSymbols.Apply(image, pdb, symbols);
+
+        Assert.Equal(1, added);
+        Assert.True(symbols.TryGet(image.RvaToVa(0x1060), out var symbol));
+        Assert.Equal("static_helper", symbol.Name);
+        Assert.Equal(SymbolKind.Function, symbol.Kind);
+        Assert.Equal(0x30u, symbol.Size);
+    }
+
+    [Fact]
+    public void ModulesWithoutASymbolStreamAreSkipped()
+    {
+        // A module entry with no stream index must not stop the walk or invent symbols.
+        var pdb = PdbFile.Parse(SyntheticPdb.Build(Guid.NewGuid(), 1, Array.Empty<SyntheticPdb.Public>()));
+
+        Assert.Empty(pdb.Functions);
+    }
 }

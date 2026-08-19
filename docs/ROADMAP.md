@@ -21,7 +21,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   panel, drag & drop, command-line file argument
 - ✅ Tests for PE parsing, disassembly, lifting, real-binary smoke tests (x64 + x86)
 
-## Phase 1 — Native analysis depth 🚧
+## Phase 1 — Native analysis depth ✅
 - ✅ Base relocations, TLS (callbacks as function seeds), load config (Control Flow Guard
   and SafeSEH tables as seeds), resource tree, Rich header
 - ✅ `RUNTIME_FUNCTION` end addresses as function bounds, with a sweep of the bytes
@@ -48,9 +48,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   "referenced only" filter in the Strings view, the Xrefs panel following the
   selected string, and string literals annotated inline in disassembly
 - ✅ PDB symbol loading: MSF container, info stream identity (GUID/age must match the
-  image's CodeView record) and S_PUB32 public symbols, mapped through the section table
-  and used as discovery seeds
-- ⬜ PDB module streams (S_GPROC32/S_LPROC32) for statics and function sizes
+  image's CodeView record), S_PUB32 publics and per-module S_GPROC32/S_LPROC32
+  procedures — the latter naming file-local functions and carrying their code size —
+  mapped through the section table and used as discovery seeds
 - ✅ Authenticode summary: the certificate table decoded to signer, issuer, serial,
   digest algorithm, validity window and RFC 3161 timestamp (described, not verified)
 

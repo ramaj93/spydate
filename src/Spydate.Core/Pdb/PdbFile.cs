@@ -10,10 +10,17 @@ public readonly record struct PdbPublicSymbol(string Name, ushort Segment, uint 
     public override string ToString() => $"{Name} @ {Segment}:{Offset:X}";
 }
 
+/// <summary>A procedure from a module stream: a name, an address, and the size the compiler recorded.</summary>
+public readonly record struct PdbFunction(string Name, ushort Segment, uint Offset, uint CodeSize, bool IsGlobal)
+{
+    public override string ToString() => $"{Name} @ {Segment}:{Offset:X} ({CodeSize} bytes)";
+}
+
 /// <summary>
 /// A native (MSF) PDB, read far enough to answer the question that matters for disassembly: what is
-/// this address called? That means the info stream, for identity, and the public symbol records.
-/// Types, line numbers and per-module symbols are not read.
+/// this address called? That means the info stream, for identity, the public symbol records, and
+/// the per-module procedure records that name file-local functions. Types and line numbers are not
+/// read.
 /// </summary>
 public sealed class PdbFile
 {
@@ -21,7 +28,14 @@ public sealed class PdbFile
     private const int DbiStream = 3;
     private const int DbiHeaderSize = 64;
     private const ushort SPub32 = 0x110E;
+    private const ushort SLProc32 = 0x110F;
+    private const ushort SGProc32 = 0x1110;
     private const uint PublicSymbolIsFunction = 0x00000002;
+    /// <summary>Fixed part of a DBI module entry, before the two names.</summary>
+    private const int ModuleInfoFixedSize = 64;
+    /// <summary>Offset of the name inside S_GPROC32 / S_LPROC32, after segment and flags.</summary>
+    private const int ProcedureNameOffset = 39;
+    private const int MaxSymbols = 2_000_000;
 
     private PdbFile(string path, Guid guid, uint age, uint signature, IReadOnlyList<PdbPublicSymbol> symbols)
     {
@@ -42,6 +56,13 @@ public sealed class PdbFile
     public uint Signature { get; }
 
     public IReadOnlyList<PdbPublicSymbol> PublicSymbols { get; }
+
+    /// <summary>
+    /// Procedures from the per-module symbol streams. Unlike publics these carry the code size the
+    /// compiler recorded, and they include functions with no external linkage - the file-local ones
+    /// a public symbol table never mentions.
+    /// </summary>
+    public IReadOnlyList<PdbFunction> Functions { get; private init; } = Array.Empty<PdbFunction>();
 
     /// <summary>Whether this PDB is the one built alongside <paramref name="codeView"/>'s image.</summary>
     public bool Matches(CodeViewInfo codeView) => codeView.Guid == Guid && codeView.Age == Age;
@@ -93,7 +114,10 @@ public sealed class PdbFile
         uint age = BinaryPrimitives.ReadUInt32LittleEndian(info[8..]);
         var guid = new Guid(info.Slice(12, 16));
 
-        return new PdbFile(path, guid, age, signature, ReadPublicSymbols(msf));
+        return new PdbFile(path, guid, age, signature, ReadPublicSymbols(msf))
+        {
+            Functions = ReadModuleFunctions(msf),
+        };
     }
 
     /// <summary>
@@ -151,6 +175,110 @@ public sealed class PdbFile
         }
 
         return symbols;
+    }
+
+    /// <summary>
+    /// Walks the DBI module list and reads each module's symbol stream. Procedure records give the
+    /// names that matter for disassembly: statics and other functions with no public symbol.
+    /// </summary>
+    private static IReadOnlyList<PdbFunction> ReadModuleFunctions(MsfFile msf)
+    {
+        var dbi = msf.ReadStream(DbiStream).Span;
+        if (dbi.Length < DbiHeaderSize)
+        {
+            return Array.Empty<PdbFunction>();
+        }
+
+        int moduleInfoSize = BinaryPrimitives.ReadInt32LittleEndian(dbi[24..]);
+        if (moduleInfoSize <= 0 || DbiHeaderSize + moduleInfoSize > dbi.Length)
+        {
+            return Array.Empty<PdbFunction>();
+        }
+
+        var functions = new List<PdbFunction>();
+        int offset = DbiHeaderSize;
+        int end = DbiHeaderSize + moduleInfoSize;
+
+        while (offset + ModuleInfoFixedSize <= end && functions.Count < MaxSymbols)
+        {
+            // The fixed part ends with two NUL-terminated names, and the record is 4-byte aligned.
+            short streamIndex = BinaryPrimitives.ReadInt16LittleEndian(dbi[(offset + 34)..]);
+            uint symbolBytes = BinaryPrimitives.ReadUInt32LittleEndian(dbi[(offset + 36)..]);
+
+            int cursor = offset + ModuleInfoFixedSize;
+            cursor = SkipCString(dbi, cursor, end);
+            cursor = SkipCString(dbi, cursor, end);
+            int next = (cursor + 3) & ~3;
+            if (next <= offset)
+            {
+                break;
+            }
+
+            offset = next;
+
+            if (streamIndex < 0 || symbolBytes <= 4)
+            {
+                continue;
+            }
+
+            var stream = msf.ReadStream(streamIndex);
+            if (stream.Length > 4)
+            {
+                // The stream opens with a CodeView signature; symbol records follow.
+                ReadProcedures(stream.Span[4..(int)Math.Min(stream.Length, symbolBytes)], functions);
+            }
+        }
+
+        return functions;
+    }
+
+    private static void ReadProcedures(ReadOnlySpan<byte> records, List<PdbFunction> functions)
+    {
+        int offset = 0;
+        while (offset + 4 <= records.Length && functions.Count < MaxSymbols)
+        {
+            int length = BinaryPrimitives.ReadUInt16LittleEndian(records[offset..]);
+            if (length < 2)
+            {
+                break;
+            }
+
+            ushort kind = BinaryPrimitives.ReadUInt16LittleEndian(records[(offset + 2)..]);
+            int next = offset + 2 + length;
+
+            if (kind is SGProc32 or SLProc32 && offset + ProcedureNameOffset <= records.Length)
+            {
+                uint codeSize = BinaryPrimitives.ReadUInt32LittleEndian(records[(offset + 16)..]);
+                uint procOffset = BinaryPrimitives.ReadUInt32LittleEndian(records[(offset + 32)..]);
+                ushort segment = BinaryPrimitives.ReadUInt16LittleEndian(records[(offset + 36)..]);
+                string name = ReadNulTerminated(records, offset + ProcedureNameOffset, Math.Min(next, records.Length));
+                if (name.Length > 0 && segment > 0)
+                {
+                    functions.Add(new PdbFunction(name, segment, procOffset, codeSize, kind == SGProc32));
+                }
+            }
+
+            if (next <= offset)
+            {
+                break;
+            }
+
+            offset = next;
+        }
+    }
+
+    private static int SkipCString(ReadOnlySpan<byte> data, int start, int end)
+    {
+        end = Math.Min(end, data.Length);
+        for (int i = start; i < end; i++)
+        {
+            if (data[i] == 0)
+            {
+                return i + 1;
+            }
+        }
+
+        return end;
     }
 
     private static string ReadNulTerminated(ReadOnlySpan<byte> data, int start, int end)
