@@ -62,6 +62,7 @@ public sealed class WorkspaceService
     {
         var pe = PeImage.Load(path);
         BinaryAnalysis? analysis = pe.IsX86Family ? new BinaryAnalysis(pe) : null;
+        analysis?.LoadPdbSymbols();
 
         ManagedAssembly? managed = null;
         string? managedError = null;

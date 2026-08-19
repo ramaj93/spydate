@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Concurrent;
 using Spydate.Core.PE;
+using Spydate.Core.Pdb;
 using Spydate.Core.Strings;
 using Spydate.Core.Symbols;
 
@@ -104,6 +105,20 @@ public sealed class BinaryAnalysis
 
     public X86Disassembler Disassembler { get; }
 
+    /// <summary>Result of looking for the image's PDB, once <see cref="LoadPdbSymbols"/> has run.</summary>
+    public PdbLoadResult? Pdb { get; private set; }
+
+    /// <summary>
+    /// Finds and applies the matching PDB. Not done in the constructor: it touches the file system
+    /// and the caller decides whether that is wanted (and on which thread).
+    /// </summary>
+    public PdbLoadResult LoadPdbSymbols()
+    {
+        var result = PdbSymbols.TryLoadFor(Image, Symbols);
+        Pdb = result;
+        return result;
+    }
+
     /// <summary>Cross-references collected from every function discovered so far.</summary>
     public XrefTable Xrefs { get; } = new();
 
@@ -193,6 +208,12 @@ public sealed class BinaryAnalysis
             {
                 Add(Image.RvaToVa(rf.BeginRva), null);
             }
+        }
+
+        // Symbols that name a function - from a PDB, when one was loaded - are exact starts.
+        foreach (var symbol in Symbols.All.Where(s => s.Kind == SymbolKind.Function).ToList())
+        {
+            Add(symbol.Va, symbol.Name);
         }
 
         if (Image.LoadConfig is { } config)

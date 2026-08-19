@@ -225,6 +225,13 @@ public sealed partial class MainViewModel : ObservableObject
                 Warnings.Add($"Machine type {pe.Machine} is not supported by the native disassembler (x86/x64 only).");
             }
 
+            if (opened.Analysis?.Pdb is { } pdb)
+            {
+                Log(pdb.Loaded
+                    ? $"Loaded {pdb.SymbolsAdded:N0} symbols from {pdb.Path}."
+                    : $"No symbols: {pdb.Reason}");
+            }
+
             if (Warnings.Count > 0)
             {
                 Log($"{Warnings.Count} warning(s) — see the Warnings tab.");

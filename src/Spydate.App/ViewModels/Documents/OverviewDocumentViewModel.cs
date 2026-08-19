@@ -141,6 +141,14 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             }
         }
 
+        if (binary.Analysis?.Pdb is { } pdb)
+        {
+            Security.Add(new PropertyRow(
+                "PDB symbols",
+                pdb.Loaded ? $"{pdb.SymbolsAdded:N0} loaded" : "not loaded",
+                pdb.Loaded ? pdb.Path : pdb.Reason));
+        }
+
         Debug = pe.Debug.Select(d => new PropertyRow(
             d.Type.ToString(),
             d.CodeView is { } cv ? cv.PdbPath : $"size 0x{d.SizeOfData:X} at 0x{d.PointerToRawData:X}",

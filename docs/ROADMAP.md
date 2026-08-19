@@ -44,7 +44,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Strings linked to the code that references them: reference counts and a
   "referenced only" filter in the Strings view, the Xrefs panel following the
   selected string, and string literals annotated inline in disassembly
-- ⬜ PDB symbol loading (MSF/DBI) for local symbol names
+- ✅ PDB symbol loading: MSF container, info stream identity (GUID/age must match the
+  image's CodeView record) and S_PUB32 public symbols, mapped through the section table
+  and used as discovery seeds
+- ⬜ PDB module streams (S_GPROC32/S_LPROC32) for statics and function sizes
 - ✅ Authenticode summary: the certificate table decoded to signer, issuer, serial,
   digest algorithm, validity window and RFC 3161 timestamp (described, not verified)
 

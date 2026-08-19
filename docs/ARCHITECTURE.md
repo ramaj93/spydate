@@ -95,7 +95,22 @@ A `ref struct` cursor over `ReadOnlySpan<byte>` with little‑endian
 `ReadU16/U32/U64`, `ReadBytes`, `ReadAsciiZ`, `Position/Remaining`. Throws
 `PeParseException` on overrun.
 
-### 3.4 Symbols
+### 3.4 PDB (`Spydate.Core.Pdb`)
+
+`MsfFile` reads the Multi-Stream Format container: a superblock, a stream
+directory, and per-stream block lists. `PdbFile` reads the two streams that
+matter here — the info stream, for the GUID and age that tie a PDB to its image,
+and the DBI header, which points at the symbol record stream holding `S_PUB32`
+publics. Types, line numbers and per-module symbols are not read.
+
+`PdbSymbols.TryLoadFor` probes the path recorded at build time, the same file
+name next to the image, and `<image>.pdb`. **A PDB whose GUID and age do not
+match is rejected** — symbols from a different build land at the wrong
+addresses, which is worse than having none. Publics are mapped through the
+section table (segment is a 1-based section index) and added without overwriting
+existing names, since an export carries the undecorated name a reader expects.
+
+### 3.5 Symbols
 
 `SymbolTable` maps VA → `Symbol(Name, Kind, Address, Size)`. Populated from
 exports, import thunks (`kernel32!CreateFileW`), the entry point, and later PDB
