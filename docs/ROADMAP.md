@@ -70,7 +70,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   whose entry block reads `ecx` before writing it was handed something in it — so
   calls gain their register arguments and the function itself declares them, under
   the register's own name (notepad x86: 208 thiscall-shaped, 81 fastcall-shaped)
-- ⬜ Float arguments (needs the SSE lifting subset below)
+- ⬜ Float arguments: needs a signature to say which of `xmm0`-`xmm3` an argument
+  sits in, which is the API database above
 - ✅ Control‑flow structuring: `if`/`else if`/`else`, `while`, `do`/`while`,
   `break`/`continue`, from dominators and post-dominators. Edges no structure
   covers keep a `goto`, and only those blocks keep a label; every block is still
@@ -86,7 +87,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `lea base,[rip+X]` / `mov e,[base+idx*4+rva]` / `add`/`jmp` form, bounded by the
   range check in front of them and validated entry by entry; the case bodies are
   then followed as part of the function (kernel32 x64: 8 tables, shell32: 14)
-- ⬜ SSE/AVX float lifting subset
+- ✅ Scalar SSE lifting: `addsd`/`mulss`/… as arithmetic, `cvtsi2sd`/`cvttsd2si` as
+  casts to and from `float`/`double`, `sqrtsd` as a call, `comisd` as a comparison,
+  and the VEX three-operand forms. The packed forms stay as inline asm rather than
+  pretending a vector is a number (notepad x86: 202 → 162 unlifted instructions)
 
 ## Phase 3 — UI ⬜
 - ⬜ CFG graph view (basic blocks as nodes)

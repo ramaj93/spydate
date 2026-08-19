@@ -75,6 +75,10 @@ public static class IrPrinter
                 sb.Append(u.Op switch { IrUnaryOp.Neg => "-", IrUnaryOp.Not => "~", _ => "!" });
                 Write(sb, u.Operand, PrecUnary);
                 break;
+            case IrCast { IsFloat: true } fc:
+                sb.Append('(').Append(IrTypes.FloatNameFor(fc.Bits)).Append(')');
+                Write(sb, fc.Operand, PrecUnary);
+                break;
             case IrCast c:
                 sb.Append('(').Append(IrTypes.NameFor(c.Bits, c.Signed)).Append(')');
                 Write(sb, c.Operand, PrecUnary);
@@ -176,8 +180,9 @@ public static class IrPrinter
     {
         IrBinary b => b.Op switch
         {
-            IrBinaryOp.Mul or IrBinaryOp.SMul or IrBinaryOp.UDiv or IrBinaryOp.SDiv or IrBinaryOp.URem or IrBinaryOp.SRem => PrecMultiplicative,
-            IrBinaryOp.Add or IrBinaryOp.Sub => PrecAdditive,
+            IrBinaryOp.Mul or IrBinaryOp.SMul or IrBinaryOp.UDiv or IrBinaryOp.SDiv or IrBinaryOp.URem or IrBinaryOp.SRem
+                or IrBinaryOp.FMul or IrBinaryOp.FDiv => PrecMultiplicative,
+            IrBinaryOp.Add or IrBinaryOp.Sub or IrBinaryOp.FAdd or IrBinaryOp.FSub => PrecAdditive,
             IrBinaryOp.Shl or IrBinaryOp.Shr or IrBinaryOp.Sar => PrecShift,
             IrBinaryOp.And => PrecAnd,
             IrBinaryOp.Xor => PrecXor,

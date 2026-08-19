@@ -152,6 +152,100 @@ public sealed class X86Lifter
                 Emit(Assign(instr, 0, Operand(instr, 1)));
                 return;
 
+            // --- scalar SSE ------------------------------------------------
+            // Only the scalar forms are lifted: they are what compiled floating-point code is made of,
+            // and their meaning is exactly one arithmetic operation on one value. The packed forms stay
+            // as inline asm rather than pretending a vector is a number.
+            case Mnemonic.Addss:
+            case Mnemonic.Addsd:
+                LiftScalarFloat(instr, IrBinaryOp.FAdd, ctx, Emit);
+                return;
+            case Mnemonic.Subss:
+            case Mnemonic.Subsd:
+                LiftScalarFloat(instr, IrBinaryOp.FSub, ctx, Emit);
+                return;
+            case Mnemonic.Mulss:
+            case Mnemonic.Mulsd:
+                LiftScalarFloat(instr, IrBinaryOp.FMul, ctx, Emit);
+                return;
+            case Mnemonic.Divss:
+            case Mnemonic.Divsd:
+                LiftScalarFloat(instr, IrBinaryOp.FDiv, ctx, Emit);
+                return;
+            case Mnemonic.Vaddss:
+            case Mnemonic.Vaddsd:
+                LiftScalarFloat(instr, IrBinaryOp.FAdd, ctx, Emit);
+                return;
+            case Mnemonic.Vsubss:
+            case Mnemonic.Vsubsd:
+                LiftScalarFloat(instr, IrBinaryOp.FSub, ctx, Emit);
+                return;
+            case Mnemonic.Vmulss:
+            case Mnemonic.Vmulsd:
+                LiftScalarFloat(instr, IrBinaryOp.FMul, ctx, Emit);
+                return;
+            case Mnemonic.Vdivss:
+            case Mnemonic.Vdivsd:
+                LiftScalarFloat(instr, IrBinaryOp.FDiv, ctx, Emit);
+                return;
+
+            case Mnemonic.Sqrtss:
+            case Mnemonic.Sqrtsd:
+            case Mnemonic.Vsqrtss:
+            case Mnemonic.Vsqrtsd:
+                Emit(Assign(instr, 0, new IrCall(
+                    new IrSymbol(instr.Mnemonic.ToString().EndsWith("ss", StringComparison.OrdinalIgnoreCase) ? "sqrtf" : "sqrt", 0, 0),
+                    new[] { Operand(instr, instr.OpCount - 1) },
+                    OperandBits(instr, 0))));
+                return;
+
+            // Integer to float and back. The width of the *other* operand decides the type, which is why
+            // these read the operand rather than the mnemonic.
+            case Mnemonic.Cvtsi2ss:
+            case Mnemonic.Cvtsi2sd:
+            case Mnemonic.Vcvtsi2ss:
+            case Mnemonic.Vcvtsi2sd:
+                Emit(Assign(instr, 0, new IrCast(Operand(instr, instr.OpCount - 1), ScalarBits(instr.Mnemonic), true) { IsFloat = true }));
+                return;
+
+            case Mnemonic.Cvtss2si:
+            case Mnemonic.Cvtsd2si:
+            case Mnemonic.Cvttss2si:
+            case Mnemonic.Cvttsd2si:
+            case Mnemonic.Vcvtss2si:
+            case Mnemonic.Vcvtsd2si:
+            case Mnemonic.Vcvttss2si:
+            case Mnemonic.Vcvttsd2si:
+                Emit(Assign(instr, 0, new IrCast(Operand(instr, instr.OpCount - 1), OperandBits(instr, 0), true)));
+                return;
+
+            case Mnemonic.Cvtss2sd:
+            case Mnemonic.Cvtsd2ss:
+            case Mnemonic.Vcvtss2sd:
+            case Mnemonic.Vcvtsd2ss:
+                Emit(Assign(instr, 0, new IrCast(Operand(instr, instr.OpCount - 1), ScalarBits(instr.Mnemonic), true) { IsFloat = true }));
+                return;
+
+            // comiss/ucomisd set the same flags an unsigned compare would, so jb/ja read as < and >.
+            case Mnemonic.Comiss:
+            case Mnemonic.Comisd:
+            case Mnemonic.Ucomiss:
+            case Mnemonic.Ucomisd:
+            case Mnemonic.Vcomiss:
+            case Mnemonic.Vcomisd:
+            case Mnemonic.Vucomiss:
+            case Mnemonic.Vucomisd:
+                ctx.Flags = FlagState.Compare(Operand(instr, 0), Operand(instr, 1));
+                return;
+
+            // The low half of an xmm register is the scalar; moving it is moving the value.
+            case Mnemonic.Movlpd:
+            case Mnemonic.Movlps:
+            case Mnemonic.Movhpd:
+            case Mnemonic.Movhps:
+                Emit(Assign(instr, 0, Operand(instr, 1)));
+                return;
+
             case Mnemonic.Movzx:
                 Emit(Assign(instr, 0, new IrCast(Operand(instr, 1), OperandBits(instr, 0), false)));
                 return;
@@ -412,6 +506,22 @@ public sealed class X86Lifter
         fn.Warnings.Add($"0x{va:X}: unsupported instruction '{ins.Mnemonic}' kept as inline asm.");
         ctx.Flags = null;
     }
+
+    /// <summary>
+    /// Scalar float arithmetic. The VEX forms take a separate destination (<c>vaddsd a, b, c</c>), so the
+    /// operands are read from the end.
+    /// </summary>
+    private void LiftScalarFloat(in Instruction instr, IrBinaryOp op, LiftContext ctx, Action<IrStmt> emit)
+    {
+        var left = Operand(instr, instr.OpCount >= 3 ? 1 : 0);
+        var right = Operand(instr, instr.OpCount - 1);
+        emit(Assign(instr, 0, new IrBinary(op, left, right)));
+        ctx.Flags = null; // SSE arithmetic leaves the integer flags alone
+    }
+
+    /// <summary>Width of the scalar a conversion produces: <c>ss</c> is single, <c>sd</c> is double.</summary>
+    private static int ScalarBits(Mnemonic mnemonic)
+        => mnemonic.ToString().EndsWith("ss", StringComparison.OrdinalIgnoreCase) ? 32 : 64;
 
     private void LiftBinary(in Instruction instr, IrBinaryOp op, LiftContext ctx, Action<IrStmt> emit)
     {

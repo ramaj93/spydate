@@ -189,7 +189,9 @@ public sealed class CopyPropagationPass : IIrPass
                 {
                     def.Valid = false;
                     bool possibleX86RegArg = bitness == 32 && def.Var is IrReg r32 && RegisterAliases.CanonicalOf(r32.Name) is "rcx" or "rdx";
-                    if (def.Var is IrTemp || (def.Var is IrReg && !possibleX86RegArg))
+                    // A float result goes back in xmm0, which `ret` does not name.
+                    bool floatResult = def.Var is IrReg xmm && RegisterAliases.CanonicalOf(xmm.Name) == "zmm0";
+                    if (def.Var is IrTemp || (def.Var is IrReg && !possibleX86RegArg && !floatResult))
                     {
                         def.Redefined = true;
                     }

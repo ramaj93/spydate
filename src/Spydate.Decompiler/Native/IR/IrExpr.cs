@@ -25,6 +25,11 @@ public enum IrBinaryOp
     Sar,   // arithmetic
     Rol,
     Ror,
+    /// <summary>Scalar floating-point arithmetic (SSE): the operands are floats, not integers.</summary>
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
 }
 
 /// <summary>Condition codes as produced by folding a flag-setting instruction into a jcc/setcc/cmovcc.</summary>
@@ -139,8 +144,11 @@ public sealed record IrBinary(IrBinaryOp Op, IrExpr Left, IrExpr Right) : IrExpr
 
 public sealed record IrCast(IrExpr Operand, int Bits, bool Signed) : IrExpr
 {
+    /// <summary>True when the target type is <c>float</c> / <c>double</c> rather than an integer.</summary>
+    public bool IsFloat { get; init; }
+
     public override int Bits { get; } = Bits;
-    public override string ToString() => $"({IrTypes.NameFor(Bits, Signed)})({Operand})";
+    public override string ToString() => $"({(IsFloat ? IrTypes.FloatNameFor(Bits) : IrTypes.NameFor(Bits, Signed))})({Operand})";
 }
 
 public sealed record IrSymbol(string Name, ulong Va, int Bits) : IrExpr
@@ -199,12 +207,21 @@ public static class IrTypes
         _ => bits <= 0 ? "void" : $"uint{bits}_t",
     };
 
+    /// <summary>Type name for a scalar floating-point value of the given width.</summary>
+    public static string FloatNameFor(int bits) => bits switch
+    {
+        32 => "float",
+        64 => "double",
+        80 => "long double",
+        _ => "double",
+    };
+
     public static string OperatorText(IrBinaryOp op) => op switch
     {
-        IrBinaryOp.Add => "+",
-        IrBinaryOp.Sub => "-",
-        IrBinaryOp.Mul or IrBinaryOp.SMul => "*",
-        IrBinaryOp.UDiv or IrBinaryOp.SDiv => "/",
+        IrBinaryOp.Add or IrBinaryOp.FAdd => "+",
+        IrBinaryOp.Sub or IrBinaryOp.FSub => "-",
+        IrBinaryOp.Mul or IrBinaryOp.SMul or IrBinaryOp.FMul => "*",
+        IrBinaryOp.UDiv or IrBinaryOp.SDiv or IrBinaryOp.FDiv => "/",
         IrBinaryOp.URem or IrBinaryOp.SRem => "%",
         IrBinaryOp.And => "&",
         IrBinaryOp.Or => "|",

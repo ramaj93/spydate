@@ -154,6 +154,13 @@ public sealed class DeadCodeEliminationPass : IIrPass
                 }
             }
 
+            // `ret` names the accumulator, but a float result goes back in xmm0 and nothing in the IR
+            // says so.
+            if (statement is IrReturn)
+            {
+                live.Add("zmm0");
+            }
+
             // A call whose arguments were never recovered may still be reading them out of registers.
             // Once the frame pass has named them, what is left in an argument register is not an argument
             // - but only where the convention is settled: on x64 by the ABI, on x86 by having read the
