@@ -230,4 +230,36 @@ public class NativeDecompilerTests
         Assert.Contains("(uint64_t arg_0)", r.Text);
         Assert.Empty(r.Warnings);
     }
+
+    [Fact]
+    public void AFunctionThatNeverSetsTheAccumulatorIsVoid()
+    {
+        // mov dword [ecx], 1 ; ret — `ret` returns whatever the caller left in eax, which is nothing.
+        var r = Decompile(new byte[] { 0xC7, 0x01, 0x01, 0x00, 0x00, 0x00, 0xC3 }, 0x1000, 32);
+
+        Assert.Contains("void sub_1000(", r.Text);
+        Assert.DoesNotContain("return eax", r.Text);
+        Assert.DoesNotContain("return rax", r.Text);
+    }
+
+    [Fact]
+    public void AFunctionThatSetsTheAccumulatorKeepsItsResult()
+    {
+        var r = Decompile(new byte[] { 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 }, 0x1000, 32);
+
+        Assert.Contains("uint32_t sub_1000(", r.Text);
+        Assert.Contains("return 42;", r.Text);
+    }
+
+    [Fact]
+    public void ATailCallIsAValue()
+    {
+        // jmp [rip+0x100] — the callee's result is this function's result, so it is not void.
+        var symbols = new SymbolTable();
+        symbols.Add(new Symbol(0x140001106, "kernel32!GetTickCount", SymbolKind.Import));
+        var r = Decompile(new byte[] { 0xFF, 0x25, 0x00, 0x01, 0x00, 0x00 }, 0x140001000, 64, symbols);
+
+        Assert.Contains("return kernel32!GetTickCount();", r.Text);
+        Assert.DoesNotContain("void ", r.Text);
+    }
 }

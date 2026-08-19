@@ -23,7 +23,7 @@ public sealed class PseudoCEmitter
         var body = Structurer.Structure(fn);
         var labels = CollectLabels(body);
         var sb = new StringBuilder();
-        string retType = IrTypes.NameFor(fn.Bitness);
+        string retType = fn.ReturnsValue ? IrTypes.NameFor(fn.Bitness) : "void";
 
         sb.Append("// Function ").Append(fn.Name)
           .Append(" @ 0x").Append(fn.EntryVa.ToString("X", CultureInfo.InvariantCulture))

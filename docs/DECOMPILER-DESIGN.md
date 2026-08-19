@@ -140,6 +140,11 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    when argument recovery found nothing), a partial write such as `al` never kills
    the register it sits in, and a block whose successors are unknown — an unresolved
    indirect jump — is treated as though every register were live after it.
+6. `ReturnValuePass` — `ret` lifts to "return the accumulator", because that is what
+   the instruction does; a function that never writes the accumulator was returning
+   whatever its caller left there, and is typed `void` instead. Sound only after dead
+   code elimination: a call result the function passes straight through is read by the
+   return, so it survives and the function is correctly seen to produce a value.
 
 Planned: full SSA (cross-block propagation), return‑value inference, type
 propagation from imports (uses `PeImage.Imports` names + a small Win32 API type

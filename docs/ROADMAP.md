@@ -63,7 +63,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Dead-code elimination over whole-function liveness: assignments no one reads
   again go, and a call result nobody wants loses its `rax =`. A call keeps its
   argument registers alive, and a block with unknown successors keeps everything
-- ⬜ x86 fastcall/thiscall register arguments; return-value inference; float args
+- ✅ Return-value inference: a function that never writes the accumulator was
+  returning whatever its caller left there, so it is typed `void` and its `ret`
+  loses the value (notepad: 49 of 672 functions on x86, 15 of 520 on x64)
+- ⬜ x86 fastcall/thiscall register arguments; float args
 - ✅ Control‑flow structuring: `if`/`else if`/`else`, `while`, `do`/`while`,
   `break`/`continue`, from dominators and post-dominators. Edges no structure
   covers keep a `goto`, and only those blocks keep a label; every block is still

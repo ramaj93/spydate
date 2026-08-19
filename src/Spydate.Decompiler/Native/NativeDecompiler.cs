@@ -44,6 +44,7 @@ public sealed class NativeDecompiler
         passes.Add(new CopyPropagationPass());
         passes.Add(new AlgebraicSimplificationPass());
         passes.Add(new DeadCodeEliminationPass());
+        passes.Add(new ReturnValuePass());
         return passes;
     }
 

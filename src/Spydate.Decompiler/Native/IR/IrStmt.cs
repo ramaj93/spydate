@@ -105,6 +105,12 @@ public sealed class IrFunction
 
     public List<string> Warnings { get; } = new();
 
+    /// <summary>
+    /// Whether the function produces a result. False when nothing ever writes the accumulator, which
+    /// means <c>ret</c> was returning whatever the caller happened to leave there (see ReturnValuePass).
+    /// </summary>
+    public bool ReturnsValue { get; set; } = true;
+
     /// <summary>Set of VAs that are targets of a goto/branch (need labels).</summary>
     public HashSet<ulong> LabelTargets { get; } = new();
 
