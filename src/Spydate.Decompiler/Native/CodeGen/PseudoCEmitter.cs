@@ -1,10 +1,15 @@
 using System.Globalization;
 using System.Text;
 using Spydate.Decompiler.Native.IR;
+using Spydate.Decompiler.Native.Structuring;
 
 namespace Spydate.Decompiler.Native.CodeGen;
 
-/// <summary>Emits an <see cref="IrFunction"/> as goto-based pseudo-C.</summary>
+/// <summary>
+/// Emits an <see cref="IrFunction"/> as pseudo-C. The body comes from the <see cref="Structurer"/>, so it
+/// is written with <c>if</c> / <c>else</c> / loops; the gotos that survive are the edges no structure
+/// covered, and only those keep a label.
+/// </summary>
 public sealed class PseudoCEmitter
 {
     private const string Indent = "    ";
@@ -13,12 +18,22 @@ public sealed class PseudoCEmitter
 
     public string Emit(IrFunction fn)
     {
+        ArgumentNullException.ThrowIfNull(fn);
+
+        var body = Structurer.Structure(fn);
+        var labels = CollectLabels(body);
         var sb = new StringBuilder();
         string retType = IrTypes.NameFor(fn.Bitness);
 
         sb.Append("// Function ").Append(fn.Name)
           .Append(" @ 0x").Append(fn.EntryVa.ToString("X", CultureInfo.InvariantCulture))
           .Append(" (").Append(fn.Blocks.Count).Append(" blocks)").AppendLine();
+        if (labels.Count > 0)
+        {
+            sb.Append("// ").Append(labels.Count).Append(labels.Count == 1 ? " edge" : " edges")
+              .Append(" could not be structured and kept a goto.").AppendLine();
+        }
+
         if (fn.Warnings.Count > 0)
         {
             sb.Append("// ").Append(fn.Warnings.Count).Append(" lifter warning(s); see analysis notes.").AppendLine();
@@ -66,80 +81,178 @@ public sealed class PseudoCEmitter
             sb.AppendLine();
         }
 
-        var layout = Layout(fn);
-        for (int bi = 0; bi < layout.Count; bi++)
-        {
-            var block = layout[bi];
-            ulong? nextStart = bi + 1 < layout.Count ? layout[bi + 1].StartVa : null;
-            ulong? prevStart = bi > 0 ? layout[bi - 1].StartVa : null;
-
-            // A label is needed when the block is an explicit jump target, or when control reaches it from
-            // somewhere other than the block printed immediately before it.
-            bool needsLabel = fn.LabelTargets.Contains(block.StartVa)
-                              || (bi > 0 && block.Predecessors.Any(p => p != prevStart))
-                              || (bi > 0 && block.Predecessors.Count == 0);
-            if (needsLabel)
-            {
-                sb.Append("loc_").Append(block.StartVa.ToString("X", CultureInfo.InvariantCulture)).Append(':').AppendLine();
-            }
-
-            for (int si = 0; si < block.Statements.Count; si++)
-            {
-                var stmt = block.Statements[si];
-                if (stmt is IrNop)
-                {
-                    continue;
-                }
-
-                // Skip a trailing goto that just falls into the next block.
-                if (stmt is IrGoto g && si == block.Statements.Count - 1 && nextStart == g.TargetVa)
-                {
-                    continue;
-                }
-
-                string text = Format(stmt, nextStart);
-                if (text.Length == 0)
-                {
-                    continue;
-                }
-
-                sb.Append(Indent).Append(text);
-                if (IncludeAddressComments && stmt.Va != 0 && stmt is not IrComment)
-                {
-                    PadTo(sb, 56);
-                    sb.Append("// ").Append(stmt.Va.ToString("X", CultureInfo.InvariantCulture));
-                }
-
-                sb.AppendLine();
-            }
-        }
+        Write(sb, body, 1, labels);
 
         sb.AppendLine("}");
         return sb.ToString();
     }
 
-    /// <summary>Entry block first, then the remaining blocks in address order.</summary>
-    private static List<IrBlock> Layout(IrFunction fn)
+    /// <summary>VAs a goto still targets — the only blocks that need a label.</summary>
+    private static HashSet<ulong> CollectLabels(CStmt body)
+        => CStmts.Descendants(body).OfType<CGoto>().Where(g => !g.External).Select(g => g.Va).ToHashSet();
+
+    private void Write(StringBuilder sb, CStmt stmt, int depth, HashSet<ulong> labels)
     {
-        var ordered = new List<IrBlock>(fn.Blocks.Count);
-        var entry = fn.Blocks.FirstOrDefault(b => b.StartVa == fn.EntryVa);
-        if (entry is not null)
+        switch (stmt)
         {
-            ordered.Add(entry);
-        }
+            case CSeq seq:
+                foreach (var item in seq.Items)
+                {
+                    Write(sb, item, depth, labels);
+                }
 
-        foreach (var b in fn.Blocks.OrderBy(b => b.StartVa))
-        {
-            if (!ReferenceEquals(b, entry))
-            {
-                ordered.Add(b);
-            }
-        }
+                break;
 
-        return ordered;
+            case CLabel label when labels.Contains(label.Va):
+                // Labels sit one level out, like a case label, so the code they head stays aligned.
+                sb.Append(' ', Math.Max(0, (depth - 1) * Indent.Length))
+                  .Append("loc_").Append(label.Va.ToString("X", CultureInfo.InvariantCulture)).Append(':').AppendLine();
+                break;
+
+            case CLabel:
+                break;
+
+            case CRaw raw:
+                WriteLine(sb, depth, Format(raw.Statement), raw.Statement);
+                break;
+
+            case CGoto g:
+                WriteLine(sb, depth, g.External
+                    ? $"goto loc_{g.Va:X};   // outside this function"
+                    : $"goto loc_{g.Va:X};", null);
+                break;
+
+            case CBreak:
+                WriteLine(sb, depth, "break;", null);
+                break;
+
+            case CContinue:
+                WriteLine(sb, depth, "continue;", null);
+                break;
+
+            case CIf branch:
+                WriteIf(sb, branch, depth, labels);
+                break;
+
+            case CLoop loop:
+                WriteLoop(sb, loop, depth, labels);
+                break;
+        }
     }
 
-    private static string Format(IrStmt stmt, ulong? nextBlockStart)
+    private void WriteIf(StringBuilder sb, CIf branch, int depth, HashSet<ulong> labels)
+    {
+        WriteLine(sb, depth, $"if ({IrPrinter.Print(branch.Condition)})", null);
+        WriteBlock(sb, branch.Then, depth, labels);
+
+        if (branch.Else is not null)
+        {
+            WriteElse(sb, branch.Else, depth, labels);
+        }
+    }
+
+    /// <summary>A lone <c>if</c> in the else arm chains, so a ladder does not march off the right margin.</summary>
+    private void WriteElse(StringBuilder sb, CStmt @else, int depth, HashSet<ulong> labels)
+    {
+        if (Unwrap(@else, labels) is CIf chained)
+        {
+            WriteLine(sb, depth, $"else if ({IrPrinter.Print(chained.Condition)})", null);
+            WriteBlock(sb, chained.Then, depth, labels);
+            if (chained.Else is not null)
+            {
+                WriteElse(sb, chained.Else, depth, labels);
+            }
+
+            return;
+        }
+
+        WriteLine(sb, depth, "else", null);
+        WriteBlock(sb, @else, depth, labels);
+    }
+
+    /// <summary>A sequence holding one real statement is that statement, for `else if` chaining.</summary>
+    private static CStmt? Unwrap(CStmt stmt, HashSet<ulong> labels)
+    {
+        if (stmt is not CSeq seq)
+        {
+            return stmt;
+        }
+
+        CStmt? only = null;
+        foreach (var item in seq.Items)
+        {
+            switch (item)
+            {
+                case CLabel label when !labels.Contains(label.Va):
+                case CSeq { Items.Count: 0 }:
+                    continue;   // prints nothing
+                case CLabel:
+                    return null; // a printed label must stay reachable, so keep the braces
+            }
+
+            if (only is not null)
+            {
+                return null;
+            }
+
+            only = item;
+        }
+
+        return only;
+    }
+
+    private void WriteLoop(StringBuilder sb, CLoop loop, int depth, HashSet<ulong> labels)
+    {
+        switch (loop.Kind)
+        {
+            case CLoopKind.While:
+                WriteLine(sb, depth, $"while ({IrPrinter.Print(loop.Condition!)})", null);
+                WriteBlock(sb, loop.Body, depth, labels);
+                break;
+
+            case CLoopKind.DoWhile:
+                WriteLine(sb, depth, "do", null);
+                WriteBlock(sb, loop.Body, depth, labels);
+                WriteLine(sb, depth, $"while ({IrPrinter.Print(loop.Condition!)});", null);
+                break;
+
+            default:
+                WriteLine(sb, depth, "while (true)", null);
+                WriteBlock(sb, loop.Body, depth, labels);
+                break;
+        }
+    }
+
+    private void WriteBlock(StringBuilder sb, CStmt body, int depth, HashSet<ulong> labels)
+    {
+        WriteLine(sb, depth, "{", null);
+        Write(sb, body, depth + 1, labels);
+        WriteLine(sb, depth, "}", null);
+    }
+
+    private void WriteLine(StringBuilder sb, int depth, string text, IrStmt? source)
+    {
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        for (int i = 0; i < depth; i++)
+        {
+            sb.Append(Indent);
+        }
+
+        sb.Append(text);
+        if (IncludeAddressComments && source is { Va: not 0 } and not IrComment)
+        {
+            PadTo(sb, 56);
+            sb.Append("// ").Append(source.Va.ToString("X", CultureInfo.InvariantCulture));
+        }
+
+        sb.AppendLine();
+    }
+
+    private static string Format(IrStmt stmt)
     {
         switch (stmt)
         {
@@ -156,22 +269,15 @@ public sealed class PseudoCEmitter
             case IrGoto g:
                 return $"goto loc_{g.TargetVa:X};";
             case IrBranch b:
-                {
-                    // Prefer "if (!cond) goto target" when the target is the fallthrough — reads more naturally.
-                    var cond = b.Condition;
-                    if (nextBlockStart == b.TargetVa && cond is IrCondition ic)
-                    {
-                        return $"if ({IrPrinter.Print(ic with { Cc = IrTypes.Invert(ic.Cc) })}) goto loc_{b.FallthroughVa:X};";
-                    }
-
-                    return $"if ({IrPrinter.Print(cond)}) goto loc_{b.TargetVa:X};";
-                }
+                return $"if ({IrPrinter.Print(b.Condition)}) goto loc_{b.TargetVa:X};";
             case IrLabel l:
                 return $"loc_{l.LabelVa:X}:";
             case IrAsm asm:
                 return $"__asm {{ {asm.Text} }}";
             case IrComment c:
                 return $"// {c.Text}";
+            case IrNop:
+                return string.Empty;
             default:
                 return stmt.ToString() ?? string.Empty;
         }

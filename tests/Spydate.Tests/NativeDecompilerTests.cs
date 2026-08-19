@@ -48,7 +48,7 @@ public class NativeDecompilerTests
     }
 
     [Fact]
-    public void ConditionalBranchProducesIfGoto()
+    public void ConditionalBranchProducesIfElse()
     {
         // cmp ecx, 10 ; jl +5 ; mov eax, 1 ; ret ; (0x100b) mov eax, 2 ; ret
         var code = new byte[]
@@ -62,10 +62,10 @@ public class NativeDecompilerTests
         };
         var r = Decompile(code, 0x1000, 32);
 
-        Assert.True(r.Text.Contains("if ((int32_t)ecx < 10) goto loc_100B;"), r.Text);
-        Assert.Contains("loc_100B:", r.Text);
+        Assert.True(r.Text.Contains("if ((int32_t)ecx < 10)"), r.Text);
         Assert.Contains("return 1;", r.Text);
         Assert.Contains("return 2;", r.Text);
+        Assert.DoesNotContain("goto", r.Text);
     }
 
     [Fact]

@@ -21,7 +21,7 @@
                 │
 ┌───────────────┴─────────────────────────────────────────────┐
 │ Spydate.Decompiler (net10.0)                                │
-│  Native: IR · X86Lifter · passes · PseudoCEmitter           │
+│  Native: IR · X86Lifter · passes · Structurer · PseudoC     │
 │  Managed: ManagedDecompiler (ILSpy) · IlDisassembler        │
 └───────────────▲─────────────────────────────────────────────┘
                 │
@@ -195,7 +195,7 @@ File → PeImage.Load ─┐
                      ├─→ BinaryAnalysis(pe) ─→ FunctionDiscovery.Run(seeds)
 SymbolTable(pe) ─────┘         │                      │
                                │                      ▼
-                          DisassembleRange     Function/CFG ─→ X86Lifter ─→ IR ─→ passes ─→ PseudoCEmitter
+                          DisassembleRange     Function/CFG ─→ X86Lifter ─→ IR ─→ passes ─→ Structurer ─→ PseudoCEmitter
                                │                                                    │
                                ▼                                                    ▼
                     DisassemblyDocument (AvalonEdit)                     DecompiledDocument (AvalonEdit)

@@ -12,7 +12,7 @@ IrFunction { IrBlock[] { IrStatement[] } }      ← "low IR": explicit registers
         │  passes: DeadFlagElimination, CopyPropagation, StackVarNaming, …
         ▼
 IrFunction (simplified)
-        │  Structurer (planned)                 ← gotos → if/else/while/for
+        │  Structurer                           ← blocks → if/else/while/do
         ▼
 PseudoCEmitter
         ▼
@@ -120,22 +120,50 @@ propagation from imports (uses `PeImage.Imports` names + a small Win32 API type
 database), switch‑table recovery, recognition of `__SEH_prolog4`/`__EH_prolog`
 frame helpers, x86 fastcall/thiscall register arguments.
 
-## 4. Structuring (planned)
+## 4. Structuring
 
-Goal: eliminate `goto`s. Approach: iterative pattern reduction over the CFG
-(Cifuentes / "no more gotos" style): reduce `if‑then`, `if‑then‑else`,
-`while`, `do‑while`, sequences; fall back to `goto` for irreducible remnants.
-Output becomes an `IrStructured` tree consumed by the emitter.
+Namespace `Spydate.Decompiler.Native.Structuring`. `Structurer.Structure(IrFunction)`
+returns a `CStmt` tree (`CSeq`, `CIf`, `CLoop`, `CBreak`, `CContinue`, `CGoto`,
+`CLabel`, `CRaw`) that the emitter prints directly.
+
+The shape comes from two dominance relations, computed with Cooper‑Harvey‑Kennedy
+over the block graph and over its reverse:
+
+- **Conditionals.** A two‑way branch joins at its immediate post‑dominator. That
+  node becomes the region's *follow*; each arm is emitted up to it, and the code
+  after the `if` continues there. An arm that reaches the follow immediately is
+  dropped, so a one‑armed `if` has no `else` (the condition is inverted when it is
+  the *then* arm that is empty).
+- **Loops.** A back edge whose target dominates its source heads a natural loop,
+  whose body is everything reaching the latch without passing the header. A header
+  holding nothing but its test becomes `while (cond)`; a latch that
+  post‑dominates the header becomes `do { } while (cond)` — that test guarantees
+  no path leaves the loop early, which is exactly what makes moving the test to
+  the bottom sound. Anything else is `while (true)` with the most‑used exit as the
+  follow. Inside a loop, an edge to the header is `continue` and one to the follow
+  is `break`.
+
+Everything else keeps a `goto`: irreducible regions, jumps that leave a loop
+sideways, tail jumps out of the function, and nesting past a depth cap. Only the
+blocks a surviving `goto` targets get a `loc_XXXX:` label.
+
+Three invariants make the output safe to read, and are asserted over every
+function of both notepads in `StructuringTests`:
+
+1. every block is emitted exactly once — never duplicated, never dropped
+   (blocks no structure reached are appended at the end);
+2. control falls out of a region only through the follow it was built around;
+3. every surviving `goto` has a label to land on.
 
 ## 5. Emission (`PseudoCEmitter`)
 
 Deterministic text with 4‑space indent, one statement per line and the source
-VA as a trailing comment. Blocks are laid out entry-first then by address;
-`loc_XXXX:` labels appear only where control arrives from somewhere other than
-the previous line. `arg_XX` slots become parameters in the signature, remaining
-referenced slots are declared as locals with their `[sp±offset]`. Constants
-below 256 print in decimal, larger ones as `0x..`; a `goto` to the next block is
-elided and `if (c) goto next` is inverted to `if (!c) goto other`. Style is
+VA as a trailing comment. The body is the `CStmt` tree, printed with Allman
+braces; a lone `if` in an `else` arm chains into `else if`. `arg_XX` slots become
+parameters in the signature, remaining referenced slots are declared as locals
+with their `[sp±offset]`. Constants below 256 print in decimal, larger ones as
+`0x..`. The header comment says how many edges kept a `goto`, so an unusually
+tangled function is visible without reading it. Style is
 closer to Ghidra/IDA than to compiled C — it prioritises being read alongside
 the disassembly.
 

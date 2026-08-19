@@ -54,10 +54,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Authenticode summary: the certificate table decoded to signer, issuer, serial,
   digest algorithm, validity window and RFC 3161 timestamp (described, not verified)
 
-## Phase 2 — Decompiler quality ⬜
+## Phase 2 — Decompiler quality 🚧
 - ⬜ SSA construction (cross-block propagation), register aliasing normalisation
 - ⬜ x86 fastcall/thiscall register arguments; return-value inference; float args
-- ⬜ Control‑flow structuring (if/else, loops, switch) — remove gotos
+- ✅ Control‑flow structuring: `if`/`else if`/`else`, `while`, `do`/`while`,
+  `break`/`continue`, from dominators and post-dominators. Edges no structure
+  covers keep a `goto`, and only those blocks keep a label; every block is still
+  emitted exactly once (asserted over every function of both notepads)
+- ⬜ Switch statements (needs jump-table recovery below)
 - ⬜ Name global data (`data_XXXX`, string literals) instead of raw addresses
 - ⬜ Type propagation from import signatures (small Win32 API DB)
 - ⬜ Switch‑table (jump table) recovery
