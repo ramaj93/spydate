@@ -7,7 +7,6 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
-using Spydate.App.Services;
 using Spydate.Core.PE;
 using Spydate.Disassembly;
 using SymbolRegular = Wpf.Ui.Controls.SymbolRegular;
