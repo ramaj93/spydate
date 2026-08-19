@@ -36,6 +36,15 @@ public sealed record IrBranch(IrExpr Condition, ulong TargetVa, ulong Fallthroug
     public override string ToString() => $"if ({Condition}) goto loc_{TargetVa:X};";
 }
 
+/// <summary>
+/// Dispatch through a recovered switch table: <paramref name="Targets"/> is indexed by
+/// <paramref name="Value"/>, so entry <c>i</c> is the body of <c>case i</c>.
+/// </summary>
+public sealed record IrSwitch(IrExpr Value, IReadOnlyList<ulong> Targets) : IrStmt
+{
+    public override string ToString() => $"switch ({Value}) // {Targets.Count} case(s)";
+}
+
 public sealed record IrLabel(ulong LabelVa) : IrStmt
 {
     public override string ToString() => $"loc_{LabelVa:X}:";

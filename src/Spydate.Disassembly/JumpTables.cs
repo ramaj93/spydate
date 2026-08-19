@@ -22,6 +22,10 @@ public sealed record JumpTable
     public required JumpTableKind Kind { get; init; }
     /// <summary>Value each entry is added to; zero for <see cref="JumpTableKind.Absolute"/>.</summary>
     public ulong BaseVa { get; init; }
+    /// <summary>Register holding the index, as the lifter names it, when it could be identified.</summary>
+    public string? IndexRegister { get; init; }
+    /// <summary>Width of <see cref="IndexRegister"/> in bits.</summary>
+    public int IndexBits { get; init; }
     /// <summary>Targets in entry order; an index maps to the target at the same position.</summary>
     public required IReadOnlyList<ulong> Targets { get; init; }
     /// <summary>True when the entry count came from a bounds check rather than from validating entries.</summary>
@@ -111,6 +115,8 @@ public static class JumpTables
                 JumpVa = jump.Va,
                 TableVa = tableVa,
                 Kind = JumpTableKind.Absolute,
+                IndexRegister = RegisterName(instr.MemoryIndex),
+                IndexBits = instr.MemoryIndex.GetSize() * 8,
                 Targets = targets,
                 CountFromBoundsCheck = bound is not null && targets.Count == bound,
             };
@@ -206,6 +212,8 @@ public static class JumpTables
                 TableVa = tableVa,
                 BaseVa = baseVa,
                 Kind = JumpTableKind.RelativeToBase,
+                IndexRegister = RegisterName(indexRegister),
+                IndexBits = indexRegister.GetSize() * 8,
                 Targets = targets,
                 CountFromBoundsCheck = bound is not null && targets.Count == bound,
             };
@@ -292,6 +300,10 @@ public static class JumpTables
            && instr.Op0Kind == OpKind.Register
            && Canonical(instr.Op0Register) == register
            && instr.Mnemonic is not (Mnemonic.Cmp or Mnemonic.Test or Mnemonic.Push);
+
+    /// <summary>Lower-case register name, matching how the lifter names registers.</summary>
+    private static string? RegisterName(Register register)
+        => register == Register.None ? null : register.ToString().ToLowerInvariant();
 
     /// <summary>Widest register in the family, so <c>eax</c> and <c>rax</c> compare equal.</summary>
     private static Register Canonical(Register register)

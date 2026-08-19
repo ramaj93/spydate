@@ -236,7 +236,7 @@ public sealed class FunctionDiscovery
             SweepGaps(entryVa, end, instructions, leaders, notes);
         }
 
-        var blocks = BuildBlocks(instructions, leaders);
+        var blocks = BuildBlocks(instructions, leaders, jumpTables);
         return new Function(entryVa, name, blocks, callTargets, indirectSlots, notes)
         {
             BoundsEnd = boundsEnd,
@@ -392,7 +392,7 @@ public sealed class FunctionDiscovery
         }
     }
 
-    private static List<BasicBlock> BuildBlocks(SortedDictionary<ulong, DecodedInstruction> instructions, HashSet<ulong> leaders)
+    private static List<BasicBlock> BuildBlocks(SortedDictionary<ulong, DecodedInstruction> instructions, HashSet<ulong> leaders, List<JumpTable> jumpTables)
     {
         var blocks = new List<BasicBlock>();
         var current = new List<DecodedInstruction>();
@@ -461,6 +461,20 @@ public sealed class FunctionDiscovery
                     if (last.BranchTargetVa is { } ut && byVa.ContainsKey(ut))
                     {
                         b.AddSuccessor(ut);
+                    }
+
+                    break;
+                case InstructionFlow.IndirectBranch:
+                    // A recovered switch has as many successors as the table has entries.
+                    foreach (var table in jumpTables.Where(t => t.JumpVa == last.Va))
+                    {
+                        foreach (ulong caseTarget in table.Targets)
+                        {
+                            if (byVa.ContainsKey(caseTarget))
+                            {
+                                b.AddSuccessor(caseTarget);
+                            }
+                        }
                     }
 
                     break;

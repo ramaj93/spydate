@@ -147,6 +147,11 @@ over the block graph and over its reverse:
   after the `if` continues there. An arm that reaches the follow immediately is
   dropped, so a one‑armed `if` has no `else` (the condition is inverted when it is
   the *then* arm that is empty).
+- **Switches.** A block ending in `IrSwitch` (from a table `FunctionDiscovery`
+  recovered) joins at its post-dominator too. Indices that share a target share an
+  arm; arms are emitted in address order, so an arm that runs off its end falls into
+  the next one exactly as C says it does. Inside an arm `break` means the switch, so
+  an edge that would leave an enclosing loop keeps a `goto` instead.
 - **Loops.** A back edge whose target dominates its source heads a natural loop,
   whose body is everything reaching the latch without passing the header. A header
   holding nothing but its test becomes `while (cond)`; a latch that

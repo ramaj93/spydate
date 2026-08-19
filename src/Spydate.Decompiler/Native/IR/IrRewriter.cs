@@ -74,6 +74,7 @@ public static class IrRewriter
             IrCallStmt c => c with { Call = (IrCall)Rewrite(c.Call, map), Result = c.Result is null ? null : includeDestinations ? Rewrite(c.Result, map) : c.Result },
             IrReturn r => r.Value is null ? r : r with { Value = Rewrite(r.Value, map) },
             IrBranch b => b with { Condition = Rewrite(b.Condition, map) },
+            IrSwitch s => s with { Value = Rewrite(s.Value, map) },
             _ => stmt,
         };
     }
@@ -129,6 +130,9 @@ public static class IrRewriter
                 break;
             case IrBranch b:
                 foreach (var e in Descendants(b.Condition)) { yield return e; }
+                break;
+            case IrSwitch s:
+                foreach (var e in Descendants(s.Value)) { yield return e; }
                 break;
         }
     }

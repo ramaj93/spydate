@@ -61,7 +61,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   `break`/`continue`, from dominators and post-dominators. Edges no structure
   covers keep a `goto`, and only those blocks keep a label; every block is still
   emitted exactly once (asserted over every function of both notepads)
-- ⬜ Switch statements (needs jump-table recovery below)
+- ✅ Switch statements: a recovered table lifts to `IrSwitch` and structures into
+  `switch`/`case`, with arms in address order so a body that runs off its end falls
+  through as C says it does, and `break` inside an arm meaning the switch
 - ✅ Global data named instead of printed as addresses: `data_XXXX` (or the
   symbol), `&data_XXXX` for a pointer, `sub_XXXX` for a function pointer, and the
   text itself for a string literal

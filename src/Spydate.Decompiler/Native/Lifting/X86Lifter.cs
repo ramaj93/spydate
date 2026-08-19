@@ -14,6 +14,7 @@ public sealed class X86Lifter
 {
     private readonly int _bitness;
     private readonly SymbolTable? _symbols;
+    private IReadOnlyDictionary<ulong, JumpTable> _jumpTables = new Dictionary<ulong, JumpTable>();
 
     public X86Lifter(int bitness, SymbolTable? symbols = null)
     {
@@ -31,8 +32,10 @@ public sealed class X86Lifter
     /// <summary>Lifts a discovered function into an <see cref="IrFunction"/>.</summary>
     public IrFunction Lift(Function function)
     {
+        ArgumentNullException.ThrowIfNull(function);
         var ir = new IrFunction(function.EntryVa, function.Name, _bitness);
         var ctx = new LiftContext();
+        _jumpTables = function.JumpTables.GroupBy(t => t.JumpVa).ToDictionary(g => g.Key, g => g.First());
 
         FlagState? carried = null;
         BasicBlock? previous = null;
@@ -318,6 +321,22 @@ public sealed class X86Lifter
                 if (ins.BranchTargetVa is { } jt)
                 {
                     Emit(new IrGoto(jt));
+                    return;
+                }
+
+                if (_jumpTables.TryGetValue(va, out var table) && table.Targets.Count > 0)
+                {
+                    // A recovered switch: the index selects the target, so the dispatch becomes the
+                    // statement rather than the arithmetic that computed the address.
+                    IrExpr index = table.IndexRegister is { } register
+                        ? new IrReg(register, table.IndexBits == 0 ? PtrBits : table.IndexBits)
+                        : new IrUnknown("switch index", PtrBits);
+                    Emit(new IrSwitch(index, table.Targets));
+                    foreach (ulong caseTarget in table.Targets)
+                    {
+                        fn.LabelTargets.Add(caseTarget);
+                    }
+
                     return;
                 }
 

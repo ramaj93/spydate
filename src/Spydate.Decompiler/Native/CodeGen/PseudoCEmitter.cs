@@ -137,6 +137,10 @@ public sealed class PseudoCEmitter
             case CLoop loop:
                 WriteLoop(sb, loop, depth, labels);
                 break;
+
+            case CSwitch dispatch:
+                WriteSwitch(sb, dispatch, depth, labels);
+                break;
         }
     }
 
@@ -223,6 +227,23 @@ public sealed class PseudoCEmitter
         }
     }
 
+    private void WriteSwitch(StringBuilder sb, CSwitch dispatch, int depth, HashSet<ulong> labels)
+    {
+        WriteLine(sb, depth, $"switch ({IrPrinter.Print(dispatch.Value)})", null);
+        WriteLine(sb, depth, "{", null);
+        foreach (var arm in dispatch.Cases)
+        {
+            foreach (int label in arm.Labels)
+            {
+                WriteLine(sb, depth + 1, $"case {label.ToString(CultureInfo.InvariantCulture)}:", null);
+            }
+
+            Write(sb, arm.Body, depth + 2, labels);
+        }
+
+        WriteLine(sb, depth, "}", null);
+    }
+
     private void WriteBlock(StringBuilder sb, CStmt body, int depth, HashSet<ulong> labels)
     {
         WriteLine(sb, depth, "{", null);
@@ -270,6 +291,8 @@ public sealed class PseudoCEmitter
                 return $"goto loc_{g.TargetVa:X};";
             case IrBranch b:
                 return $"if ({IrPrinter.Print(b.Condition)}) goto loc_{b.TargetVa:X};";
+            case IrSwitch s:
+                return $"switch ({IrPrinter.Print(s.Value)});   // {s.Targets.Count} case(s)";
             case IrLabel l:
                 return $"loc_{l.LabelVa:X}:";
             case IrAsm asm:

@@ -53,8 +53,12 @@ public sealed class Structurer
         public int ConditionBlock { get; set; } = -1;
     }
 
-    /// <summary>What the region currently being emitted is nested in.</summary>
-    private readonly record struct Ctx(LoopInfo? Loop, int Follow);
+    /// <summary>
+    /// What the region currently being emitted is nested in. <paramref name="Follow"/> is the block the
+    /// region falls out to; <paramref name="BreakTarget"/> is set inside a switch arm, where <c>break</c>
+    /// leaves the switch rather than the enclosing loop.
+    /// </summary>
+    private readonly record struct Ctx(LoopInfo? Loop, int Follow, int BreakTarget = -1);
 
     private enum EdgeKind
     {
@@ -349,7 +353,7 @@ public sealed class Structurer
         var statements = _cfg.Blocks[node].Statements;
         int term = TerminatorIndex(statements);
         var terminator = term >= 0 ? statements[term] : null;
-        int limit = terminator is IrBranch or IrGoto ? term : statements.Count;
+        int limit = terminator is IrBranch or IrGoto or IrSwitch ? term : statements.Count;
 
         for (int i = 0; i < limit; i++)
         {
@@ -372,6 +376,9 @@ public sealed class Structurer
 
             case IrBranch branch:
                 return EmitIf(items, node, branch, ctx);
+
+            case IrSwitch dispatch:
+                return EmitSwitch(items, node, dispatch, ctx);
         }
 
         // No terminator: either a fallthrough, or a block whose exit the disassembler could not follow.
@@ -429,6 +436,62 @@ public sealed class Structurer
         }
     }
 
+    /// <summary>
+    /// A recovered switch. Indices that share a target share an arm, arms are emitted in address order so
+    /// that falling off the end of one lands in the next, and the join point becomes what <c>break</c>
+    /// means inside them.
+    /// </summary>
+    private int EmitSwitch(List<CStmt> items, int node, IrSwitch dispatch, Ctx ctx)
+    {
+        int follow = _pdom.Idom(node);
+        if (follow >= _cfg.Count || follow == node)
+        {
+            follow = -1;
+        }
+
+        var groups = new List<(int Target, List<int> Labels)>();
+        var byTarget = new Dictionary<int, List<int>>();
+        for (int i = 0; i < dispatch.Targets.Count; i++)
+        {
+            int target = _cfg.IndexOf(dispatch.Targets[i]);
+            if (target < 0)
+            {
+                continue; // an entry that left the function; the table read stops there anyway
+            }
+
+            if (!byTarget.TryGetValue(target, out var labels))
+            {
+                labels = new List<int>();
+                byTarget[target] = labels;
+                groups.Add((target, labels));
+            }
+
+            labels.Add(i);
+        }
+
+        if (groups.Count == 0)
+        {
+            return ResolveNext(items, follow, ctx);
+        }
+
+        groups.Sort((a, b) => _cfg.Va(a.Target).CompareTo(_cfg.Va(b.Target)));
+
+        _depth++;
+        var cases = new List<CCase>(groups.Count);
+        for (int i = 0; i < groups.Count; i++)
+        {
+            // The next arm is this one's follow, which is what makes a run-off-the-end fall through.
+            int next = i + 1 < groups.Count ? groups[i + 1].Target : -1;
+            var armCtx = ctx with { Follow = next, BreakTarget = follow };
+            cases.Add(new CCase(groups[i].Labels, EmitRegion(groups[i].Target, armCtx, _cfg.Va(groups[i].Target))));
+        }
+
+        _depth--;
+
+        items.Add(new CSwitch(dispatch.Value, cases));
+        return ResolveNext(items, follow, ctx);
+    }
+
     /// <summary>One arm of a conditional: everything reachable from <paramref name="target"/> up to the join.</summary>
     private CStmt EmitRegion(int target, Ctx ctx, ulong targetVa)
     {
@@ -472,6 +535,11 @@ public sealed class Structurer
             return (EdgeKind.Fallout, null);
         }
 
+        if (ctx.BreakTarget >= 0 && target == ctx.BreakTarget)
+        {
+            return (EdgeKind.Break, new CBreak());
+        }
+
         if (ctx.Loop is { } loop)
         {
             if (target == loop.Header)
@@ -481,7 +549,10 @@ public sealed class Structurer
 
             if (target == loop.Follow)
             {
-                return (EdgeKind.Break, new CBreak());
+                // Inside a switch arm, `break` would only leave the switch.
+                return ctx.BreakTarget >= 0
+                    ? (EdgeKind.Goto, new CGoto(_cfg.Va(target)))
+                    : (EdgeKind.Break, new CBreak());
             }
 
             if (!loop.Body.Contains(target))
@@ -508,7 +579,7 @@ public sealed class Structurer
             {
                 case IrNop:
                     continue;
-                case IrBranch or IrGoto or IrReturn:
+                case IrBranch or IrGoto or IrReturn or IrSwitch:
                     return i;
                 default:
                     return -1;

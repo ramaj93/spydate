@@ -161,6 +161,55 @@ public class StructuringTests
         }
     }
 
+    [Fact]
+    public void ARecoveredTableBecomesASwitch()
+    {
+        // cmp eax,2 ; ja default ; jmp [eax*4+table], with three cases that each return.
+        var code = new byte[0x40];
+        Array.Fill(code, (byte)0xCC);
+        new byte[] { 0x83, 0xF8, 0x02 }.CopyTo(code, 0x00);
+        new byte[] { 0x77, 0x1B }.CopyTo(code, 0x03);
+        new byte[] { 0xFF, 0x24, 0x85, 0x30, 0x10, 0x00, 0x00 }.CopyTo(code, 0x05);
+        new byte[] { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 }.CopyTo(code, 0x0C);
+        new byte[] { 0xB8, 0x02, 0x00, 0x00, 0x00, 0xC3 }.CopyTo(code, 0x14);
+        new byte[] { 0x31, 0xC0, 0xC3 }.CopyTo(code, 0x1A);
+        new byte[] { 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3 }.CopyTo(code, 0x20);
+        new byte[] { 0x0C, 0x10, 0x00, 0x00, 0x14, 0x10, 0x00, 0x00, 0x1A, 0x10, 0x00, 0x00 }.CopyTo(code, 0x30);
+
+        string text = Decompile(code, 0x1000, 32);
+
+        Assert.Contains("switch (eax)", text);
+        Assert.Contains("case 0:", text);
+        Assert.Contains("case 1:", text);
+        Assert.Contains("case 2:", text);
+        Assert.Contains("return 1;", text);
+        Assert.Contains("return 2;", text);
+        Assert.DoesNotContain("__asm", text);   // the dispatch is no longer an unlifted instruction
+    }
+
+    [Fact]
+    public void CasesSharingABodyShareAnArm()
+    {
+        // The same dispatch, but every entry points at the same body.
+        var code = new byte[0x40];
+        Array.Fill(code, (byte)0xCC);
+        new byte[] { 0x83, 0xF8, 0x02 }.CopyTo(code, 0x00);
+        new byte[] { 0x77, 0x1B }.CopyTo(code, 0x03);
+        new byte[] { 0xFF, 0x24, 0x85, 0x30, 0x10, 0x00, 0x00 }.CopyTo(code, 0x05);
+        new byte[] { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 }.CopyTo(code, 0x0C);
+        new byte[] { 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3 }.CopyTo(code, 0x20);
+        new byte[] { 0x0C, 0x10, 0x00, 0x00, 0x0C, 0x10, 0x00, 0x00, 0x0C, 0x10, 0x00, 0x00 }.CopyTo(code, 0x30);
+
+        string text = Decompile(code, 0x1000, 32);
+
+        // One arm carries all three labels: nothing but labels between the first and the last.
+        int first = text.IndexOf("case 0:", StringComparison.Ordinal);
+        int last = text.IndexOf("case 2:", StringComparison.Ordinal);
+        Assert.True(first >= 0 && last > first, text);
+        Assert.DoesNotContain(";", text[first..last]);
+        Assert.Equal(1, text.Split("return 1;").Length - 1);
+    }
+
     /// <summary>
     /// The invariant that makes the output safe to read: over every function in a real binary, each block
     /// is emitted exactly once, and every goto has somewhere to land.

@@ -38,6 +38,15 @@ public enum CLoopKind
 
 public sealed record CLoop(CLoopKind Kind, IrExpr? Condition, CStmt Body) : CStmt;
 
+/// <summary>One arm of a <see cref="CSwitch"/>; several indices can share a body.</summary>
+public sealed record CCase(IReadOnlyList<int> Labels, CStmt Body);
+
+/// <summary>
+/// Dispatch on a value. Arms are in address order, so an arm that runs off its end falls into the next
+/// one exactly as C says it does; every other exit carries its own <c>break</c> or <c>goto</c>.
+/// </summary>
+public sealed record CSwitch(IrExpr Value, IReadOnlyList<CCase> Cases) : CStmt;
+
 public sealed record CBreak : CStmt;
 
 public sealed record CContinue : CStmt;
@@ -119,6 +128,16 @@ public static class CStmts
                 foreach (var d in Descendants(l.Body))
                 {
                     yield return d;
+                }
+
+                break;
+            case CSwitch s:
+                foreach (var arm in s.Cases)
+                {
+                    foreach (var d in Descendants(arm.Body))
+                    {
+                        yield return d;
+                    }
                 }
 
                 break;
