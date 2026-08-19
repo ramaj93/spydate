@@ -30,8 +30,16 @@ public abstract partial class DocumentViewModel : ObservableObject
 
     public bool CanClose { get; init; } = true;
 
-    /// <summary>The address this document is about, when it has one. Drives the Xrefs panel.</summary>
-    public ulong? Address { get; init; }
+    /// <summary>
+    /// The address this document is about, when it has one. Drives the Xrefs panel. Documents that
+    /// track a selection (the string list) change it as the user moves around.
+    /// </summary>
+    [ObservableProperty]
+    private ulong? _address;
+
+    /// <summary>Bytes covered by <see cref="Address"/>; more than one for a string literal.</summary>
+    [ObservableProperty]
+    private int _addressLength = 1;
 
     /// <summary>Called once when the document becomes visible for the first time; heavy work goes here.</summary>
     public virtual Task LoadAsync(CancellationToken cancellationToken) => Task.CompletedTask;

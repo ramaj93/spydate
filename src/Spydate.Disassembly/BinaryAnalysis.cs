@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Spydate.Core.PE;
+using Spydate.Core.Strings;
 using Spydate.Core.Symbols;
 
 namespace Spydate.Disassembly;
@@ -16,6 +17,7 @@ public sealed class BinaryAnalysis
     private readonly ConcurrentDictionary<ulong, Function> _functions = new();
     private readonly FunctionDiscovery _discovery;
     private readonly XrefExtractor _xrefExtractor;
+    private readonly Lazy<StringIndex> _strings;
 
     public BinaryAnalysis(PeImage image, AsmSyntax syntax = AsmSyntax.Intel, DiscoveryOptions? options = null)
     {
@@ -25,6 +27,10 @@ public sealed class BinaryAnalysis
         Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
         _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, options);
         _xrefExtractor = new XrefExtractor(Source);
+        // Scanning touches every byte of the file, so it waits until something asks for a string.
+        _strings = new Lazy<StringIndex>(
+            () => StringIndex.Build(StringScanner.Scan(image)),
+            LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public PeImage Image { get; }
@@ -37,6 +43,15 @@ public sealed class BinaryAnalysis
 
     /// <summary>Cross-references collected from every function discovered so far.</summary>
     public XrefTable Xrefs { get; } = new();
+
+    /// <summary>
+    /// Strings found in the image, indexed by address. Built on first use — call it off the UI
+    /// thread, since the scan reads the whole file.
+    /// </summary>
+    public StringIndex Strings => _strings.Value;
+
+    /// <summary>The string literal covering <paramref name="va"/>, or null.</summary>
+    public FoundString? StringAt(ulong va) => Strings.Find(va);
 
     /// <summary>Whether the image's machine type is supported by the x86 disassembler.</summary>
     public bool CanDisassemble => Image.IsX86Family;

@@ -4,6 +4,7 @@ using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
+using Spydate.Core.Strings;
 using Spydate.Decompiler.Native;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
@@ -146,6 +147,62 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
     // Formatting
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// <c>"text"</c> when the instruction's data reference points into a string literal.
+    /// The reference may land inside the string, so the offset is shown when it is not the start.
+    /// </summary>
+    private static string? StringComment(DecodedInstruction ins, BinaryAnalysis analysis)
+    {
+        foreach (var xref in analysis.Xrefs.From(ins.Va))
+        {
+            if (xref.IsCode || analysis.StringAt(xref.ToVa) is not { } literal || literal.Va is not { } start)
+            {
+                continue;
+            }
+
+            string text = Escape(literal.Text);
+            ulong offset = xref.ToVa - start;
+            string prefix = literal.Encoding == StringEncodingKind.Utf16 ? "L" : string.Empty;
+            return offset == 0 ? $"{prefix}\"{text}\"" : $"{prefix}\"{text}\"+{offset}";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Trims literal text and escapes what would break the line. Backslashes are left alone:
+    /// doubling them turns every Windows path in the listing into noise.
+    /// </summary>
+    private static string Escape(string text)
+    {
+        const int max = 60;
+        string trimmed = text.Length <= max ? text : text[..max] + "…";
+        var sb = new StringBuilder(trimmed.Length + 2);
+        foreach (char c in trimmed)
+        {
+            switch (c)
+            {
+                case '"':
+                    sb.Append("\\\"");
+                    break;
+                case '\r':
+                    sb.Append("\\r");
+                    break;
+                case '\n':
+                    sb.Append("\\n");
+                    break;
+                case '\t':
+                    sb.Append("\\t");
+                    break;
+                default:
+                    sb.Append(char.IsControl(c) ? '.' : c);
+                    break;
+            }
+        }
+
+        return sb.ToString();
+    }
+
     private static string FormatFunction(BinaryAnalysis analysis, Function function)
     {
         var sb = new StringBuilder();
@@ -214,7 +271,8 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             sb.Append(' ', Math.Max(1, 8 - ins.Mnemonic.Length)).Append(operands);
         }
 
-        // Annotate direct branch/call targets and IAT slots that have names.
+        // Annotate direct branch/call targets and IAT slots that have names, and data references
+        // that land in a string literal — the single most useful comment in a disassembly listing.
         string? comment = null;
         if (ins.BranchTargetVa is { } target && analysis.Symbols.TryGet(target, out var sym) && !operands.Contains(sym.Name, StringComparison.Ordinal))
         {
@@ -223,6 +281,10 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
         else if (ins.IndirectSlotVa is { } slot && analysis.Symbols.TryGet(slot, out var slotSym) && !operands.Contains(slotSym.Name, StringComparison.Ordinal))
         {
             comment = slotSym.Name;
+        }
+        else if (StringComment(ins, analysis) is { } literal)
+        {
+            comment = literal;
         }
 
         if (comment is not null)

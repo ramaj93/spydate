@@ -81,18 +81,36 @@ public sealed partial class MainViewModel : ObservableObject
 
     public string WindowTitle => Binary is null ? ProductTitle : $"{ProductTitle} — {Binary.DisplayName}";
 
-    partial void OnActiveDocumentChanged(DocumentViewModel? value)
+    partial void OnActiveDocumentChanged(DocumentViewModel? oldValue, DocumentViewModel? newValue)
     {
-        if (value is not null)
+        if (oldValue is not null)
         {
-            _ = value.EnsureLoadedAsync();
+            oldValue.PropertyChanged -= OnActiveDocumentPropertyChanged;
         }
 
-        RefreshXrefs(value?.Address);
+        if (newValue is not null)
+        {
+            newValue.PropertyChanged += OnActiveDocumentPropertyChanged;
+            _ = newValue.EnsureLoadedAsync();
+        }
+
+        RefreshXrefs(newValue?.Address, newValue?.AddressLength ?? 1);
     }
 
-    /// <summary>Fills the Xrefs panel with every site that refers to <paramref name="va"/>.</summary>
-    private void RefreshXrefs(ulong? va)
+    /// <summary>Documents that track a selection move their address, so the panel follows.</summary>
+    private void OnActiveDocumentPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is DocumentViewModel doc && e.PropertyName is nameof(DocumentViewModel.Address) or nameof(DocumentViewModel.AddressLength))
+        {
+            RefreshXrefs(doc.Address, doc.AddressLength);
+        }
+    }
+
+    /// <summary>
+    /// Fills the Xrefs panel with every site that refers to the <paramref name="length"/> bytes at
+    /// <paramref name="va"/>. A string literal is referenced by its interior as often as its start.
+    /// </summary>
+    private void RefreshXrefs(ulong? va, int length)
     {
         Xrefs.Clear();
         if (va is not { } target || Binary?.Analysis is not { } analysis)
@@ -101,7 +119,13 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        foreach (var (xref, from) in analysis.XrefsTo(target))
+        var hits = new List<(Xref Xref, Function? From)>();
+        for (ulong address = target; address < target + (ulong)Math.Max(1, length); address++)
+        {
+            hits.AddRange(analysis.XrefsTo(address));
+        }
+
+        foreach (var (xref, from) in hits.OrderBy(h => h.Xref.FromVa))
         {
             string instruction = analysis.DisassembleRange(xref.FromVa, 16, maxInstructions: 1) is [{ } ins]
                 ? ins.Text
@@ -303,6 +327,13 @@ public sealed partial class MainViewModel : ObservableObject
         {
             doc.Refresh();
         }
+
+        foreach (var doc in Documents.OfType<StringsDocumentViewModel>())
+        {
+            doc.RefreshReferences();
+        }
+
+        RefreshXrefs(ActiveDocument?.Address, ActiveDocument?.AddressLength ?? 1);
     }
 
     // ------------------------------------------------------------------
@@ -420,7 +451,7 @@ public sealed partial class MainViewModel : ObservableObject
             SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
             ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe),
             ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, offset => OpenTarget(new HexTarget(offset))),
-            StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, offset => OpenTarget(new HexTarget(offset))),
+            StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),

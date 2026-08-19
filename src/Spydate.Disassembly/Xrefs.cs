@@ -75,6 +75,15 @@ public sealed class XrefTable
     /// <summary>Everything <paramref name="va"/> refers to.</summary>
     public IReadOnlyList<Xref> From(ulong va) => Snapshot(_from, va);
 
+    /// <summary>Snapshot of every reference, for bulk joins such as string-to-code mapping.</summary>
+    public IReadOnlyList<Xref> All()
+    {
+        lock (_gate)
+        {
+            return _seen.ToArray();
+        }
+    }
+
     /// <summary>Number of references to <paramref name="va"/> without materialising them.</summary>
     public int CountTo(ulong va)
     {

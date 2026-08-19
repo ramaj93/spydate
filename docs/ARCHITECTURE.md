@@ -121,6 +121,14 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   in-image immediates as address-taken. `XrefTable` indexes both directions and
   is locked, because discovery runs on a background thread while the UI reads it.
   `BinaryAnalysis.XrefsTo(va)` also resolves the enclosing function per site.
+- `StringIndex` / `StringReferences` — the join between scanned strings and the
+  xref index. Lookups match the whole range a string occupies, not just its
+  start, because compilers routinely point into the middle of a literal
+  (`lea rcx, [str+4]`). `StringReferences.Resolve` buckets every reference into
+  the string containing it; `BinaryAnalysis.StringAt(va)` answers the reverse
+  question for one address and backs the `; "text"` comments in disassembly.
+  The scan behind `BinaryAnalysis.Strings` is lazy (`Lazy<T>`) because it reads
+  the whole file — touch it off the UI thread.
 - `FunctionDiscovery` — recursive‑descent from a single entry VA; follows
   direct branches, records (does not follow) calls, splits basic blocks at
   branch targets, stops at `ret`/indirect jumps/invalid bytes. Produces

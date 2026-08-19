@@ -183,17 +183,31 @@ public sealed partial class ResourcesDocumentViewModel : DocumentViewModel
 // Strings
 // ---------------------------------------------------------------------------
 
-public sealed record StringRow(string Va, string Rva, string Offset, string Section, string Encoding, int Length, string Text, long FileOffset, bool InCodeSection);
+public sealed record StringRow(string Va, string Rva, string Offset, string Section, string Encoding, int Length, string Text, long FileOffset, bool InCodeSection, ulong? RawVa, int ByteLength, int Refs);
 
 public sealed partial class StringsDocumentViewModel : DocumentViewModel
 {
     private readonly PeImage _pe;
+    private readonly BinaryAnalysis? _analysis;
     private readonly Action<long> _openHex;
+    private IReadOnlyList<FoundString> _found = Array.Empty<FoundString>();
 
-    public StringsDocumentViewModel(PeImage pe, Action<long> openHex) : base("strings", "Strings", SymbolRegular.TextT24)
+    public StringsDocumentViewModel(PeImage pe, BinaryAnalysis? analysis, Action<long> openHex)
+        : base("strings", "Strings", SymbolRegular.TextT24)
     {
         _pe = pe;
+        _analysis = analysis;
         _openHex = openHex;
+    }
+
+    /// <summary>Selecting a string points the Xrefs panel at the bytes it occupies.</summary>
+    [ObservableProperty]
+    private StringRow? _selectedRow;
+
+    partial void OnSelectedRowChanged(StringRow? value)
+    {
+        Address = value?.RawVa;
+        AddressLength = value is null ? 1 : Math.Max(1, value.ByteLength);
     }
 
     public List<StringRow> Rows { get; private set; } = new();
@@ -204,10 +218,28 @@ public sealed partial class StringsDocumentViewModel : DocumentViewModel
     /// <summary>Scanning a large image touches every byte, so it happens off the UI thread.</summary>
     public override async Task LoadAsync(CancellationToken cancellationToken)
     {
-        var found = await Task.Run(() => StringScanner.Scan(_pe, StringScanOptions.Default, cancellationToken), cancellationToken).ConfigureAwait(true);
+        _found = await Task.Run(() => StringScanner.Scan(_pe, StringScanOptions.Default, cancellationToken), cancellationToken).ConfigureAwait(true);
+        Rebuild();
+    }
+
+    /// <summary>Recomputes reference counts; discovery keeps finding code after the first scan.</summary>
+    public void RefreshReferences()
+    {
+        if (_found.Count > 0)
+        {
+            Rebuild();
+        }
+    }
+
+    private void Rebuild()
+    {
+        var found = _found;
+        var references = _analysis is null
+            ? null
+            : StringReferences.Resolve(found, _analysis.Xrefs);
 
         var codeSections = _pe.Sections.Where(s => s.IsExecutable).Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
-        Rows = found.Select(s => new StringRow(
+        Rows = found.Select((s, i) => new StringRow(
             s.Va is { } va ? $"0x{va:X}" : "-",
             s.Rva is { } rva ? $"0x{rva:X8}" : "-",
             $"0x{s.Offset:X8}",
@@ -216,11 +248,16 @@ public sealed partial class StringsDocumentViewModel : DocumentViewModel
             s.Length,
             s.Text,
             s.Offset,
-            codeSections.Contains(s.Section))).ToList();
+            codeSections.Contains(s.Section),
+            s.Va,
+            StringIndex.ByteLength(s),
+            references?[i].Count ?? 0)).ToList();
 
         int wide = found.Count(s => s.Encoding == StringEncodingKind.Utf16);
         int inCode = Rows.Count(r => r.InCodeSection);
-        Summary = $"{Rows.Count:N0} strings ({wide:N0} utf-16, {inCode:N0} in code)";
+        int referenced = Rows.Count(r => r.Refs > 0);
+        Summary = $"{Rows.Count:N0} strings ({wide:N0} utf-16, {inCode:N0} in code" +
+                  (references is null ? ")" : $", {referenced:N0} referenced)");
         OnPropertyChanged(nameof(Rows));
     }
 

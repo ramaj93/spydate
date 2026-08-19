@@ -33,7 +33,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Cross‑references (calls, jumps, reads, writes, address-taken, IAT usage),
   Xrefs panel and a per-function reference count
 - ✅ String scanning (ASCII + UTF‑16, both parities) with a Strings document
-- ⬜ Link strings to the code that references them (xref column in the Strings view)
+- ✅ Strings linked to the code that references them: reference counts and a
+  "referenced only" filter in the Strings view, the Xrefs panel following the
+  selected string, and string literals annotated inline in disassembly
 - ⬜ PDB symbol loading (MSF/DBI) for local symbol names
 - ⬜ Authenticode signature summary (the certificate directory in the overlay)
 

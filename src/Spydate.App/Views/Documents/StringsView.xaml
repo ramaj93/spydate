@@ -21,13 +21,17 @@
                 <CheckBox x:Name="IncludeCode" DockPanel.Dock="Left" Content="Code sections" Margin="10,0,0,0"
                           ToolTip="Executable sections are mostly instruction bytes that happen to be printable"
                           Checked="OnFilterChanged" Unchecked="OnFilterChanged" />
+                <CheckBox x:Name="ReferencedOnly" DockPanel.Dock="Left" Content="Referenced only" Margin="10,0,0,0"
+                          ToolTip="Only strings some instruction points at"
+                          Checked="OnFilterChanged" Unchecked="OnFilterChanged" />
                 <TextBlock Text="{Binding Summary}" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="{DynamicResource Text.Secondary}" />
-                <TextBlock Text="  ·  double-click to view the bytes" VerticalAlignment="Center"
+                <TextBlock Text="  ·  select a string to see what references it" VerticalAlignment="Center"
                            Foreground="{DynamicResource Text.Tertiary}" />
             </DockPanel>
         </Border>
         <DataGrid Grid.Row="1" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}"
+                  SelectedItem="{Binding SelectedRow, Mode=TwoWay}"
                   MouseDoubleClick="OnRowDoubleClick">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Address" Binding="{Binding Va}" Width="130" />
@@ -35,6 +39,7 @@
                 <DataGridTextColumn Header="Section" Binding="{Binding Section}" Width="80" />
                 <DataGridTextColumn Header="Type" Binding="{Binding Encoding}" Width="62" />
                 <DataGridTextColumn Header="Len" Binding="{Binding Length}" Width="52" />
+                <DataGridTextColumn Header="Refs" Binding="{Binding Refs}" Width="52" />
                 <DataGridTextColumn Header="Text" Binding="{Binding Text}" Width="*" />
             </DataGrid.Columns>
         </DataGrid>

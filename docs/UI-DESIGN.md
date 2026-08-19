@@ -48,9 +48,12 @@ Both tool windows can be hidden from the **View** menu or their own ✕; the
 window remembers the last size of each panel (`MainWindow.xaml.cs`).
 
 The **Xrefs** tab follows the active document: every document may carry an
-`Address`, and code documents set it to their function entry, so opening a
-function lists the sites that reference it (address, enclosing function, kind,
-instruction). Double-clicking navigates to the referring function.
+`Address` (and an `AddressLength`), and code documents set it to their function
+entry, so opening a function lists the sites that reference it (address,
+enclosing function, kind, instruction). Double-clicking navigates to the
+referring function. The Strings document moves its address as the selection
+changes and spans the whole literal, so a reference into the middle of a string
+still shows up.
 
 ## 3. MVVM
 
@@ -127,6 +130,6 @@ Type → Member** nodes that open C#/IL documents.
   the Functions *document* has a filter box and should become the primary list.
 - No navigation history yet; go‑to accepts VA, RVA, offset or symbol name.
 - The Strings view hides hits in executable sections by default (they are mostly
-  instruction bytes); it does not yet show which code references each string.
+  instruction bytes) and can be narrowed to strings some instruction points at.
 - Toolbar/menu items expose `AutomationProperties.Name`, but buttons inside
   document toolbars do not yet appear in the UI Automation tree.

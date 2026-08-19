@@ -62,11 +62,13 @@ public partial class StringsView : UserControl
 
         string filter = FilterBox.Text.Trim();
         bool includeCode = IncludeCode.IsChecked == true;
+        bool referencedOnly = ReferencedOnly.IsChecked == true;
 
         // Strings inside executable sections are mostly instruction bytes that happen to be
         // printable, so they stay hidden until asked for.
         view.Filter = o => o is StringRow r
                            && (includeCode || !r.InCodeSection)
+                           && (!referencedOnly || r.Refs > 0)
                            && (filter.Length == 0
                                || r.Text.Contains(filter, StringComparison.OrdinalIgnoreCase)
                                || r.Section.Contains(filter, StringComparison.OrdinalIgnoreCase)
