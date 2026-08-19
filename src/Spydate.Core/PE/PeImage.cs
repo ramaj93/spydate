@@ -880,13 +880,80 @@ public sealed class PeImage
 
     private IReadOnlyList<RuntimeFunction> ParseExceptionTable()
     {
-        var span = _data.Span;
         var dir = GetDirectory(DataDirectoryIndex.Exception);
-        // Only the x64 (and ARM64/ARM, different layout — not parsed) format is understood here.
-        if (!dir.IsPresent || Machine != MachineType.Amd64)
+        if (!dir.IsPresent)
         {
             return Array.Empty<RuntimeFunction>();
         }
+
+        return Machine switch
+        {
+            MachineType.Amd64 => ParseX64ExceptionTable(dir),
+            MachineType.Arm64 or MachineType.Arm64Ec or MachineType.Arm64X => ParseArm64ExceptionTable(dir),
+            _ => Array.Empty<RuntimeFunction>(),
+        };
+    }
+
+    /// <summary>
+    /// ARM64 .pdata: BeginAddress plus a word that is either packed unwind data (low bits non-zero)
+    /// or an RVA to an .xdata record. Both encode the function length, which is what analysis needs.
+    /// </summary>
+    private IReadOnlyList<RuntimeFunction> ParseArm64ExceptionTable(DataDirectory dir)
+    {
+        int count = (int)Math.Min(dir.Size / RuntimeFunction.Arm64Size, 1_000_000);
+        var list = new List<RuntimeFunction>(count);
+        var r = new SpanReader(_data.Span, RequireOffset(dir.Rva, "Exception directory"));
+
+        for (int i = 0; i < count; i++)
+        {
+            if (!r.CanRead(RuntimeFunction.Arm64Size))
+            {
+                _warnings.Add("Exception directory is truncated.");
+                break;
+            }
+
+            uint begin = r.ReadU32();
+            uint unwindData = r.ReadU32();
+            if (begin == 0 && unwindData == 0)
+            {
+                continue; // padding
+            }
+
+            uint flag = unwindData & 3;
+            if (flag != 0)
+            {
+                // Packed: bits 2-12 hold the length in 4-byte instruction words.
+                uint length = ((unwindData >> 2) & 0x7FF) * 4;
+                list.Add(new RuntimeFunction(begin, begin + length, 0)
+                {
+                    IsPacked = true,
+                    IsChained = flag == 2, // packed fragment: a continuation of another function
+                });
+                continue;
+            }
+
+            // Unpacked: the word is an RVA to an .xdata header whose low 18 bits are the length
+            // in words. A second word follows when the count does not fit, but the length does.
+            uint headerRva = unwindData;
+            var header = ReadAtRva(headerRva, 4);
+            if (header.Length < 4)
+            {
+                _warnings.Add($"Unwind data at RVA 0x{headerRva:X} is not backed by file data.");
+                list.Add(new RuntimeFunction(begin, begin, headerRva));
+                continue;
+            }
+
+            uint word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(header.Span);
+            uint words = word & 0x3FFFF;
+            list.Add(new RuntimeFunction(begin, begin + (words * 4), headerRva));
+        }
+
+        return list;
+    }
+
+    private IReadOnlyList<RuntimeFunction> ParseX64ExceptionTable(DataDirectory dir)
+    {
+        var span = _data.Span;
 
         int count = (int)Math.Min(dir.Size / RuntimeFunction.Size, 1_000_000);
         var list = new List<RuntimeFunction>(count);

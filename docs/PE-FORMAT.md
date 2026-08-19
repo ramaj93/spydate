@@ -182,3 +182,23 @@ binaries carry) and the legacy PKCS#9 countersignature with signing time
 Spydate decodes and describes the signature; it does not verify it, which would
 mean re-hashing the file under the Authenticode rules (headers, the checksum
 field, the certificate directory itself and the overlay are excluded).
+
+## Exception directory (dir 3) on ARM64
+
+Entries are 8 bytes, not 12, and encode a *length* rather than an end address:
+
+```
+DWORD BeginAddress;
+DWORD UnwindData;
+```
+
+`UnwindData & 3` decides the form. Non-zero means **packed**: bits 2-12 are the
+function length in 4-byte instruction words, bits 13+ describe the frame
+(RegF, RegI, H, CR, FrameSize). Flag 2 marks a fragment — the continuation of a
+function that starts elsewhere, the ARM64 equivalent of a chained x64 entry.
+
+Zero means `UnwindData` is an RVA to an `.xdata` record whose first word holds
+the length in words in bits 0-17, then Vers, X, E, EpilogCount and CodeWords.
+
+Spydate reduces both forms to the same begin/end pair the x64 table produces, so
+function bounds work the same way on either architecture.

@@ -48,8 +48,33 @@ internal static class SyntheticPe
         return PeImage.Parse(file);
     }
 
+/// <summary>
+    /// An ARM64 image whose exception directory holds the given entries. Each entry is
+    /// (BeginRva, UnwindData); set the low bits of UnwindData for the packed form, or leave them
+    /// clear and point at an .xdata word placed later in the same section.
+    /// </summary>
+    public static PeImage WithArm64ExceptionTable((uint BeginRva, uint UnwindData)[] entries, (uint Rva, uint Header)[]? xdata = null)
+    {
+        uint directorySize = (uint)(entries.Length * 8);
+        var file = NewImage(DataDirectoryIndex.Exception, SectionRva, directorySize, MachineType.Arm64);
+
+        var section = file.AsSpan(SectionDataOffset);
+        for (int i = 0; i < entries.Length; i++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(section[(i * 8)..], entries[i].BeginRva);
+            BinaryPrimitives.WriteUInt32LittleEndian(section[((i * 8) + 4)..], entries[i].UnwindData);
+        }
+
+        foreach (var (rva, header) in xdata ?? Array.Empty<(uint, uint)>())
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(section[(int)(rva - SectionRva)..], header);
+        }
+
+        return PeImage.Parse(file);
+    }
+
     /// <summary>A PE32+ image with one read-only section and one populated data directory.</summary>
-    private static byte[] NewImage(DataDirectoryIndex directory, uint directoryRva, uint directorySize)
+    private static byte[] NewImage(DataDirectoryIndex directory, uint directoryRva, uint directorySize, MachineType machine = MachineType.Amd64)
     {
         var file = new byte[FileSize];
         var span = file.AsSpan();
@@ -64,7 +89,7 @@ internal static class SyntheticPe
         BinaryPrimitives.WriteUInt32LittleEndian(nt, 0x0000_4550); // "PE\0\0"
 
         var coff = nt[4..];
-        BinaryPrimitives.WriteUInt16LittleEndian(coff, (ushort)MachineType.Amd64);
+        BinaryPrimitives.WriteUInt16LittleEndian(coff, (ushort)machine);
         BinaryPrimitives.WriteUInt16LittleEndian(coff[2..], 1);      // NumberOfSections
         BinaryPrimitives.WriteUInt16LittleEndian(coff[16..], 0xF0);  // SizeOfOptionalHeader
         BinaryPrimitives.WriteUInt16LittleEndian(coff[18..], 0x2022); // Characteristics: executable, DLL, large address aware
@@ -86,12 +111,12 @@ internal static class SyntheticPe
 
         // --- Section table ----------------------------------------------
         var section = opt[0xF0..];
-        ".rdata"u8.CopyTo(section);
+        ".text"u8.CopyTo(section);
         BinaryPrimitives.WriteUInt32LittleEndian(section[8..], SectionDataSize);      // VirtualSize
         BinaryPrimitives.WriteUInt32LittleEndian(section[12..], SectionRva);          // VirtualAddress
         BinaryPrimitives.WriteUInt32LittleEndian(section[16..], SectionDataSize);     // SizeOfRawData
         BinaryPrimitives.WriteUInt32LittleEndian(section[20..], SectionDataOffset);   // PointerToRawData
-        BinaryPrimitives.WriteUInt32LittleEndian(section[36..], 0x4000_0040);         // initialized data, read
+        BinaryPrimitives.WriteUInt32LittleEndian(section[36..], 0x6000_0020);         // code, execute, read
 
         return file;
     }

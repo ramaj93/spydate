@@ -26,7 +26,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   and SafeSEH tables as seeds), resource tree, Rich header
 - ✅ `RUNTIME_FUNCTION` end addresses as function bounds, with a sweep of the bytes
   the recursive descent never reached
-- ⬜ ARM64 unwind format
+- ✅ ARM64 unwind format: 8-byte .pdata entries, packed and .xdata forms, both reduced
+  to the same begin/end shape the x64 table produces (ARM64 disassembly is Phase 4)
 - ✅ Resource leaves decoded: version blocks, manifests (dark XML highlighting) and
   string tables open as text; version info also appears in the overview
 - ⬜ Map Rich header product ids to tool names (needs the undocumented prodid table)

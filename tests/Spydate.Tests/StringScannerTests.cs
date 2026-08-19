@@ -21,7 +21,7 @@ public class StringScannerTests
     /// <summary>Hits inside the payload section. The section name in the PE header is itself a
     /// printable run, and the scanner is right to report it - it just is not what these tests assert on.</summary>
     private static List<FoundString> InPayload(IEnumerable<FoundString> found)
-        => found.Where(s => s.Section == ".rdata").ToList();
+        => found.Where(s => s.Section == ".text").ToList();
 
     [Fact]
     public void FindsAsciiRunsAboveTheMinimumLength()
@@ -63,7 +63,7 @@ public class StringScannerTests
         var found = InPayload(StringScanner.Scan(pe, new StringScanOptions { MinLength = 5, ScanUtf16 = false }));
 
         var s = Assert.Single(found);
-        Assert.Equal(".rdata", s.Section);
+        Assert.Equal(".text", s.Section);
         Assert.NotNull(s.Rva);
         Assert.NotNull(s.Va);
         Assert.Equal(pe.RvaToVa(s.Rva!.Value), s.Va!.Value);

@@ -97,13 +97,24 @@ public sealed record DebugEntry
     public override string ToString() => CodeView is { } cv ? $"{Type}: {cv.PdbPath}" : Type.ToString();
 }
 
-/// <summary>x64 RUNTIME_FUNCTION entry from the exception directory (.pdata).</summary>
+/// <summary>
+/// An entry from the exception directory (.pdata). x64 entries are 12 bytes and state the end
+/// address; ARM64 entries are 8 bytes and encode the length, either packed into the word itself or
+/// in an .xdata record — either way the end is computed, so consumers see the same shape.
+/// </summary>
 public readonly record struct RuntimeFunction(uint BeginRva, uint EndRva, uint UnwindInfoRva)
 {
+    /// <summary>Size of an x64 entry.</summary>
     public const int Size = 12;
+
+    /// <summary>Size of an ARM64 / ARM entry.</summary>
+    public const int Arm64Size = 8;
 
     /// <summary>True when the UNWIND_INFO is a chained entry (a fragment of another function, not a function start).</summary>
     public bool IsChained { get; init; }
+
+    /// <summary>True when the unwind data is packed into the entry rather than stored in .xdata.</summary>
+    public bool IsPacked { get; init; }
 
     public uint Length => EndRva - BeginRva;
 }
