@@ -44,3 +44,25 @@ lifter must never silently drop an instruction (unsupported → `__asm` passthro
 `PeImage`, `Function`, `IrFunction` are immutable after construction, so
 documents can share them across threads without locks. Mutable user
 annotations (renames, comments) will live in a separate project store (Phase 3).
+
+## Rich header product ids are reported, not named
+
+The Rich header records `(product id, build number, object count)` triples for
+every tool that contributed to the binary. Product ids are undocumented; the
+mapping to tool names circulates as a community-maintained table.
+
+Spydate reports the raw ids, builds and counts, and does not name the tools.
+Two reasons:
+
+- The table cannot be verified from anything on the machine, and a wrong
+  toolchain label is worse than none — it is exactly the kind of detail an
+  analyst would quote in a report.
+- An earlier attempt inferred the Visual Studio version from the build number
+  instead. That is provably wrong: build numbers are not ordered across
+  releases (30729 is VS2008 SP1, 23026 is VS2015).
+
+What *is* verifiable is the header's own checksum, computed by the linker over
+the DOS stub and the entries. Spydate recomputes it: a match is evidence the
+header is genuine, and a mismatch means it was edited or forged, which is a
+signal worth surfacing. If a verified prodid table is ever added to the repo as
+data, naming can be layered on top without changing this decision.

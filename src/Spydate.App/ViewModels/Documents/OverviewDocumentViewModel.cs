@@ -106,7 +106,18 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             Signature.Add(new PropertyRow("Verification", "not performed", "the embedded certificate is described, not validated against the file"));
         }
 
-        Build = pe.RichHeader is { } rich
+        Build = new List<PropertyRow>();
+        if (pe.RichHeader is { } richHeader)
+        {
+            Build.Add(new PropertyRow(
+                "Checksum",
+                richHeader.IsChecksumValid ? "valid" : "MISMATCH",
+                richHeader.IsChecksumValid
+                    ? $"0x{richHeader.Checksum:X8} — the header is the linker's own"
+                    : $"stored 0x{richHeader.Checksum:X8}, computed 0x{richHeader.ComputedChecksum:X8} — edited or forged"));
+        }
+
+        Build.AddRange(pe.RichHeader is { } rich
             ? rich.Entries
                 .OrderByDescending(e => e.UseCount)
                 .Select(e => new PropertyRow(
@@ -114,7 +125,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                     $"{e.UseCount:N0} object{(e.UseCount == 1 ? string.Empty : "s")}",
                     e.BuildNumber == 0 ? "no build stamp" : $"build {e.BuildNumber}"))
                 .ToList()
-            : new List<PropertyRow>();
+            : new List<PropertyRow>());
 
         if (pe.ClrHeader is { } clr)
         {

@@ -30,7 +30,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   to the same begin/end shape the x64 table produces (ARM64 disassembly is Phase 4)
 - ✅ Resource leaves decoded: version blocks, manifests (dark XML highlighting) and
   string tables open as text; version info also appears in the overview
-- ⬜ Map Rich header product ids to tool names (needs the undocumented prodid table)
+- ✅ Rich header: ids, build numbers and object counts are reported, and the checksum is
+  recomputed from the DOS stub to prove the header is the linker's own. Product ids are
+  **not** mapped to tool names: the table is undocumented and unverifiable here, and a
+  wrong toolchain label is worse than none (see DECISIONS.md)
 - ✅ Gap sweeping: after seeds and calls are exhausted, the leftover bytes of executable
   sections are scanned for prologues (x86 notepad: 606 → 677 functions)
 - ✅ No-return functions (`ExitProcess`, `__fastfail`, `abort`, …, and thunks that

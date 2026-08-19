@@ -1381,7 +1381,13 @@ public sealed class PeImage
             entries.Add(new RichEntry((ushort)(idField >> 16), (ushort)(idField & 0xFFFF), count));
         }
 
-        return new RichHeader { Offset = (uint)startOffset, Checksum = key, Entries = entries };
+        return new RichHeader
+        {
+            Offset = (uint)startOffset,
+            Checksum = key,
+            ComputedChecksum = ComputeRichChecksum(span, startOffset, entries),
+            Entries = entries,
+        };
     }
 
 /// <summary>
@@ -1495,6 +1501,36 @@ public sealed class PeImage
 
         return null;
     }
+
+    /// <summary>
+    /// Recomputes the Rich checksum: the DanS offset, plus every DOS stub byte rotated by its own
+    /// position, plus every entry rotated by its use count. The e_lfanew field is excluded because
+    /// the linker computes the sum before it knows where the PE header will land.
+    /// </summary>
+    private static uint ComputeRichChecksum(ReadOnlySpan<byte> span, int dansOffset, IReadOnlyList<RichEntry> entries)
+    {
+        uint sum = (uint)dansOffset;
+
+        for (int i = 0; i < dansOffset && i < span.Length; i++)
+        {
+            if (i is >= 0x3C and < 0x40)
+            {
+                continue;
+            }
+
+            sum += RotateLeft(span[i], i & 0x1F);
+        }
+
+        foreach (var entry in entries)
+        {
+            uint value = ((uint)entry.ProductId << 16) | entry.BuildNumber;
+            sum += RotateLeft(value, (int)(entry.UseCount & 0x1F));
+        }
+
+        return sum;
+    }
+
+    private static uint RotateLeft(uint value, int count) => (value << count) | (value >> (32 - count));
 
     private (uint, uint) ComputeOverlay()
     {

@@ -218,9 +218,19 @@ public sealed record RichHeader
 {
     /// <summary>File offset of the <c>DanS</c> marker.</summary>
     public required uint Offset { get; init; }
-    /// <summary>XOR key, which doubles as a checksum over the DOS stub.</summary>
+    /// <summary>XOR key stored in the file, which doubles as a checksum over the DOS stub.</summary>
     public required uint Checksum { get; init; }
+
+    /// <summary>
+    /// The checksum recomputed from the DOS stub and the entries. It matching <see cref="Checksum"/>
+    /// is evidence the header is the linker's own and has not been edited — a tampered or forged
+    /// Rich header rarely bothers to recompute it.
+    /// </summary>
+    public required uint ComputedChecksum { get; init; }
+
     public required IReadOnlyList<RichEntry> Entries { get; init; }
+
+    public bool IsChecksumValid => Checksum == ComputedChecksum;
 }
 
 /// <summary>
