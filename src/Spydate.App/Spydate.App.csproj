@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>Spydate.App</RootNamespace>
+    <AssemblyName>Spydate</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Description>Spydate: Windows PE disassembler and decompiler.</Description>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WPF-UI" />
+    <PackageReference Include="AvalonEdit" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Spydate.Core\Spydate.Core.csproj" />
+    <ProjectReference Include="..\Spydate.Disassembly\Spydate.Disassembly.csproj" />
+    <ProjectReference Include="..\Spydate.Decompiler\Spydate.Decompiler.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Highlighting\*.xshd" />
+  </ItemGroup>
+
+</Project>

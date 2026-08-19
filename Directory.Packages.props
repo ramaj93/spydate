@@ -1,0 +1,32 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Label="Analysis engines">
+    <!-- x86/x64 decoder + formatter (MIT). -->
+    <PackageVersion Include="Iced" Version="1.21.0" />
+    <!-- ILSpy decompiler engine for managed (.NET) PE files (MIT). -->
+    <PackageVersion Include="ICSharpCode.Decompiler" Version="9.1.0.7988" />
+  </ItemGroup>
+
+  <ItemGroup Label="UI">
+    <!-- Fluent / WinUI-style controls for WPF (MIT). -->
+    <PackageVersion Include="WPF-UI" Version="4.3.0" />
+    <!-- Code editor used for disassembly / decompiled source views (MIT). -->
+    <PackageVersion Include="AvalonEdit" Version="6.3.1.120" />
+    <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+  </ItemGroup>
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="Xunit.SkippableFact" Version="1.5.23" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+  </ItemGroup>
+
+</Project>

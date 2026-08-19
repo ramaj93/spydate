@@ -1,0 +1,78 @@
+<UserControl x:Class="Spydate.App.Views.Documents.OverviewView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:OverviewDocumentViewModel}"
+             Background="{DynamicResource Document.Background}">
+    <UserControl.Resources>
+        <DataTemplate x:Key="PropertyRowTemplate" DataType="{x:Type docs:PropertyRow}">
+            <Grid MinHeight="17">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="165" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Text.Secondary}" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBlock Text="{Binding Value}" Style="{StaticResource MonoText}" VerticalAlignment="Center"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding Note}" Margin="8,0,0,0" VerticalAlignment="Center"
+                               Foreground="{DynamicResource Text.Tertiary}"
+                               Visibility="{Binding Note, Converter={StaticResource NullToCollapsed}}" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
+        <StackPanel MaxWidth="1000" HorizontalAlignment="Left">
+            <StackPanel Orientation="Horizontal" Margin="0,2,0,2">
+                <ui:SymbolIcon Symbol="Document24" FontSize="20" VerticalAlignment="Center" Margin="0,0,7,0"
+                               Foreground="{DynamicResource Icon.Foreground}" />
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="{Binding FileName}" FontSize="15" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding Kind}" Foreground="{DynamicResource Text.Secondary}" />
+                </StackPanel>
+            </StackPanel>
+
+            <Border Style="{StaticResource Card}" Margin="0,8,0,0" BorderBrush="{DynamicResource Semantic.Warning}"
+                    Visibility="{Binding HasWarnings, Converter={StaticResource BoolToVisibility}}">
+                <StackPanel>
+                    <TextBlock Text="Parser warnings" Foreground="{DynamicResource Semantic.Warning}" FontWeight="SemiBold" />
+                    <ItemsControl ItemsSource="{Binding Warnings}" Margin="0,2,0,0">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" TextWrapping="Wrap" Style="{StaticResource MonoText}"
+                                           Foreground="{DynamicResource Text.Secondary}" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="General" Style="{StaticResource SectionHeader}" />
+            <Border Style="{StaticResource Card}">
+                <ItemsControl ItemsSource="{Binding General}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
+            </Border>
+
+            <StackPanel Visibility="{Binding HasManaged, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text=".NET / CLR" Style="{StaticResource SectionHeader}" />
+                <Border Style="{StaticResource Card}">
+                    <ItemsControl ItemsSource="{Binding Managed}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
+                </Border>
+            </StackPanel>
+
+            <StackPanel Visibility="{Binding HasDebug, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="Debug directory" Style="{StaticResource SectionHeader}" />
+                <Border Style="{StaticResource Card}">
+                    <ItemsControl ItemsSource="{Binding Debug}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
+                </Border>
+            </StackPanel>
+            <Border Height="12" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

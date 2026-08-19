@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Spydate.App/Spydate.App.csproj" />
+    <Project Path="src/Spydate.Core/Spydate.Core.csproj" />
+    <Project Path="src/Spydate.Decompiler/Spydate.Decompiler.csproj" />
+    <Project Path="src/Spydate.Disassembly/Spydate.Disassembly.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Spydate.Tests/Spydate.Tests.csproj" />
+  </Folder>
+</Solution>

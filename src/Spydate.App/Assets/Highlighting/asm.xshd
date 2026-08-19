@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Spydate.Asm" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <Color name="Comment"   foreground="#6A9955" />
+  <Color name="Address"   foreground="#6E7681" />
+  <Color name="Bytes"     foreground="#4B5563" />
+  <Color name="Label"     foreground="#DCDCAA" fontWeight="bold" />
+  <Color name="Mnemonic"  foreground="#569CD6" />
+  <Color name="Branch"    foreground="#C586C0" fontWeight="bold" />
+  <Color name="Register"  foreground="#9CDCFE" />
+  <Color name="Number"    foreground="#B5CEA8" />
+  <Color name="Symbol"    foreground="#4EC9B0" />
+  <Color name="String"    foreground="#CE9178" />
+  <Color name="Header"    foreground="#D7BA7D" fontWeight="bold" />
+  <Color name="Size"      foreground="#808080" />
+
+  <RuleSet ignoreCase="true">
+    <Span color="Comment" begin=";" />
+    <Span color="Comment" begin="//" />
+    <Span color="String" begin="&quot;" end="&quot;" />
+
+    <!-- function header lines emitted by the disassembly document -->
+    <Rule color="Header">^\s*(sub_[0-9A-Fa-f]+|[A-Za-z_][\w!.@$]*)\s+proc\b.*$</Rule>
+    <Rule color="Header">^\s*endp\b.*$</Rule>
+
+    <!-- labels: loc_XXXX: at line start -->
+    <Rule color="Label">^\s*[A-Za-z_.$@][\w!.@$]*:</Rule>
+
+    <!-- leading address column and byte column -->
+    <Rule color="Address">^[0-9A-Fa-f]{8,16}(?=\s)</Rule>
+    <Rule color="Bytes">(?&lt;=^[0-9A-Fa-f]{8,16}\s+)([0-9A-Fa-f]{2}\s)+</Rule>
+
+    <Keywords color="Branch">
+      <Word>jmp</Word><Word>call</Word><Word>ret</Word><Word>retn</Word><Word>retf</Word><Word>iret</Word><Word>iretq</Word>
+      <Word>je</Word><Word>jne</Word><Word>jz</Word><Word>jnz</Word><Word>ja</Word><Word>jae</Word><Word>jb</Word><Word>jbe</Word>
+      <Word>jg</Word><Word>jge</Word><Word>jl</Word><Word>jle</Word><Word>js</Word><Word>jns</Word><Word>jo</Word><Word>jno</Word>
+      <Word>jp</Word><Word>jnp</Word><Word>jpe</Word><Word>jpo</Word><Word>jc</Word><Word>jnc</Word><Word>jcxz</Word><Word>jecxz</Word><Word>jrcxz</Word>
+      <Word>loop</Word><Word>loope</Word><Word>loopne</Word><Word>syscall</Word><Word>sysenter</Word><Word>int</Word><Word>int3</Word><Word>ud2</Word><Word>hlt</Word>
+    </Keywords>
+
+    <Keywords color="Size">
+      <Word>byte</Word><Word>word</Word><Word>dword</Word><Word>qword</Word><Word>xmmword</Word><Word>ymmword</Word><Word>zmmword</Word>
+      <Word>tbyte</Word><Word>fword</Word><Word>ptr</Word><Word>short</Word><Word>near</Word><Word>far</Word><Word>offset</Word>
+    </Keywords>
+
+    <Keywords color="Register">
+      <Word>rax</Word><Word>rbx</Word><Word>rcx</Word><Word>rdx</Word><Word>rsi</Word><Word>rdi</Word><Word>rbp</Word><Word>rsp</Word><Word>rip</Word>
+      <Word>r8</Word><Word>r9</Word><Word>r10</Word><Word>r11</Word><Word>r12</Word><Word>r13</Word><Word>r14</Word><Word>r15</Word>
+      <Word>eax</Word><Word>ebx</Word><Word>ecx</Word><Word>edx</Word><Word>esi</Word><Word>edi</Word><Word>ebp</Word><Word>esp</Word><Word>eip</Word>
+      <Word>r8d</Word><Word>r9d</Word><Word>r10d</Word><Word>r11d</Word><Word>r12d</Word><Word>r13d</Word><Word>r14d</Word><Word>r15d</Word>
+      <Word>ax</Word><Word>bx</Word><Word>cx</Word><Word>dx</Word><Word>si</Word><Word>di</Word><Word>bp</Word><Word>sp</Word>
+      <Word>r8w</Word><Word>r9w</Word><Word>r10w</Word><Word>r11w</Word><Word>r12w</Word><Word>r13w</Word><Word>r14w</Word><Word>r15w</Word>
+      <Word>al</Word><Word>bl</Word><Word>cl</Word><Word>dl</Word><Word>ah</Word><Word>bh</Word><Word>ch</Word><Word>dh</Word>
+      <Word>sil</Word><Word>dil</Word><Word>bpl</Word><Word>spl</Word>
+      <Word>r8b</Word><Word>r9b</Word><Word>r10b</Word><Word>r11b</Word><Word>r12b</Word><Word>r13b</Word><Word>r14b</Word><Word>r15b</Word>
+      <Word>r8l</Word><Word>r9l</Word><Word>r10l</Word><Word>r11l</Word><Word>r12l</Word><Word>r13l</Word><Word>r14l</Word><Word>r15l</Word>
+      <Word>cs</Word><Word>ds</Word><Word>es</Word><Word>fs</Word><Word>gs</Word><Word>ss</Word>
+      <Word>xmm0</Word><Word>xmm1</Word><Word>xmm2</Word><Word>xmm3</Word><Word>xmm4</Word><Word>xmm5</Word><Word>xmm6</Word><Word>xmm7</Word>
+      <Word>xmm8</Word><Word>xmm9</Word><Word>xmm10</Word><Word>xmm11</Word><Word>xmm12</Word><Word>xmm13</Word><Word>xmm14</Word><Word>xmm15</Word>
+      <Word>ymm0</Word><Word>ymm1</Word><Word>ymm2</Word><Word>ymm3</Word><Word>ymm4</Word><Word>ymm5</Word><Word>ymm6</Word><Word>ymm7</Word>
+      <Word>st0</Word><Word>st1</Word><Word>st2</Word><Word>st3</Word><Word>st4</Word><Word>st5</Word><Word>st6</Word><Word>st7</Word>
+    </Keywords>
+
+    <!-- symbols like kernel32!CreateFileW, sub_140001000, loc_XXXX -->
+    <Rule color="Symbol">\b[A-Za-z_][\w.]*![A-Za-z_#][\w@$#]*</Rule>
+    <Rule color="Symbol">\b(sub|loc|data|off|unk)_[0-9A-Fa-f]+\b</Rule>
+
+    <Rule color="Number">\b0x[0-9A-Fa-f]+\b|\b[0-9A-Fa-f]+h\b|\b\d+\b</Rule>
+
+    <!-- anything else at the mnemonic position -->
+    <Rule color="Mnemonic">(?&lt;=^[0-9A-Fa-f]{8,16}\s+([0-9A-Fa-f]{2}\s)+\s*)[a-z][a-z0-9]*</Rule>
+    <Rule color="Mnemonic">^\s{4,}(?![0-9A-Fa-f]{8})[a-z][a-z0-9]*\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

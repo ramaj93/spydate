@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Spydate.IL" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <Color name="Comment"   foreground="#6A9955" />
+  <Color name="String"    foreground="#CE9178" />
+  <Color name="Directive" foreground="#C586C0" fontWeight="bold" />
+  <Color name="Opcode"    foreground="#569CD6" />
+  <Color name="Branch"    foreground="#DCDCAA" fontWeight="bold" />
+  <Color name="Label"     foreground="#6E7681" />
+  <Color name="Type"      foreground="#4EC9B0" />
+  <Color name="Number"    foreground="#B5CEA8" />
+  <Color name="Keyword"   foreground="#9CDCFE" />
+
+  <RuleSet>
+    <Span color="Comment" begin="//" />
+    <Span color="Comment" multiline="true" begin="/\*" end="\*/" />
+    <Span color="String" begin="&quot;" end="&quot;" />
+
+    <Rule color="Directive">\.\w+</Rule>
+    <Rule color="Label">\bIL_[0-9A-Fa-f]{4}\b</Rule>
+    <Rule color="Branch">\b(br|brtrue|brfalse|brnull|brinst|brzero|beq|bne\.un|bge|bgt|ble|blt|bge\.un|bgt\.un|ble\.un|blt\.un|leave|switch|ret|throw|rethrow|endfinally|endfilter|call|callvirt|calli|newobj|jmp|tail\.)(\.s)?\b</Rule>
+    <Rule color="Opcode">^\s*(IL_[0-9A-Fa-f]{4}:\s+)?[a-z][a-z0-9]*(\.[a-z0-9]+)*</Rule>
+
+    <Keywords color="Type">
+      <Word>void</Word><Word>bool</Word><Word>char</Word><Word>int8</Word><Word>int16</Word><Word>int32</Word><Word>int64</Word>
+      <Word>uint8</Word><Word>uint16</Word><Word>uint32</Word><Word>uint64</Word><Word>float32</Word><Word>float64</Word>
+      <Word>native</Word><Word>int</Word><Word>unsigned</Word><Word>string</Word><Word>object</Word><Word>typedref</Word>
+      <Word>class</Word><Word>valuetype</Word><Word>method</Word><Word>field</Word>
+    </Keywords>
+
+    <Keywords color="Keyword">
+      <Word>public</Word><Word>private</Word><Word>static</Word><Word>instance</Word><Word>hidebysig</Word><Word>specialname</Word>
+      <Word>rtspecialname</Word><Word>abstract</Word><Word>sealed</Word><Word>virtual</Word><Word>newslot</Word><Word>final</Word>
+      <Word>auto</Word><Word>ansi</Word><Word>beforefieldinit</Word><Word>cil</Word><Word>managed</Word><Word>extends</Word>
+      <Word>implements</Word><Word>nested</Word><Word>assembly</Word><Word>family</Word><Word>famorassem</Word><Word>init</Word>
+      <Word>literal</Word><Word>initonly</Word><Word>interface</Word><Word>enum</Word><Word>serializable</Word><Word>runtime</Word>
+      <Word>pinvokeimpl</Word><Word>noinlining</Word><Word>synchronized</Word><Word>strict</Word><Word>explicit</Word><Word>sequential</Word>
+    </Keywords>
+
+    <Rule color="Number">\b0x[0-9A-Fa-f]+\b|\b\d+\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

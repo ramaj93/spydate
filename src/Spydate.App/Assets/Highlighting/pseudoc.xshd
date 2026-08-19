@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Spydate.PseudoC" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <Color name="Comment"   foreground="#6A9955" />
+  <Color name="String"    foreground="#CE9178" />
+  <Color name="Keyword"   foreground="#C586C0" fontWeight="bold" />
+  <Color name="Type"      foreground="#4EC9B0" />
+  <Color name="Number"    foreground="#B5CEA8" />
+  <Color name="Label"     foreground="#DCDCAA" fontWeight="bold" />
+  <Color name="Register"  foreground="#9CDCFE" />
+  <Color name="Local"     foreground="#D7BA7D" />
+  <Color name="Symbol"    foreground="#4FC1FF" />
+  <Color name="Intrinsic" foreground="#F44747" />
+  <Color name="Asm"       foreground="#F44747" fontStyle="italic" />
+
+  <RuleSet>
+    <Span color="Comment" begin="//" />
+    <Span color="Comment" multiline="true" begin="/\*" end="\*/" />
+    <Span color="String" begin="&quot;" end="&quot;" />
+    <Span color="Asm" begin="__asm\s*\{" end="\}" />
+
+    <Rule color="Label">^\s*loc_[0-9A-Fa-f]+:</Rule>
+
+    <Keywords color="Keyword">
+      <Word>if</Word><Word>else</Word><Word>goto</Word><Word>return</Word><Word>while</Word><Word>for</Word>
+      <Word>do</Word><Word>break</Word><Word>continue</Word><Word>switch</Word><Word>case</Word><Word>default</Word>
+      <Word>sizeof</Word><Word>struct</Word><Word>union</Word><Word>typedef</Word><Word>const</Word><Word>volatile</Word>
+    </Keywords>
+
+    <Keywords color="Type">
+      <Word>void</Word><Word>char</Word><Word>short</Word><Word>int</Word><Word>long</Word><Word>float</Word><Word>double</Word>
+      <Word>unsigned</Word><Word>signed</Word><Word>bool</Word>
+      <Word>uint8_t</Word><Word>uint16_t</Word><Word>uint32_t</Word><Word>uint64_t</Word>
+      <Word>int8_t</Word><Word>int16_t</Word><Word>int32_t</Word><Word>int64_t</Word>
+      <Word>__m128</Word><Word>__m256</Word><Word>__m512</Word><Word>size_t</Word><Word>intptr_t</Word><Word>uintptr_t</Word>
+    </Keywords>
+
+    <Rule color="Intrinsic">\b__(debugbreak|halt|ud2|rol|ror|overflow|parity)\b</Rule>
+    <Rule color="Symbol">\b[A-Za-z_][\w.]*![A-Za-z_#][\w@$#]*</Rule>
+    <Rule color="Symbol">\b(sub|data|off)_[0-9A-Fa-f]+\b</Rule>
+    <Rule color="Local">\b(local|arg|var|return_address|saved_bp)_?[0-9A-Fa-f]*\b</Rule>
+    <Rule color="Register">\b(r[a-d]x|r[sd]i|r[sb]p|r(8|9|1[0-5])[dwbl]?|e[a-d]x|e[sd]i|e[sb]p|[a-d][xlh]|[sd]il?|[sb]pl?|[xyz]mm\d+|fs_base|gs_base|CF)\b</Rule>
+    <Rule color="Number">\b0x[0-9A-Fa-f]+\b|\b\d+\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

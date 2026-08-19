@@ -1,0 +1,41 @@
+## Build output
+bin/
+obj/
+out/
+artifacts/
+publish/
+*.binlog
+
+## Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+## Test results / coverage
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+*.trx
+
+## NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+
+## OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+## Local scratch (sample binaries the user drops in for testing)
+samples/local/

@@ -1,0 +1,66 @@
+<UserControl x:Class="Spydate.App.Views.Documents.CodeDocumentView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             xmlns:controls="clr-namespace:Spydate.App.Views.Controls"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:CodeDocumentViewModel}"
+             Background="{DynamicResource Editor.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource ToolStrip}"
+                Visibility="{Binding HasActions, Converter={StaticResource BoolToVisibility}}">
+            <DockPanel>
+                <ItemsControl ItemsSource="{Binding Actions}" DockPanel.Dock="Left">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type docs:CodeAction}">
+                            <Button Style="{StaticResource ToolButton}" Command="{Binding Command}"
+                                    AutomationProperties.Name="{Binding Label}">
+                                <StackPanel Orientation="Horizontal">
+                                    <ui:SymbolIcon Symbol="{Binding Icon}" FontSize="13" Margin="0,0,4,0" />
+                                    <TextBlock Text="{Binding Label}" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock DockPanel.Dock="Left" Text="working…" VerticalAlignment="Center" Margin="8,0,0,0"
+                           Foreground="{DynamicResource Accent.Hover}"
+                           Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
+                <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center" Margin="8,0,0,0"
+                           Foreground="{DynamicResource Semantic.Error}" />
+            </DockPanel>
+        </Border>
+
+        <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
+                             HighlightingName="{Binding Highlighting, Mode=OneWay}" />
+
+        <Expander Grid.Row="2" IsExpanded="False" MaxHeight="150"
+                  Visibility="{Binding HasNotes, Converter={StaticResource BoolToVisibility}}">
+            <Expander.Header>
+                <TextBlock Foreground="{DynamicResource Semantic.Warning}">
+                    <Run Text="Analysis notes (" /><Run Text="{Binding Notes.Count, Mode=OneWay}" /><Run Text=")" />
+                </TextBlock>
+            </Expander.Header>
+            <ListBox ItemsSource="{Binding Notes}" MaxHeight="128">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" Style="{StaticResource MonoText}"
+                                   Foreground="{DynamicResource Text.Secondary}" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Expander>
+    </Grid>
+</UserControl>

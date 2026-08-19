@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Spydate.CSharp" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <Color name="Comment"        foreground="#6A9955" />
+  <Color name="String"         foreground="#CE9178" />
+  <Color name="Char"           foreground="#CE9178" />
+  <Color name="Preprocessor"   foreground="#9B9B9B" />
+  <Color name="Keyword"        foreground="#569CD6" />
+  <Color name="ControlKeyword" foreground="#C586C0" />
+  <Color name="TypeKeyword"    foreground="#569CD6" />
+  <Color name="Type"           foreground="#4EC9B0" />
+  <Color name="Number"         foreground="#B5CEA8" />
+  <Color name="Method"         foreground="#DCDCAA" />
+  <Color name="Attribute"      foreground="#4EC9B0" />
+
+  <RuleSet name="CommentMarkerSet">
+    <Keywords fontWeight="bold" foreground="#FF8C00">
+      <Word>TODO</Word><Word>FIXME</Word><Word>HACK</Word><Word>UNDONE</Word>
+    </Keywords>
+  </RuleSet>
+
+  <RuleSet>
+    <Span color="Preprocessor" begin="^\s*#" />
+    <Span color="Comment" ruleSet="CommentMarkerSet" begin="//" />
+    <Span color="Comment" ruleSet="CommentMarkerSet" multiline="true" begin="/\*" end="\*/" />
+    <Span color="String" multiline="true" begin="@&quot;" end="&quot;">
+      <RuleSet><Span begin="&quot;&quot;" end="" /></RuleSet>
+    </Span>
+    <Span color="String" begin="\$&quot;" end="&quot;">
+      <RuleSet><Span begin="\\" end="." /><Span begin="\{\{" end="" /></RuleSet>
+    </Span>
+    <Span color="String" begin="&quot;" end="&quot;">
+      <RuleSet><Span begin="\\" end="." /></RuleSet>
+    </Span>
+    <Span color="Char" begin="'" end="'">
+      <RuleSet><Span begin="\\" end="." /></RuleSet>
+    </Span>
+
+    <Rule color="Attribute">(?&lt;=\[)\s*[A-Za-z_][\w.]*(?=[\](,])</Rule>
+
+    <Keywords color="ControlKeyword">
+      <Word>if</Word><Word>else</Word><Word>switch</Word><Word>case</Word><Word>default</Word><Word>do</Word><Word>for</Word>
+      <Word>foreach</Word><Word>while</Word><Word>break</Word><Word>continue</Word><Word>goto</Word><Word>return</Word>
+      <Word>throw</Word><Word>try</Word><Word>catch</Word><Word>finally</Word><Word>yield</Word><Word>await</Word><Word>when</Word>
+    </Keywords>
+
+    <Keywords color="TypeKeyword">
+      <Word>bool</Word><Word>byte</Word><Word>char</Word><Word>decimal</Word><Word>double</Word><Word>float</Word><Word>int</Word>
+      <Word>long</Word><Word>object</Word><Word>sbyte</Word><Word>short</Word><Word>string</Word><Word>uint</Word><Word>ulong</Word>
+      <Word>ushort</Word><Word>void</Word><Word>var</Word><Word>dynamic</Word><Word>nint</Word><Word>nuint</Word>
+    </Keywords>
+
+    <Keywords color="Keyword">
+      <Word>abstract</Word><Word>as</Word><Word>base</Word><Word>checked</Word><Word>class</Word><Word>const</Word>
+      <Word>delegate</Word><Word>enum</Word><Word>event</Word><Word>explicit</Word><Word>extern</Word><Word>false</Word>
+      <Word>fixed</Word><Word>implicit</Word><Word>in</Word><Word>interface</Word><Word>internal</Word><Word>is</Word>
+      <Word>lock</Word><Word>namespace</Word><Word>new</Word><Word>null</Word><Word>operator</Word><Word>out</Word>
+      <Word>override</Word><Word>params</Word><Word>private</Word><Word>protected</Word><Word>public</Word><Word>readonly</Word>
+      <Word>ref</Word><Word>sealed</Word><Word>sizeof</Word><Word>stackalloc</Word><Word>static</Word><Word>struct</Word>
+      <Word>this</Word><Word>true</Word><Word>typeof</Word><Word>unchecked</Word><Word>unsafe</Word><Word>using</Word>
+      <Word>virtual</Word><Word>volatile</Word><Word>where</Word><Word>partial</Word><Word>get</Word><Word>set</Word>
+      <Word>init</Word><Word>add</Word><Word>remove</Word><Word>value</Word><Word>async</Word><Word>record</Word>
+      <Word>required</Word><Word>file</Word><Word>scoped</Word><Word>global</Word><Word>nameof</Word><Word>with</Word>
+      <Word>and</Word><Word>or</Word><Word>not</Word><Word>managed</Word><Word>unmanaged</Word>
+    </Keywords>
+
+    <Rule color="Method">\b[A-Za-z_]\w*(?=\s*\()</Rule>
+    <Rule color="Type">\b[A-Z][A-Za-z0-9_]*(?=[\s&lt;\[.,;)])</Rule>
+    <Rule color="Number">\b0[xX][0-9a-fA-F_]+[uUlL]*\b|\b0[bB][01_]+\b|\b\d[\d_]*(\.[\d_]+)?([eE][+-]?\d+)?[fFdDmMuUlL]*\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

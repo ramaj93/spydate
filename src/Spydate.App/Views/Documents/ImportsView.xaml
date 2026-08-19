@@ -1,0 +1,36 @@
+<UserControl x:Class="Spydate.App.Views.Documents.ImportsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:ImportsDocumentViewModel}"
+             Background="{DynamicResource Document.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Text="Filter:" VerticalAlignment="Center" Margin="2,0,4,0"
+                           Foreground="{DynamicResource Text.Secondary}" />
+                <TextBox x:Name="FilterBox" DockPanel.Dock="Left" Width="240" Tag="module or function name"
+                         TextChanged="OnFilterChanged" />
+                <TextBlock Text="{Binding Summary}" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Foreground="{DynamicResource Text.Secondary}" />
+            </DockPanel>
+        </Border>
+        <DataGrid Grid.Row="1" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Module" Binding="{Binding Module}" Width="265" />
+                <DataGridTextColumn Header="Function" Binding="{Binding Function}" Width="*" />
+                <DataGridTextColumn Header="Hint" Binding="{Binding Hint}" Width="52" />
+                <DataGridTextColumn Header="IAT RVA" Binding="{Binding IatRva}" Width="100" />
+                <DataGridTextColumn Header="IAT VA" Binding="{Binding IatVa}" Width="140" />
+                <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="70" />
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

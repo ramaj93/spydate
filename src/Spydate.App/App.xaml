@@ -1,0 +1,54 @@
+<Application x:Class="Spydate.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             xmlns:views="clr-namespace:Spydate.App.Views.Documents"
+             xmlns:v="clr-namespace:Spydate.App.Views">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- Wpf.Ui supplies the window chrome (FluentWindow/TitleBar) and the icon font only. -->
+                <ui:ThemesDictionary Theme="Dark" />
+                <ui:ControlsDictionary />
+                <!-- Spydate's own dense, square theme overrides everything below. -->
+                <ResourceDictionary Source="pack://application:,,,/Themes/Palette.Dark.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/Themes/Controls.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+            <v:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibility" />
+            <v:NullToCollapsedConverter x:Key="NullToCollapsed" />
+            <v:SymbolToIconConverter x:Key="SymbolToIcon" />
+
+            <!-- Document view selection by ViewModel type -->
+            <DataTemplate DataType="{x:Type docs:OverviewDocumentViewModel}">
+                <views:OverviewView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:HeadersDocumentViewModel}">
+                <views:HeadersView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:SectionsDocumentViewModel}">
+                <views:SectionsView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:ImportsDocumentViewModel}">
+                <views:ImportsView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:ExportsDocumentViewModel}">
+                <views:ExportsView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:HexDocumentViewModel}">
+                <views:HexView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:FunctionsDocumentViewModel}">
+                <views:FunctionsView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:CodeDocumentViewModel}">
+                <views:CodeDocumentView />
+            </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:ManagedCodeDocumentViewModel}">
+                <views:ManagedCodeView />
+            </DataTemplate>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

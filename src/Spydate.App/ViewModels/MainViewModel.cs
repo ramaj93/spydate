@@ -1,0 +1,417 @@
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.IO;
+using System.Windows;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Spydate.App.Services;
+using Spydate.App.ViewModels.Documents;
+using Spydate.Core.PE;
+using Spydate.Disassembly;
+
+namespace Spydate.App.ViewModels;
+
+/// <summary>Root view model: file commands, explorer tree, document tabs, output log, status.</summary>
+public sealed partial class MainViewModel : ObservableObject
+{
+    private static readonly string ProductTitle =
+        $"Spydate v{typeof(MainViewModel).Assembly.GetName().Version?.ToString(2) ?? "0.1"} ({(Environment.Is64BitProcess ? "64-bit" : "32-bit")})";
+
+    private readonly IFileDialogService _dialogs;
+    private readonly WorkspaceService _workspace;
+    private CancellationTokenSource? _analysisCts;
+
+    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace)
+    {
+        _dialogs = dialogs;
+        _workspace = workspace;
+        Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
+        Log("Spydate started. Open a PE file to begin (Ctrl+O).");
+    }
+
+    // ------------------------------------------------------------------
+    // State
+    // ------------------------------------------------------------------
+
+    public ObservableCollection<ExplorerNodeViewModel> Explorer { get; } = new();
+
+    public ObservableCollection<DocumentViewModel> Documents { get; } = new();
+
+    /// <summary>Timestamped log shown in the Output tool window.</summary>
+    public ObservableCollection<string> Output { get; } = new();
+
+    /// <summary>Parser and analysis warnings for the current file.</summary>
+    public ObservableCollection<string> Warnings { get; } = new();
+
+    public bool HasDocuments => Documents.Count > 0;
+
+    [ObservableProperty]
+    private DocumentViewModel? _activeDocument;
+
+    [ObservableProperty]
+    private ExplorerNodeViewModel? _selectedNode;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasBinary))]
+    [NotifyPropertyChangedFor(nameof(WindowTitle))]
+    private OpenedBinary? _binary;
+
+    [ObservableProperty]
+    private string _statusText = "Ready";
+
+    [ObservableProperty]
+    private string _analysisText = string.Empty;
+
+    [ObservableProperty]
+    private bool _isBusy;
+
+    [ObservableProperty]
+    private string _gotoAddressText = string.Empty;
+
+    public bool HasBinary => Binary is not null;
+
+    public string WindowTitle => Binary is null ? ProductTitle : $"{ProductTitle} — {Binary.DisplayName}";
+
+    partial void OnActiveDocumentChanged(DocumentViewModel? value)
+    {
+        if (value is not null)
+        {
+            _ = value.EnsureLoadedAsync();
+        }
+    }
+
+    partial void OnSelectedNodeChanged(ExplorerNodeViewModel? value)
+    {
+        if (value?.Target is { } target)
+        {
+            OpenTarget(target);
+        }
+    }
+
+    private void Log(string message) => Output.Add($"{DateTime.Now:HH:mm:ss}  {message}");
+
+    // ------------------------------------------------------------------
+    // File commands
+    // ------------------------------------------------------------------
+
+    [RelayCommand]
+    private async Task OpenFileAsync()
+    {
+        string? path = _dialogs.OpenPeFile();
+        if (path is not null)
+        {
+            await OpenPathAsync(path).ConfigureAwait(true);
+        }
+    }
+
+    public async Task OpenPathAsync(string path)
+    {
+        _analysisCts?.Cancel();
+        IsBusy = true;
+        StatusText = $"Loading {Path.GetFileName(path)}…";
+        Log($"Loading {path}");
+        try
+        {
+            var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
+            Documents.Clear();
+            ActiveDocument = null;
+            Binary = opened;
+            Explorer.Clear();
+            Explorer.Add(ExplorerTreeBuilder.Build(opened));
+
+            var pe = opened.Image;
+            StatusText = $"{opened.DisplayName}  ·  {pe.Machine}  ·  {(pe.Is64Bit ? "PE32+" : "PE32")}{(pe.IsManaged ? "  ·  .NET" : string.Empty)}  ·  {pe.Sections.Count} sections";
+            Log($"Loaded {opened.DisplayName}: {pe.Machine}, {(pe.Is64Bit ? "PE32+" : "PE32")}, {pe.Length:N0} bytes, " +
+                $"{pe.Sections.Count} sections, {pe.Imports.Count + pe.DelayImports.Count} imported modules, " +
+                $"{pe.Exports?.Entries.Count ?? 0} exports{(pe.IsManaged ? ", managed" : string.Empty)}.");
+
+            Warnings.Clear();
+            foreach (string w in pe.Warnings)
+            {
+                Warnings.Add(w);
+            }
+
+            if (opened.ManagedLoadError is { } managedError)
+            {
+                Warnings.Add($"Managed decompiler could not load the assembly: {managedError}");
+            }
+
+            if (opened.Analysis is null && !pe.IsManaged)
+            {
+                Warnings.Add($"Machine type {pe.Machine} is not supported by the native disassembler (x86/x64 only).");
+            }
+
+            if (Warnings.Count > 0)
+            {
+                Log($"{Warnings.Count} warning(s) — see the Warnings tab.");
+            }
+
+            OpenTarget(new OverviewTarget());
+
+            if (opened.Analysis is { } analysis)
+            {
+                _ = RunDiscoveryAsync(analysis);
+            }
+        }
+        catch (PeParseException ex)
+        {
+            StatusText = $"Cannot open: {ex.Message}";
+            Log($"ERROR: {ex.Message}");
+            MessageBox.Show(ex.Message, "Not a valid PE file", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void CloseFile()
+    {
+        _analysisCts?.Cancel();
+        Documents.Clear();
+        Explorer.Clear();
+        Warnings.Clear();
+        ActiveDocument = null;
+        _workspace.Close();
+        Binary = null;
+        AnalysisText = string.Empty;
+        StatusText = "Ready";
+        Log("File closed.");
+    }
+
+    // ------------------------------------------------------------------
+    // Analysis
+    // ------------------------------------------------------------------
+
+    [RelayCommand]
+    private void Reanalyze()
+    {
+        if (Binary?.Analysis is { } analysis)
+        {
+            Log("Re-running function discovery…");
+            _ = RunDiscoveryAsync(analysis);
+        }
+    }
+
+    private async Task RunDiscoveryAsync(BinaryAnalysis analysis)
+    {
+        _analysisCts?.Cancel();
+        var cts = _analysisCts = new CancellationTokenSource();
+        var progress = new Progress<AnalysisProgress>(p => AnalysisText = $"{p.FunctionsFound} functions  ·  {p.Message}");
+        AnalysisText = "Discovering functions…";
+        var started = DateTime.UtcNow;
+        try
+        {
+            await Task.Run(() => analysis.DiscoverAll(maxFunctions: 50_000, progress, cts.Token), cts.Token).ConfigureAwait(true);
+            if (cts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var elapsed = DateTime.UtcNow - started;
+            AnalysisText = $"{analysis.FunctionCount} functions";
+            Log($"Discovered {analysis.FunctionCount} functions in {elapsed.TotalMilliseconds:N0} ms.");
+            RefreshFunctionNodes(analysis);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            AnalysisText = "Analysis failed";
+            Log($"ERROR during discovery: {ex.Message}");
+            Warnings.Add($"Function discovery failed: {ex.Message}");
+        }
+    }
+
+    private void RefreshFunctionNodes(BinaryAnalysis analysis)
+    {
+        var root = Explorer.FirstOrDefault();
+        var functionsNode = root?.Children.FirstOrDefault(n => n.Target is FunctionsTarget);
+        if (functionsNode is null || root is null)
+        {
+            return;
+        }
+
+        int index = root.Children.IndexOf(functionsNode);
+        var replacement = new ExplorerNodeViewModel("Functions", Wpf.Ui.Controls.SymbolRegular.BranchFork24, new FunctionsTarget(), analysis.FunctionCount.ToString(CultureInfo.InvariantCulture))
+        {
+            IsExpanded = functionsNode.IsExpanded,
+        };
+        replacement.SetChildren(ExplorerTreeBuilder.FunctionNodes(analysis));
+        root.Children[index] = replacement;
+
+        foreach (var doc in Documents.OfType<FunctionsDocumentViewModel>())
+        {
+            doc.Refresh();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Navigation
+    // ------------------------------------------------------------------
+
+    /// <summary>Go to a VA / RVA / file offset / symbol: opens disassembly for code, hex for data.</summary>
+    [RelayCommand]
+    private void GoToAddress()
+    {
+        if (Binary is null)
+        {
+            return;
+        }
+
+        string text = GotoAddressText.Trim();
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            text = text[2..];
+        }
+
+        if (!ulong.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong value))
+        {
+            var sym = Binary.Analysis?.Symbols.GetByName(GotoAddressText.Trim());
+            if (sym is null)
+            {
+                StatusText = $"'{GotoAddressText}' is not an address or a known symbol.";
+                return;
+            }
+
+            value = sym.Va;
+        }
+
+        var pe = Binary.Image;
+        ulong va = value >= pe.ImageBase ? value : value < pe.OptionalHeader.SizeOfImage ? pe.RvaToVa((uint)value) : 0;
+        if (va != 0 && Binary.Analysis is { } analysis && analysis.Source.IsExecutable(va))
+        {
+            OpenTarget(new DisassemblyTarget(va, analysis.NameFor(va)));
+            return;
+        }
+
+        long offset = va != 0 && pe.VaToOffset(va) is { } o ? o : (long)Math.Min(value, (ulong)pe.Length);
+        OpenTarget(new HexTarget(offset));
+    }
+
+    [RelayCommand]
+    private void OpenEntryPoint()
+    {
+        if (Binary is not { } b)
+        {
+            return;
+        }
+
+        if (b.Analysis is not null && b.Image.EntryPointRva != 0)
+        {
+            OpenTarget(new DisassemblyTarget(b.Image.EntryPointVa, b.Image.IsDll ? "DllEntryPoint" : "EntryPoint"));
+        }
+        else
+        {
+            StatusText = "This file has no native entry point to disassemble.";
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Documents
+    // ------------------------------------------------------------------
+
+    [RelayCommand]
+    private void CloseDocument(DocumentViewModel? doc)
+    {
+        if (doc is null || !doc.CanClose)
+        {
+            return;
+        }
+
+        int index = Documents.IndexOf(doc);
+        Documents.Remove(doc);
+        if (ReferenceEquals(ActiveDocument, doc) || ActiveDocument is null)
+        {
+            ActiveDocument = Documents.Count == 0 ? null : Documents[Math.Clamp(index - 1, 0, Documents.Count - 1)];
+        }
+    }
+
+    [RelayCommand]
+    private void CloseActiveDocument() => CloseDocument(ActiveDocument);
+
+    [RelayCommand]
+    private void CloseAllDocuments()
+    {
+        Documents.Clear();
+        ActiveDocument = null;
+    }
+
+    [RelayCommand]
+    private void ClearOutput() => Output.Clear();
+
+    public void OpenTarget(NodeTarget target)
+    {
+        if (Binary is null)
+        {
+            return;
+        }
+
+        var b = Binary;
+        var pe = b.Image;
+        DocumentViewModel? doc = target switch
+        {
+            OverviewTarget => Find("overview") ?? new OverviewDocumentViewModel(b),
+            HeadersTarget => Find("headers") ?? new HeadersDocumentViewModel(pe),
+            SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
+            ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe),
+            ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
+            FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
+            HexTarget h => OpenHex(h.Offset),
+            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC),
+            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title),
+            ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
+            ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
+            ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member),
+            _ => null,
+        };
+
+        if (doc is not null)
+        {
+            Show(doc);
+        }
+    }
+
+    private void OpenFunctionDisassembly(Function f)
+    {
+        if (Binary?.Analysis is { } a)
+        {
+            Show(Find($"disasm:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC));
+        }
+    }
+
+    private void OpenFunctionPseudoC(Function f)
+    {
+        if (Binary?.NativeDecompiler is { } d)
+        {
+            Show(Find($"pseudoc:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly));
+        }
+    }
+
+    private DocumentViewModel OpenHex(long offset)
+    {
+        var hex = Find("hex") as HexDocumentViewModel ?? new HexDocumentViewModel(Binary!.Image);
+        Show(hex);
+        hex.GoToOffset(offset);
+        return hex;
+    }
+
+    private DocumentViewModel? Find(string key) => Documents.FirstOrDefault(d => d.Key == key);
+
+    private void Show(DocumentViewModel doc)
+    {
+        if (!Documents.Contains(doc))
+        {
+            Documents.Add(doc);
+        }
+
+        ActiveDocument = doc;
+    }
+}

@@ -1,0 +1,35 @@
+<UserControl x:Class="Spydate.App.Views.Documents.SectionsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:SectionsDocumentViewModel}"
+             Background="{DynamicResource Document.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="{DynamicResource Chrome.Background}"
+                BorderBrush="{DynamicResource Chrome.Border}" BorderThickness="0,0,0,1" Padding="6,3">
+            <TextBlock Text="Double-click a section to view its bytes.  Entropy ≥ 7.2 suggests packed or encrypted data."
+                       Foreground="{DynamicResource Text.Secondary}" />
+        </Border>
+        <DataGrid Grid.Row="1" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}"
+                  MouseDoubleClick="OnRowDoubleClick">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="#" Binding="{Binding Index}" Width="32" />
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="100" />
+                <DataGridTextColumn Header="Virtual address" Binding="{Binding VirtualAddress}" Width="115" />
+                <DataGridTextColumn Header="Virtual size" Binding="{Binding VirtualSize}" Width="105" />
+                <DataGridTextColumn Header="Raw pointer" Binding="{Binding RawPointer}" Width="105" />
+                <DataGridTextColumn Header="Raw size" Binding="{Binding RawSize}" Width="105" />
+                <DataGridTextColumn Header="Perm" Binding="{Binding Permissions}" Width="52" />
+                <DataGridTextColumn Header="Entropy" Binding="{Binding Entropy}" Width="66" />
+                <DataGridTextColumn Header="Characteristics" Binding="{Binding Characteristics}" Width="*" />
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

@@ -1,0 +1,35 @@
+<UserControl x:Class="Spydate.App.Views.Documents.ManagedCodeView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             xmlns:controls="clr-namespace:Spydate.App.Views.Controls"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:ManagedCodeDocumentViewModel}"
+             Background="{DynamicResource Editor.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Text="Language:" VerticalAlignment="Center" Margin="2,0,4,0"
+                           Foreground="{DynamicResource Text.Secondary}" />
+                <ComboBox DockPanel.Dock="Left" ItemsSource="{Binding Languages}" SelectedItem="{Binding Language}"
+                          Width="80" />
+                <TextBlock DockPanel.Dock="Left" Text="decompiling…" VerticalAlignment="Center" Margin="8,0,0,0"
+                           Foreground="{DynamicResource Accent.Hover}"
+                           Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
+                <TextBlock Text="{Binding Subtitle}" VerticalAlignment="Center" Margin="8,0,0,0"
+                           TextTrimming="CharacterEllipsis" Style="{StaticResource MonoText}"
+                           Foreground="{DynamicResource Text.Secondary}" />
+            </DockPanel>
+        </Border>
+
+        <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
+                             HighlightingName="{Binding Highlighting, Mode=OneWay}" />
+    </Grid>
+</UserControl>
