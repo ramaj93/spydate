@@ -129,6 +129,20 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   question for one address and backs the `; "text"` comments in disassembly.
   The scan behind `BinaryAnalysis.Strings` is lazy (`Lazy<T>`) because it reads
   the whole file — touch it off the UI thread.
+- Discovery inputs beyond the entry VA:
+  - **Unwind bounds.** `BinaryAnalysis` maps every non-chained `RUNTIME_FUNCTION`
+    to its declared `[begin, end)` and passes the end into `Discover`. It is the
+    authoritative extent — `Function.BoundsEnd` — while `EndVa` only covers what
+    was decoded. After the descent, `SweepGaps` decodes the bytes inside those
+    bounds that nothing branched to (jump-table targets), skipping `int3`/`nop`
+    padding and abandoning a gap the moment it stops decoding, because it may
+    hold the table itself.
+  - **No-return calls.** Symbols whose name matches a known no-return API
+    (`ExitProcess`, `RaiseFailFastException`, `abort`, …) mark an address as
+    no-return, as does `int 0x29` (`__fastfail`); a single-block function whose
+    only exit tail-jumps to one is recorded as a no-return thunk too. Decoding
+    stops after such a call, because the following bytes are padding or the next
+    function, not code — continuing produces junk instructions and bogus xrefs.
 - `FunctionDiscovery` — recursive‑descent from a single entry VA; follows
   direct branches, records (does not follow) calls, splits basic blocks at
   branch targets, stops at `ret`/indirect jumps/invalid bytes. Produces

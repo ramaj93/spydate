@@ -19,18 +19,60 @@ public sealed class BinaryAnalysis
     private readonly XrefExtractor _xrefExtractor;
     private readonly Lazy<StringIndex> _strings;
 
+    /// <summary>
+    /// Functions the CRT and the Win32 API never return from. A call to one of these ends a code
+    /// path: the bytes after it are padding, data, or the next function - decoding them produces
+    /// garbage instructions and bogus cross-references.
+    /// </summary>
+    private static readonly HashSet<string> NoReturnNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ExitProcess", "ExitThread", "TerminateProcess", "TerminateThread",
+        "RtlExitUserProcess", "RtlExitUserThread", "NtTerminateProcess", "ZwTerminateProcess",
+        "RtlRaiseStatus", "RaiseFailFastException", "RtlFailFast", "__fastfail",
+        "FatalExit", "FatalAppExitA", "FatalAppExitW", "CorExitProcess",
+        "abort", "exit", "_exit", "_Exit", "quick_exit", "_invoke_watson",
+        "_invalid_parameter_noinfo_noreturn", "_CxxThrowException", "longjmp", "_longjmp",
+    };
+
+    /// <summary>Addresses (IAT slots and function entries) known never to return.</summary>
+    private readonly HashSet<ulong> _noReturn = new();
+    private readonly Lock _noReturnGate = new();
+
+    /// <summary>Function extents declared by the x64 unwind table, keyed by start VA.</summary>
+    private readonly Dictionary<ulong, ulong> _bounds = new();
+
     public BinaryAnalysis(PeImage image, AsmSyntax syntax = AsmSyntax.Intel, DiscoveryOptions? options = null)
     {
         Image = image;
         Symbols = SymbolTable.FromImage(image);
         Source = new PeCodeSource(image);
         Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
-        _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, options);
+        options ??= DiscoveryOptions.Default;
+        _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, options.IsNoReturn is null ? options with { IsNoReturn = IsNoReturn } : options);
         _xrefExtractor = new XrefExtractor(Source);
         // Scanning touches every byte of the file, so it waits until something asks for a string.
         _strings = new Lazy<StringIndex>(
             () => StringIndex.Build(StringScanner.Scan(image)),
             LazyThreadSafetyMode.ExecutionAndPublication);
+
+        foreach (var symbol in Symbols.All)
+        {
+            // Import thunks are named "kernel32!ExitProcess"; exports are bare.
+            string bare = symbol.Name.Contains('!') ? symbol.Name[(symbol.Name.LastIndexOf('!') + 1)..] : symbol.Name;
+            if (NoReturnNames.Contains(bare))
+            {
+                _noReturn.Add(symbol.Va);
+            }
+        }
+
+        foreach (var rf in image.ExceptionTable)
+        {
+            if (!rf.IsChained && rf.BeginRva != 0 && rf.EndRva > rf.BeginRva)
+            {
+                _bounds[image.RvaToVa(rf.BeginRva)] = image.RvaToVa(rf.EndRva);
+            }
+        }
+
     }
 
     public PeImage Image { get; }
@@ -68,8 +110,9 @@ public sealed class BinaryAnalysis
     {
         return _functions.GetOrAdd(entryVa, va =>
         {
-            var f = _discovery.Discover(va, name);
+            var f = _discovery.Discover(va, name, BoundsFor(va));
             Symbols.Add(new Symbol(va, f.Name, SymbolKind.Function, f.CodeSize));
+            RecordIfNoReturnThunk(f);
             // The extractor is not thread-safe, but GetOrAdd's factory may run concurrently.
             lock (_xrefExtractor)
             {
@@ -194,6 +237,52 @@ public sealed class BinaryAnalysis
     {
         var bytes = Source.Read(va, byteCount);
         return Disassembler.Decode(bytes, va, Image.ImageBase, maxInstructions);
+    }
+
+/// <summary>End address declared by the unwind table for the function starting at <paramref name="va"/>.</summary>
+    public ulong? BoundsFor(ulong va)
+    {
+        lock (_noReturnGate)
+        {
+            return _bounds.TryGetValue(va, out ulong end) ? end : null;
+        }
+    }
+
+    /// <summary>True when a call to <paramref name="va"/> never comes back.</summary>
+    public bool IsNoReturn(ulong va)
+    {
+        lock (_noReturnGate)
+        {
+            return _noReturn.Contains(va);
+        }
+    }
+
+    /// <summary>
+    /// A one-block function whose only exit is a jump to something that never returns is itself a
+    /// no-return thunk. Recording it lets later callers stop at the right instruction.
+    /// </summary>
+    private void RecordIfNoReturnThunk(Function function)
+    {
+        if (function.Blocks.Count != 1)
+        {
+            return;
+        }
+
+        var last = function.Blocks[0].Last;
+        ulong? target = last.Flow switch
+        {
+            InstructionFlow.UnconditionalBranch => last.BranchTargetVa,
+            InstructionFlow.IndirectBranch => last.IndirectSlotVa,
+            _ => null,
+        };
+
+        if (target is { } t && IsNoReturn(t))
+        {
+            lock (_noReturnGate)
+            {
+                _noReturn.Add(function.EntryVa);
+            }
+        }
     }
 
     /// <summary>Functions that reference <paramref name="va"/>, nearest enclosing function per reference.</summary>

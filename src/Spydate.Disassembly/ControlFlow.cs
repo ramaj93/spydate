@@ -90,6 +90,18 @@ public sealed class Function
     /// <summary>Human-readable analysis notes (paths that could not be followed etc.).</summary>
     public IReadOnlyList<string> Notes { get; }
 
+    /// <summary>
+    /// End address from the x64 unwind table when the image declares one. Authoritative, unlike
+    /// <see cref="EndVa"/>, which only covers what discovery actually decoded.
+    /// </summary>
+    public ulong? BoundsEnd { get; init; }
+
+    /// <summary>Declared size from the unwind table, or the discovered span when there is none.</summary>
+    public ulong DeclaredSize => BoundsEnd is { } end && end > EntryVa ? end - EntryVa : EndVa - EntryVa;
+
+    /// <summary>True when decoding ran past the end the unwind table declares — a bad sign.</summary>
+    public bool ExtendsBeyondBounds => BoundsEnd is { } end && EndVa > end;
+
     public IEnumerable<DecodedInstruction> Instructions => Blocks.SelectMany(b => b.Instructions);
 
     public int InstructionCount => Blocks.Sum(b => b.Instructions.Count);

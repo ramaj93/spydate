@@ -1,3 +1,4 @@
+using Iced.Intel;
 using Spydate.Core.Symbols;
 
 namespace Spydate.Disassembly;
@@ -13,6 +14,18 @@ public sealed record DiscoveryOptions
 
     /// <summary>Whether to follow direct branches into non-executable sections (usually a sign of bad decoding).</summary>
     public bool FollowIntoNonExecutable { get; init; }
+
+    /// <summary>
+    /// Returns true for call targets that never come back (<c>ExitProcess</c>, <c>__fastfail</c>,
+    /// <c>abort</c>). Bytes after such a call are usually data or another function, not code.
+    /// </summary>
+    public Func<ulong, bool>? IsNoReturn { get; init; }
+
+    /// <summary>
+    /// When the function's extent is known (from the x64 unwind table), sweep the bytes the
+    /// recursive descent never reached. That is where jump-table targets hide.
+    /// </summary>
+    public bool SweepUnreachedBytes { get; init; } = true;
 
     public static DiscoveryOptions Default { get; } = new();
 }
@@ -39,8 +52,11 @@ public sealed class FunctionDiscovery
         _options = options ?? DiscoveryOptions.Default;
     }
 
-    /// <summary>Discovers the function at <paramref name="entryVa"/>. Never throws for bad code; returns notes instead.</summary>
-    public Function Discover(ulong entryVa, string? name = null)
+    /// <summary>
+    /// Discovers the function at <paramref name="entryVa"/>. Never throws for bad code; returns notes instead.
+    /// <paramref name="boundsEnd"/> is the end address from the unwind table when it is known.
+    /// </summary>
+    public Function Discover(ulong entryVa, string? name = null, ulong? boundsEnd = null)
     {
         name ??= _symbols.TryGet(entryVa, out var sym) && sym.Kind != SymbolKind.Section ? sym.Name : $"sub_{entryVa:X}";
 
@@ -141,17 +157,35 @@ public sealed class FunctionDiscovery
                         goto EndPath;
 
                     case InstructionFlow.Call:
-                        if (ins.BranchTargetVa is { } callTarget && !callTargets.Contains(callTarget))
+                        if (ins.BranchTargetVa is { } callTarget)
                         {
-                            callTargets.Add(callTarget);
+                            if (!callTargets.Contains(callTarget))
+                            {
+                                callTargets.Add(callTarget);
+                            }
+
+                            if (IsNoReturn(callTarget))
+                            {
+                                notes.Add($"Call at 0x{ins.Va:X} does not return; the bytes after it are not code.");
+                                goto EndPath;
+                            }
                         }
 
                         break;
 
                     case InstructionFlow.IndirectCall:
-                        if (ins.IndirectSlotVa is { } cs && !indirectSlots.Contains(cs))
+                        if (ins.IndirectSlotVa is { } cs)
                         {
-                            indirectSlots.Add(cs);
+                            if (!indirectSlots.Contains(cs))
+                            {
+                                indirectSlots.Add(cs);
+                            }
+
+                            if (IsNoReturn(cs))
+                            {
+                                notes.Add($"Call at 0x{ins.Va:X} does not return; the bytes after it are not code.");
+                                goto EndPath;
+                            }
                         }
 
                         break;
@@ -168,12 +202,88 @@ public sealed class FunctionDiscovery
         EndPath:;
         }
 
+        if (boundsEnd is { } end && _options.SweepUnreachedBytes)
+        {
+            SweepGaps(entryVa, end, instructions, leaders, notes);
+        }
+
         var blocks = BuildBlocks(instructions, leaders);
-        return new Function(entryVa, name, blocks, callTargets, indirectSlots, notes);
+        return new Function(entryVa, name, blocks, callTargets, indirectSlots, notes) { BoundsEnd = boundsEnd };
+    }
+
+    private bool IsNoReturn(ulong va) => _options.IsNoReturn?.Invoke(va) ?? false;
+
+    /// <summary>
+    /// Decodes the bytes inside a function's known extent that the descent never reached — typically
+    /// jump-table targets, which no direct branch points at. Alignment padding is skipped, and a gap
+    /// is abandoned as soon as it stops decoding, since it may hold the table itself rather than code.
+    /// </summary>
+    private void SweepGaps(ulong entryVa, ulong boundsEnd, SortedDictionary<ulong, DecodedInstruction> instructions, HashSet<ulong> leaders, List<string> notes)
+    {
+        int budget = _options.MaxInstructionsPerFunction - instructions.Count;
+        int recovered = 0;
+        ulong cursor = entryVa;
+
+        while (cursor < boundsEnd && budget > 0)
+        {
+            // Skip over what is already decoded.
+            if (instructions.TryGetValue(cursor, out var known))
+            {
+                cursor = known.NextVa;
+                continue;
+            }
+
+            // Bytes between functions and between blocks are padded; that is not missing code.
+            if (IsPadding(cursor))
+            {
+                cursor++;
+                continue;
+            }
+
+            bool sweptAny = false;
+            foreach (var ins in DecodeLinear(cursor))
+            {
+                if (ins.Va >= boundsEnd || instructions.ContainsKey(ins.Va) || ins.Flow == InstructionFlow.Invalid || --budget < 0)
+                {
+                    break;
+                }
+
+                if (!sweptAny)
+                {
+                    leaders.Add(ins.Va);
+                    sweptAny = true;
+                }
+
+                instructions[ins.Va] = ins;
+                recovered++;
+                cursor = ins.NextVa;
+            }
+
+            if (!sweptAny)
+            {
+                // Not code (jump table, embedded data): step past this byte and keep looking.
+                cursor++;
+            }
+        }
+
+        if (recovered > 0)
+        {
+            notes.Add($"Recovered {recovered} instruction(s) the recursive descent did not reach, using the unwind table bounds.");
+        }
+    }
+
+    /// <summary>int3 / nop filler the linker inserts between blocks.</summary>
+    private bool IsPadding(ulong va)
+    {
+        var b = _source.Read(va, 1);
+        return b.Length == 1 && b.Span[0] is 0xCC or 0x90;
     }
 
     private static bool IsTerminatingInterrupt(DecodedInstruction ins)
-        => ins.Mnemonic is "int3" or "ud2" or "hlt";
+        => ins.Mnemonic is "int3" or "ud2" or "hlt"
+           // int 0x29 is __fastfail: the process is gone before the next instruction. Match the
+           // decoded immediate, not the formatted text, which depends on formatter options.
+           || (ins.Native.Mnemonic == Mnemonic.Int && ins.Native.Immediate8 == 0x29);
 
     /// <summary>Decodes linearly from <paramref name="va"/>, refetching chunks so instructions never straddle a chunk end.</summary>
     private IEnumerable<DecodedInstruction> DecodeLinear(ulong va)

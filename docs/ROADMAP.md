@@ -24,12 +24,15 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 ## Phase 1 — Native analysis depth 🚧
 - ✅ Base relocations, TLS (callbacks as function seeds), load config (Control Flow Guard
   and SafeSEH tables as seeds), resource tree, Rich header
-- ⬜ Use `RUNTIME_FUNCTION` end addresses as function bounds; ARM64 unwind format
+- ✅ `RUNTIME_FUNCTION` end addresses as function bounds, with a sweep of the bytes
+  the recursive descent never reached
+- ⬜ ARM64 unwind format
 - ⬜ Decode resource leaves (version info, manifests, string tables) instead of raw bytes
 - ⬜ Map Rich header product ids to tool names (needs the undocumented prodid table)
 - ⬜ Linear‑sweep gap filling + prologue heuristics for function discovery
+- ✅ No-return functions (`ExitProcess`, `__fastfail`, `abort`, …, and thunks that
+  tail-jump to one) end a code path instead of decoding the bytes after the call
 - ⬜ Recognise CRT frame helpers (`__SEH_prolog4`, `__EH_prolog`, `__chkstk`)
-  and no-return functions (`ExitProcess`, `__fastfail`) in discovery
 - ✅ Cross‑references (calls, jumps, reads, writes, address-taken, IAT usage),
   Xrefs panel and a per-function reference count
 - ✅ String scanning (ASCII + UTF‑16, both parities) with a Strings document

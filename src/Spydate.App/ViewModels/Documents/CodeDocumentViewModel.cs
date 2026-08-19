@@ -218,6 +218,19 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             sb.Append("; section ").Append(section.Name).AppendLine();
         }
 
+        if (function.BoundsEnd is { } bounds)
+        {
+            sb.Append("; unwind table declares 0x").Append(function.EntryVa.ToString("X", CultureInfo.InvariantCulture))
+              .Append("-0x").Append(bounds.ToString("X", CultureInfo.InvariantCulture))
+              .Append(" (0x").Append(function.DeclaredSize.ToString("X", CultureInfo.InvariantCulture)).Append(" bytes)");
+            if (function.ExtendsBeyondBounds)
+            {
+                sb.Append(" - decoding ran past it");
+            }
+
+            sb.AppendLine();
+        }
+
         var callers = analysis.Xrefs.To(function.EntryVa);
         if (callers.Count > 0)
         {
