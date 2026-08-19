@@ -14,12 +14,16 @@ public sealed class HighlightingService
     public const string Il = "Spydate.IL";
     public const string Plain = "";
 
+    /// <summary>Manifests are XML; AvalonEdit's built-in definition assumes a light background.</summary>
+    public const string Xml = "Spydate.Xml";
+
     private static readonly (string Name, string Resource, string[] Extensions)[] Definitions =
     {
         (Asm, "asm.xshd", new[] { ".asm" }),
         (PseudoC, "pseudoc.xshd", new[] { ".pc" }),
         (CSharp, "csharp-dark.xshd", new[] { ".cs" }),
         (Il, "il.xshd", new[] { ".il" }),
+        (Xml, "xml-dark.xshd", new[] { ".manifest" }),
     };
 
     private bool _registered;

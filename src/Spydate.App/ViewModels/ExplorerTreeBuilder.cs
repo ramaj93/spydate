@@ -83,7 +83,7 @@ public static class ExplorerTreeBuilder
         if (pe.Resources is { Children.Count: > 0 } resources)
         {
             var node = root.Add(new ExplorerNodeViewModel("Resources", SymbolRegular.Image24, new ResourcesTarget(), $"{resources.Children.Count} types"));
-            node.ChildrenFactory = () => resources.Children.Select(t => ResourceNodeVm(pe, t));
+            node.ChildrenFactory = () => resources.Children.Select(t => ResourceNodeVm(pe, t, t.Id, t.DisplayName));
         }
 
         root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "ascii + utf-16"));
@@ -92,16 +92,20 @@ public static class ExplorerTreeBuilder
     }
 
     /// <summary>Resource subtree; leaves jump to their bytes in the hex view.</summary>
-    private static ExplorerNodeViewModel ResourceNodeVm(PeImage pe, ResourceNode node)
+    private static ExplorerNodeViewModel ResourceNodeVm(PeImage pe, ResourceNode node, uint typeId = 0, string typeName = "Resource")
     {
         if (!node.IsDirectory)
         {
-            long offset = pe.RvaToOffset(node.DataRva) ?? 0;
-            return new ExplorerNodeViewModel(node.DisplayName, SymbolRegular.Document24, new HexTarget(offset), $"{node.DataSize:N0} bytes");
+            var target = new ResourcePreviewTarget(typeId, node.Id, node.DataRva, node.DataSize, $"{typeName}: {node.DisplayName}");
+            return new ExplorerNodeViewModel(node.DisplayName, SymbolRegular.Document24, target, $"{node.DataSize:N0} bytes");
         }
 
+        // The type is fixed at the first level and inherited by everything below it.
+        uint childType = node.Level == 1 ? node.Id : typeId;
+        string childTypeName = node.Level == 1 ? node.DisplayName : typeName;
+
         var vm = new ExplorerNodeViewModel(node.DisplayName, SymbolRegular.Folder24, new ResourcesTarget(), node.Children!.Count.ToString(CultureInfo.InvariantCulture));
-        vm.ChildrenFactory = () => node.Children!.Select(c => ResourceNodeVm(pe, c));
+        vm.ChildrenFactory = () => node.Children!.Select(c => ResourceNodeVm(pe, c, childType, childTypeName));
         return vm;
     }
 

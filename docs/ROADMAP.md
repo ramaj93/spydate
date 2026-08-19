@@ -27,7 +27,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ `RUNTIME_FUNCTION` end addresses as function bounds, with a sweep of the bytes
   the recursive descent never reached
 - ⬜ ARM64 unwind format
-- ⬜ Decode resource leaves (version info, manifests, string tables) instead of raw bytes
+- ✅ Resource leaves decoded: version blocks, manifests (dark XML highlighting) and
+  string tables open as text; version info also appears in the overview
 - ⬜ Map Rich header product ids to tool names (needs the undocumented prodid table)
 - ✅ Gap sweeping: after seeds and calls are exhausted, the leftover bytes of executable
   sections are scanned for prologues (x86 notepad: 606 → 677 functions)

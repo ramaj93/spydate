@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<SyntaxDefinition name="Spydate.Xml" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <!-- Dark palette for embedded manifests; AvalonEdit's built-in XML colours assume a light background. -->
+  <Color name="Comment"        foreground="#6A9955" />
+  <Color name="CData"          foreground="#D7BA7D" />
+  <Color name="DocType"        foreground="#C586C0" />
+  <Color name="Declaration"    foreground="#569CD6" />
+  <Color name="Tag"            foreground="#569CD6" />
+  <Color name="AttributeName"  foreground="#9CDCFE" />
+  <Color name="AttributeValue" foreground="#CE9178" />
+  <Color name="Entity"         foreground="#D7BA7D" />
+  <Color name="BrokenEntity"   foreground="#F44747" />
+
+  <RuleSet>
+    <Span color="Comment" multiline="true" begin="&lt;!--" end="--&gt;" />
+    <Span color="CData" multiline="true" begin="&lt;!\[CDATA\[" end="]]&gt;" />
+    <Span color="DocType" multiline="true" begin="&lt;!DOCTYPE" end="&gt;" />
+    <Span color="Declaration" multiline="true" begin="&lt;\?" end="\?&gt;" />
+
+    <Span color="Tag" multiline="true" begin="&lt;" end="&gt;">
+      <RuleSet>
+        <Span color="AttributeValue" begin="&quot;" end="&quot;">
+          <RuleSet>
+            <Span begin="&amp;" end=";" color="Entity" />
+          </RuleSet>
+        </Span>
+        <Span color="AttributeValue" begin="'" end="'">
+          <RuleSet>
+            <Span begin="&amp;" end=";" color="Entity" />
+          </RuleSet>
+        </Span>
+        <Rule color="AttributeName">[\d\w_\-\.]+(?=(\s*=))</Rule>
+        <Rule color="AttributeValue">=</Rule>
+      </RuleSet>
+    </Span>
+
+    <Rule color="Entity">&amp;[\w\d\#]+;</Rule>
+    <Rule color="BrokenEntity">&amp;[\w\d\#]*(?!;)</Rule>
+  </RuleSet>
+</SyntaxDefinition>

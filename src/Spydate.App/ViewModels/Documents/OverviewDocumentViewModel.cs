@@ -67,6 +67,20 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 tls.CallbackVas.Count > 0 ? "run before the entry point" : null));
         }
 
+        Version = new List<PropertyRow>();
+        if (FindVersionInfo(pe) is { } version)
+        {
+            Version.Add(new PropertyRow("File version", version.FileVersion?.ToString() ?? "(none)"));
+            Version.Add(new PropertyRow("Product version", version.ProductVersion?.ToString() ?? "(none)"));
+            foreach (var table in version.StringTables)
+            {
+                foreach (var (name, value) in table.Strings)
+                {
+                    Version.Add(new PropertyRow(name, value, table.LanguageCodePage));
+                }
+            }
+        }
+
         Signature = new List<PropertyRow>();
         if (pe.Signature is { } sig)
         {
@@ -148,6 +162,9 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
     /// <summary>Mitigations and loader-visible security data (load config, CFG, TLS).</summary>
     public List<PropertyRow> Security { get; }
     public bool HasSecurity => Security.Count > 0;
+    /// <summary>Decoded VS_VERSIONINFO resource.</summary>
+    public List<PropertyRow> Version { get; }
+    public bool HasVersion => Version.Count > 0;
     /// <summary>Embedded Authenticode signature, described but not verified.</summary>
     public List<PropertyRow> Signature { get; }
     public bool HasSignature => Signature.Count > 0;
@@ -158,6 +175,24 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
     public bool HasDebug => Debug.Count > 0;
     public List<string> Warnings { get; }
     public bool HasWarnings => Warnings.Count > 0;
+
+    /// <summary>First RT_VERSION leaf in the resource tree, decoded.</summary>
+    private static VersionInfo? FindVersionInfo(PeImage pe)
+    {
+        var type = pe.Resources?.Children?.FirstOrDefault(c => c.Name is null && c.Id == (uint)ResourceType.Version);
+        var leaf = FirstLeaf(type);
+        return leaf is null ? null : ResourceDecoder.ReadVersionInfo(ResourceDecoder.ReadData(pe, leaf).Span);
+    }
+
+    private static ResourceNode? FirstLeaf(ResourceNode? node)
+    {
+        if (node is null || !node.IsDirectory)
+        {
+            return node;
+        }
+
+        return node.Children!.Select(FirstLeaf).FirstOrDefault(n => n is not null);
+    }
 
     private static string Describe(PeImage pe)
     {

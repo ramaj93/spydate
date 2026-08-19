@@ -1,13 +1,16 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
+using Spydate.App.Services;
 using Spydate.Core.PE;
 using Spydate.Disassembly;
+using SymbolRegular = Wpf.Ui.Controls.SymbolRegular;
 
 namespace Spydate.App.ViewModels;
 
@@ -450,7 +453,8 @@ public sealed partial class MainViewModel : ObservableObject
             HeadersTarget => Find("headers") ?? new HeadersDocumentViewModel(pe),
             SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
             ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe),
-            ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, offset => OpenTarget(new HexTarget(offset))),
+            ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
+            ResourcePreviewTarget preview => OpenResource(preview),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
@@ -483,6 +487,76 @@ public sealed partial class MainViewModel : ObservableObject
         {
             Show(Find($"pseudoc:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly));
         }
+    }
+
+/// <summary>
+    /// Opens a resource as text when its type is one Spydate can decode, and as bytes otherwise.
+    /// </summary>
+    private DocumentViewModel? OpenResource(ResourcePreviewTarget target)
+    {
+        var pe = Binary!.Image;
+        var node = new ResourceNode { Level = 3, Id = target.Id, DataRva = target.DataRva, DataSize = target.DataSize };
+        var data = ResourceDecoder.ReadData(pe, node);
+        if (data.IsEmpty)
+        {
+            return null;
+        }
+
+        string key = $"resource:{target.DataRva:X}";
+        var existing = Find(key);
+        if (existing is not null)
+        {
+            return existing;
+        }
+
+        switch ((ResourceType)target.TypeId)
+        {
+            case ResourceType.Manifest:
+                return CodeDocumentViewModel.ForText(key, target.Title, SymbolRegular.Document24, HighlightingService.Xml, ResourceDecoder.ReadManifest(data.Span));
+
+            case ResourceType.Version when ResourceDecoder.ReadVersionInfo(data.Span) is { } version:
+                return CodeDocumentViewModel.ForText(key, target.Title, SymbolRegular.Info24, HighlightingService.Plain, FormatVersionInfo(version));
+
+            case ResourceType.String:
+                var strings = ResourceDecoder.ReadStringTable(data.Span, target.Id);
+                if (strings.Count > 0)
+                {
+                    return CodeDocumentViewModel.ForText(
+                        key,
+                        target.Title,
+                        SymbolRegular.TextT24,
+                        HighlightingService.Plain,
+                        string.Join(Environment.NewLine, strings.Select(s => $"{s.Id,6}  {s.Text}")));
+                }
+
+                break;
+        }
+
+        // Anything else is bytes: icons, dialogs, binary blobs.
+        return OpenHex(pe.RvaToOffset(target.DataRva) is { } offset ? offset : 0);
+    }
+
+    private static string FormatVersionInfo(VersionInfo version)
+    {
+        var sb = new StringBuilder();
+        sb.Append("File version:     ").AppendLine(version.FileVersion?.ToString() ?? "(none)");
+        sb.Append("Product version:  ").AppendLine(version.ProductVersion?.ToString() ?? "(none)");
+        sb.Append("File flags:       ").AppendLine($"0x{version.FileFlags:X8}");
+        sb.Append("File OS:          ").AppendLine($"0x{version.FileOs:X8}");
+        sb.Append("File type:        ").AppendLine($"0x{version.FileType:X8}");
+
+        foreach (var table in version.StringTables)
+        {
+            sb.AppendLine();
+            sb.Append("[").Append(table.LanguageCodePage).AppendLine("]");
+            int width = table.Strings.Count == 0 ? 0 : table.Strings.Max(s => s.Key.Length);
+            foreach (var (name, value) in table.Strings)
+            {
+                sb.Append("  ").Append(name.PadRight(width)).Append("  ").AppendLine(value);
+            }
+        }
+
+        return sb.ToString();
     }
 
     private DocumentViewModel OpenHex(long offset)

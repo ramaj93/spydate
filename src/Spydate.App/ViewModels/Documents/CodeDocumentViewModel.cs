@@ -93,6 +93,10 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
         };
     }
 
+    /// <summary>A read-only text document with no analysis behind it (decoded resources, notes).</summary>
+    public static CodeDocumentViewModel ForText(string key, string title, SymbolRegular icon, string highlighting, string text)
+        => new(key, title, icon, highlighting, _ => new CodeContent(text, Array.Empty<string>()));
+
     public static CodeDocumentViewModel ForRangeDisassembly(BinaryAnalysis analysis, ulong va, int byteCount, string title)
     {
         return new CodeDocumentViewModel(

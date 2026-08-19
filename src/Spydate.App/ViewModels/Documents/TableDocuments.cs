@@ -104,15 +104,15 @@ public sealed partial class SectionsDocumentViewModel : DocumentViewModel
 // Resources
 // ---------------------------------------------------------------------------
 
-public sealed record ResourceRow(string Type, string Name, string Language, string Rva, string Offset, string Size, string CodePage, long FileOffset);
+public sealed record ResourceRow(string Type, string Name, string Language, string Rva, string Offset, string Size, string CodePage, long FileOffset, uint TypeId, uint Id, uint DataRva, uint DataSize);
 
 public sealed partial class ResourcesDocumentViewModel : DocumentViewModel
 {
-    private readonly Action<long> _openHex;
+    private readonly Action<ResourceRow> _open;
 
-    public ResourcesDocumentViewModel(PeImage pe, Action<long> openHex) : base("resources", "Resources", SymbolRegular.Image24)
+    public ResourcesDocumentViewModel(PeImage pe, Action<ResourceRow> open) : base("resources", "Resources", SymbolRegular.Image24)
     {
-        _openHex = openHex;
+        _open = open;
         Rows = Flatten(pe).ToList();
     }
 
@@ -149,7 +149,11 @@ public sealed partial class ResourcesDocumentViewModel : DocumentViewModel
                         offset >= 0 ? $"0x{offset:X8}" : "(unmapped)",
                         $"{leaf.DataSize:N0}",
                         leaf.CodePage == 0 ? "-" : leaf.CodePage.ToString(CultureInfo.InvariantCulture),
-                        offset);
+                        offset,
+                        type.Id,
+                        name.Id,
+                        leaf.DataRva,
+                        leaf.DataSize);
                 }
             }
         }
@@ -172,9 +176,9 @@ public sealed partial class ResourcesDocumentViewModel : DocumentViewModel
     [RelayCommand]
     private void OpenHex(ResourceRow? row)
     {
-        if (row is { FileOffset: >= 0 })
+        if (row is not null)
         {
-            _openHex(row.FileOffset);
+            _open(row);
         }
     }
 }
