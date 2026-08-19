@@ -34,6 +34,7 @@
 ┌───────────────┴─────────────────────────────────────────────┐
 │ Spydate.Core (net10.0, no external deps)                    │
 │  PE: PeImage + headers/sections/imports/exports/CLR/debug   │
+│      + relocations/TLS/load config/resources/Rich           │
 │  Binary: SpanReader · Symbols: SymbolTable                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -53,7 +54,8 @@ var pe = PeImage.Parse(bytes, name); // from a buffer
 ```
 
 Parsing is eager for headers/sections/directories (cheap) and eager but
-guarded for imports/exports/CLR/debug (each wrapped so one corrupt table doesn't
+guarded for imports/exports/CLR/debug/relocations/TLS/load config/resources/Rich
+(each wrapped so one corrupt table doesn't
 prevent the rest from loading; problems are added to `pe.Warnings`).
 
 Key members:
@@ -68,6 +70,11 @@ Key members:
 | `ClrHeader` / `IsManaged` | CLR (COR20) header if present. |
 | `Debug` | `DebugEntry[]` incl. CodeView PDB70 (GUID, age, path). |
 | `ExceptionTable` | x64 `RuntimeFunction[]` from `.pdata` (function starts, chained flag). |
+| `Relocations` / `RelocationCount` | `RelocationBlock[]` — one per 4 KiB page, `Absolute` padding dropped. |
+| `Tls` | `TlsDirectory?` incl. `CallbackVas` (they run before the entry point). |
+| `LoadConfig` | Security cookie, SafeSEH table, Control Flow Guard table (`GuardCfFunctionRvas`) and flags. |
+| `Resources` | `ResourceNode?` tree: root → type → name → language → data entry. |
+| `RichHeader` | Linker build stamp from the DOS stub (tool ids, build numbers, object counts). |
 | `Is64Bit`, `Machine`, `ImageBase`, `EntryPointRva`, `Subsystem` | Convenience. |
 | `RvaToOffset(uint) : uint?`, `OffsetToRva`, `RvaToVa`, `VaToRva`, `TryReadAt(rva, len)` | Address translation, bounds‑checked. |
 | `SectionFromRva`, `SectionFromVa` | Section lookup. |
@@ -95,6 +102,10 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   `Va`, `Rva`, `Length`, `Bytes`, `Mnemonic`, `Operands`, `Text`, `Flow`
   (`Next | UnconditionalBranch | ConditionalBranch | Call | Return | IndirectBranch | IndirectCall | Interrupt | Invalid`),
   `BranchTargetVa`, plus the raw Iced `Instruction` (`Native`) for lifting.
+- `BinaryAnalysis.GetSeeds()` — where discovery starts, most trustworthy first:
+  entry point, TLS callbacks, exports, non-chained `.pdata` entries, then the
+  Control Flow Guard and SafeSEH tables (addresses the image itself declares as
+  legal indirect-call targets). Deduplicated and filtered to executable memory.
 - `FunctionDiscovery` — recursive‑descent from a single entry VA; follows
   direct branches, records (does not follow) calls, splits basic blocks at
   branch targets, stops at `ret`/indirect jumps/invalid bytes. Produces

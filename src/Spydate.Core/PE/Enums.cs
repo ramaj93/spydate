@@ -194,3 +194,70 @@ public enum CorFlags : uint
     TrackDebugData = 0x00010000,
     Prefers32Bit = 0x00020000,
 }
+
+/// <summary>IMAGE_REL_BASED_* base relocation kinds. Values 5-9 are machine specific.</summary>
+public enum RelocationType : byte
+{
+    Absolute = 0,
+    High = 1,
+    Low = 2,
+    HighLow = 3,
+    HighAdj = 4,
+    /// <summary>MIPS_JMPADDR / ARM_MOV32 / RISCV_HIGH20.</summary>
+    ArmMov32 = 5,
+    Reserved = 6,
+    /// <summary>THUMB_MOV32 / RISCV_LOW12I.</summary>
+    ThumbMov32 = 7,
+    /// <summary>RISCV_LOW12S / LOONGARCH_MARK_LA.</summary>
+    RiscvLow12S = 8,
+    /// <summary>MIPS_JMPADDR16 / IA64_IMM64.</summary>
+    MipsJmpAddr16 = 9,
+    Dir64 = 10,
+}
+
+/// <summary>IMAGE_GUARD_* flags from the load config directory.</summary>
+[Flags]
+public enum GuardFlags : uint
+{
+    None = 0,
+    CfInstrumented = 0x0000_0100,
+    CfwInstrumented = 0x0000_0200,
+    CfFunctionTablePresent = 0x0000_0400,
+    SecurityCookieUnused = 0x0000_0800,
+    ProtectDelayloadIat = 0x0000_1000,
+    DelayloadIatInItsOwnSection = 0x0000_2000,
+    CfExportSuppressionInfoPresent = 0x0000_4000,
+    CfEnableExportSuppression = 0x0000_8000,
+    CfLongjumpTablePresent = 0x0001_0000,
+    RfInstrumented = 0x0002_0000,
+    RfEnable = 0x0004_0000,
+    RfStrict = 0x0008_0000,
+    RetpolinePresent = 0x0010_0000,
+    EhContinuationTablePresent = 0x0040_0000,
+}
+
+/// <summary>Well-known RT_* resource type ids (level 0 of the resource tree).</summary>
+public enum ResourceType
+{
+    Cursor = 1,
+    Bitmap = 2,
+    Icon = 3,
+    Menu = 4,
+    Dialog = 5,
+    String = 6,
+    FontDir = 7,
+    Font = 8,
+    Accelerator = 9,
+    RcData = 10,
+    MessageTable = 11,
+    GroupCursor = 12,
+    GroupIcon = 14,
+    Version = 16,
+    DlgInclude = 17,
+    PlugPlay = 19,
+    Vxd = 20,
+    AniCursor = 21,
+    AniIcon = 22,
+    Html = 23,
+    Manifest = 24,
+}

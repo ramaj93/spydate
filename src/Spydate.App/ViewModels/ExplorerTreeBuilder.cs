@@ -1,3 +1,4 @@
+using System.Globalization;
 using ICSharpCode.Decompiler.TypeSystem;
 using Spydate.App.Services;
 using Spydate.Core.PE;
@@ -79,8 +80,28 @@ public static class ExplorerTreeBuilder
             }
         }
 
+        if (pe.Resources is { Children.Count: > 0 } resources)
+        {
+            var node = root.Add(new ExplorerNodeViewModel("Resources", SymbolRegular.Image24, new ResourcesTarget(), $"{resources.Children.Count} types"));
+            node.ChildrenFactory = () => resources.Children.Select(t => ResourceNodeVm(pe, t));
+        }
+
         root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{pe.Length:N0} bytes"));
         return root;
+    }
+
+    /// <summary>Resource subtree; leaves jump to their bytes in the hex view.</summary>
+    private static ExplorerNodeViewModel ResourceNodeVm(PeImage pe, ResourceNode node)
+    {
+        if (!node.IsDirectory)
+        {
+            long offset = pe.RvaToOffset(node.DataRva) ?? 0;
+            return new ExplorerNodeViewModel(node.DisplayName, SymbolRegular.Document24, new HexTarget(offset), $"{node.DataSize:N0} bytes");
+        }
+
+        var vm = new ExplorerNodeViewModel(node.DisplayName, SymbolRegular.Folder24, new ResourcesTarget(), node.Children!.Count.ToString(CultureInfo.InvariantCulture));
+        vm.ChildrenFactory = () => node.Children!.Select(c => ResourceNodeVm(pe, c));
+        return vm;
     }
 
     public static IEnumerable<ExplorerNodeViewModel> FunctionNodes(BinaryAnalysis analysis)

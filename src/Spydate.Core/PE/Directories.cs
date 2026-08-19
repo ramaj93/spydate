@@ -114,3 +114,115 @@ public sealed record CodeViewInfo(string Signature, Guid Guid, uint Age, string 
     /// <summary>Symbol-server style key: <c>{GUID}{Age}</c> in upper-case hex.</summary>
     public string SymbolKey => $"{Guid:N}{Age:X}".ToUpperInvariant();
 }
+
+/// <summary>One IMAGE_BASE_RELOCATION block: a 4 KiB page and the fix-ups inside it.</summary>
+public sealed record RelocationBlock
+{
+    public required uint PageRva { get; init; }
+    public required uint BlockSize { get; init; }
+    public required IReadOnlyList<RelocationEntry> Entries { get; init; }
+
+    public override string ToString() => $"0x{PageRva:X8} ({Entries.Count} fix-ups)";
+}
+
+/// <summary>A single base relocation: where it applies and how the loader patches it.</summary>
+public readonly record struct RelocationEntry(RelocationType Type, uint Rva);
+
+/// <summary>IMAGE_TLS_DIRECTORY plus the resolved callback list.</summary>
+public sealed record TlsDirectory
+{
+    public required ulong StartAddressOfRawData { get; init; }
+    public required ulong EndAddressOfRawData { get; init; }
+    public required ulong AddressOfIndex { get; init; }
+    public required ulong AddressOfCallBacks { get; init; }
+    public required uint SizeOfZeroFill { get; init; }
+    public required uint Characteristics { get; init; }
+
+    /// <summary>
+    /// Callback VAs read from <see cref="AddressOfCallBacks"/>. These run before the entry point,
+    /// so they are function seeds for analysis. Empty when the list is absent or unmapped.
+    /// </summary>
+    public required IReadOnlyList<ulong> CallbackVas { get; init; }
+
+    public ulong RawDataSize => EndAddressOfRawData > StartAddressOfRawData ? EndAddressOfRawData - StartAddressOfRawData : 0;
+}
+
+/// <summary>The parts of IMAGE_LOAD_CONFIG_DIRECTORY that matter for analysis.</summary>
+public sealed record LoadConfig
+{
+    public required uint Size { get; init; }
+    public required uint TimeDateStamp { get; init; }
+    public required ushort MajorVersion { get; init; }
+    public required ushort MinorVersion { get; init; }
+    public required ulong SecurityCookieVa { get; init; }
+    /// <summary>x86 SafeSEH handler table (VA) and its entry count; 0 on x64.</summary>
+    public required ulong SeHandlerTableVa { get; init; }
+    public required ulong SeHandlerCount { get; init; }
+    public required ulong GuardCfCheckFunctionPointerVa { get; init; }
+    public required ulong GuardCfDispatchFunctionPointerVa { get; init; }
+    public required ulong GuardCfFunctionTableVa { get; init; }
+    public required ulong GuardCfFunctionCount { get; init; }
+    /// <summary>Flag bits only; the table-stride nibble is reported by <see cref="GuardCfFunctionTableStride"/>.</summary>
+    public required GuardFlags GuardFlags { get; init; }
+    /// <summary>Bytes per Control Flow Guard table entry: 4 RVA bytes plus any metadata.</summary>
+    public required int GuardCfFunctionTableStride { get; init; }
+
+    /// <summary>
+    /// RVAs from the Control Flow Guard function table — every address the image declares as a
+    /// valid indirect-call target. A high-quality seed set for function discovery.
+    /// </summary>
+    public required IReadOnlyList<uint> GuardCfFunctionRvas { get; init; }
+
+    /// <summary>x86 SafeSEH exception handler RVAs (empty on x64).</summary>
+    public required IReadOnlyList<uint> SeHandlerRvas { get; init; }
+
+    public bool HasControlFlowGuard => GuardFlags.HasFlag(GuardFlags.CfInstrumented);
+}
+
+/// <summary>A node in the resource tree (type → name/id → language → data).</summary>
+public sealed record ResourceNode
+{
+    /// <summary>Name for named entries, null for numeric ones.</summary>
+    public string? Name { get; init; }
+    public uint Id { get; init; }
+    /// <summary>Depth in the tree: 0 = root, 1 = type, 2 = name, 3 = language.</summary>
+    public required int Level { get; init; }
+    public IReadOnlyList<ResourceNode>? Children { get; init; }
+    /// <summary>Set on leaves: where the bytes live.</summary>
+    public uint DataRva { get; init; }
+    public uint DataSize { get; init; }
+    public uint CodePage { get; init; }
+
+    public bool IsDirectory => Children is not null;
+
+    /// <summary>Human label: the entry name, the well-known RT_* type at level 1, or <c>#id</c>.</summary>
+    public string DisplayName => Name
+        ?? (Level == 1 && Enum.IsDefined(typeof(ResourceType), (int)Id) ? ((ResourceType)Id).ToString() : $"#{Id}");
+
+    public override string ToString() => IsDirectory ? $"{DisplayName} ({Children!.Count})" : $"{DisplayName} ({DataSize} bytes)";
+}
+
+/// <summary>The undocumented "Rich" header Microsoft linkers stamp into the DOS stub.</summary>
+public sealed record RichHeader
+{
+    /// <summary>File offset of the <c>DanS</c> marker.</summary>
+    public required uint Offset { get; init; }
+    /// <summary>XOR key, which doubles as a checksum over the DOS stub.</summary>
+    public required uint Checksum { get; init; }
+    public required IReadOnlyList<RichEntry> Entries { get; init; }
+}
+
+/// <summary>
+/// One Rich header record: a build tool and how many objects it contributed. Product ids are
+/// undocumented and build numbers are not ordered across Visual Studio releases (30729 is VS2008
+/// SP1, 23026 is VS2015), so no version is inferred here - the optional header's linker version is
+/// the reliable signal.
+/// </summary>
+public readonly record struct RichEntry(ushort ProductId, ushort BuildNumber, uint UseCount)
+{
+    public string Description => BuildNumber == 0
+        ? $"tool id 0x{ProductId:X4} (imported object, no build stamp)"
+        : $"tool id 0x{ProductId:X4} - build {BuildNumber}";
+
+    public override string ToString() => $"id 0x{ProductId:X4} build {BuildNumber} x{UseCount}";
+}

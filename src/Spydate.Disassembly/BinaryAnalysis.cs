@@ -55,46 +55,66 @@ public sealed class BinaryAnalysis
     }
 
     /// <summary>
-    /// Seed VAs for whole-image discovery: entry point, executable exports, and (x64) every non-chained
-    /// RUNTIME_FUNCTION start from the exception directory.
+    /// Seed VAs for whole-image discovery, in descending order of confidence: entry point, TLS
+    /// callbacks (they run before it), executable exports, non-chained RUNTIME_FUNCTION starts from
+    /// the x64 exception directory, and the Control Flow Guard / SafeSEH tables — every address the
+    /// image itself declares as a legal indirect-call target.
     /// </summary>
     public IReadOnlyList<(ulong Va, string? Name)> GetSeeds()
     {
         var seeds = new List<(ulong, string?)>();
-        if (Image.EntryPointRva != 0 && Source.IsExecutable(Image.EntryPointVa))
+        var seen = new HashSet<ulong>();
+
+        void Add(ulong va, string? name)
         {
-            seeds.Add((Image.EntryPointVa, Image.IsDll ? "DllEntryPoint" : "EntryPoint"));
+            if (va != 0 && seen.Add(va) && Source.IsExecutable(va))
+            {
+                seeds.Add((va, name));
+            }
+        }
+
+        if (Image.EntryPointRva != 0)
+        {
+            Add(Image.EntryPointVa, Image.IsDll ? "DllEntryPoint" : "EntryPoint");
+        }
+
+        if (Image.Tls is { } tls)
+        {
+            for (int i = 0; i < tls.CallbackVas.Count; i++)
+            {
+                Add(tls.CallbackVas[i], $"TlsCallback{i}");
+            }
         }
 
         if (Image.Exports is { } exports)
         {
             foreach (var e in exports.Entries)
             {
-                if (e.IsForwarder || e.Rva == 0)
+                if (!e.IsForwarder && e.Rva != 0)
                 {
-                    continue;
-                }
-
-                ulong va = Image.RvaToVa(e.Rva);
-                if (Source.IsExecutable(va))
-                {
-                    seeds.Add((va, e.Name ?? $"Ordinal{e.Ordinal}"));
+                    Add(Image.RvaToVa(e.Rva), e.Name ?? $"Ordinal{e.Ordinal}");
                 }
             }
         }
 
-        var seen = new HashSet<ulong>(seeds.Select(s => s.Item1));
         foreach (var rf in Image.ExceptionTable)
         {
-            if (rf.IsChained || rf.BeginRva == 0)
+            if (!rf.IsChained && rf.BeginRva != 0)
             {
-                continue;
+                Add(Image.RvaToVa(rf.BeginRva), null);
+            }
+        }
+
+        if (Image.LoadConfig is { } config)
+        {
+            foreach (uint rva in config.GuardCfFunctionRvas)
+            {
+                Add(Image.RvaToVa(rva), null);
             }
 
-            ulong va = Image.RvaToVa(rf.BeginRva);
-            if (seen.Add(va) && Source.IsExecutable(va))
+            for (int i = 0; i < config.SeHandlerRvas.Count; i++)
             {
-                seeds.Add((va, null));
+                Add(Image.RvaToVa(config.SeHandlerRvas[i]), $"SehHandler{i}");
             }
         }
 

@@ -99,6 +99,85 @@ public sealed partial class SectionsDocumentViewModel : DocumentViewModel
 }
 
 // ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+public sealed record ResourceRow(string Type, string Name, string Language, string Rva, string Offset, string Size, string CodePage, long FileOffset);
+
+public sealed partial class ResourcesDocumentViewModel : DocumentViewModel
+{
+    private readonly Action<long> _openHex;
+
+    public ResourcesDocumentViewModel(PeImage pe, Action<long> openHex) : base("resources", "Resources", SymbolRegular.Image24)
+    {
+        _openHex = openHex;
+        Rows = Flatten(pe).ToList();
+    }
+
+    public List<ResourceRow> Rows { get; }
+
+    public string Summary => $"{Rows.Count} entries, {Rows.Select(r => r.Type).Distinct().Count()} types";
+
+    /// <summary>Walks type -> name -> language and yields one row per data entry.</summary>
+    private static IEnumerable<ResourceRow> Flatten(PeImage pe)
+    {
+        if (pe.Resources is not { Children: { } types })
+        {
+            yield break;
+        }
+
+        foreach (var type in types)
+        {
+            foreach (var name in type.Children ?? (IReadOnlyList<ResourceNode>)Array.Empty<ResourceNode>())
+            {
+                var languages = name.IsDirectory ? name.Children! : new[] { name };
+                foreach (var leaf in languages)
+                {
+                    if (leaf.IsDirectory)
+                    {
+                        continue;
+                    }
+
+                    long offset = pe.RvaToOffset(leaf.DataRva) is { } o ? o : -1;
+                    yield return new ResourceRow(
+                        type.DisplayName,
+                        name.DisplayName,
+                        leaf.Name ?? LanguageName(leaf.Id),
+                        $"0x{leaf.DataRva:X8}",
+                        offset >= 0 ? $"0x{offset:X8}" : "(unmapped)",
+                        $"{leaf.DataSize:N0}",
+                        leaf.CodePage == 0 ? "-" : leaf.CodePage.ToString(CultureInfo.InvariantCulture),
+                        offset);
+                }
+            }
+        }
+    }
+
+    /// <summary>Primary language id -> name for the handful that actually show up in system binaries.</summary>
+    private static string LanguageName(uint id) => (id & 0x3FF) switch
+    {
+        0 => $"neutral (#{id})",
+        9 => $"English (#{id})",
+        7 => $"German (#{id})",
+        10 => $"Spanish (#{id})",
+        12 => $"French (#{id})",
+        17 => $"Japanese (#{id})",
+        4 => $"Chinese (#{id})",
+        25 => $"Russian (#{id})",
+        _ => $"#{id}",
+    };
+
+    [RelayCommand]
+    private void OpenHex(ResourceRow? row)
+    {
+        if (row is { FileOffset: >= 0 })
+        {
+            _openHex(row.FileOffset);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
 

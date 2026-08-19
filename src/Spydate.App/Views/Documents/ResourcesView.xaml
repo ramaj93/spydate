@@ -1,0 +1,36 @@
+<UserControl x:Class="Spydate.App.Views.Documents.ResourcesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:ResourcesDocumentViewModel}"
+             Background="{DynamicResource Document.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="{DynamicResource Chrome.Background}"
+                BorderBrush="{DynamicResource Chrome.Border}" BorderThickness="0,0,0,1" Padding="6,3">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="{Binding Summary}" Foreground="{DynamicResource Text.Secondary}" />
+                <TextBlock Text="  ·  double-click an entry to view its bytes"
+                           Foreground="{DynamicResource Text.Tertiary}" />
+            </StackPanel>
+        </Border>
+        <DataGrid Grid.Row="1" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}"
+                  MouseDoubleClick="OnRowDoubleClick">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="150" />
+                <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*" />
+                <DataGridTextColumn Header="Language" Binding="{Binding Language}" Width="130" />
+                <DataGridTextColumn Header="RVA" Binding="{Binding Rva}" Width="100" />
+                <DataGridTextColumn Header="File offset" Binding="{Binding Offset}" Width="100" />
+                <DataGridTextColumn Header="Size" Binding="{Binding Size}" Width="90" />
+                <DataGridTextColumn Header="Code page" Binding="{Binding CodePage}" Width="80" />
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</UserControl>

@@ -21,16 +21,19 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   panel, drag & drop, command-line file argument
 - ✅ Tests for PE parsing, disassembly, lifting, real-binary smoke tests (x64 + x86)
 
-## Phase 1 — Native analysis depth ⬜
-- ⬜ Base relocations, TLS (callbacks as function seeds), load config, resources tree
+## Phase 1 — Native analysis depth 🚧
+- ✅ Base relocations, TLS (callbacks as function seeds), load config (Control Flow Guard
+  and SafeSEH tables as seeds), resource tree, Rich header
 - ⬜ Use `RUNTIME_FUNCTION` end addresses as function bounds; ARM64 unwind format
+- ⬜ Decode resource leaves (version info, manifests, string tables) instead of raw bytes
+- ⬜ Map Rich header product ids to tool names (needs the undocumented prodid table)
 - ⬜ Linear‑sweep gap filling + prologue heuristics for function discovery
 - ⬜ Recognise CRT frame helpers (`__SEH_prolog4`, `__EH_prolog`, `__chkstk`)
   and no-return functions (`ExitProcess`, `__fastfail`) in discovery
 - ⬜ Cross‑references (code→code, code→data, IAT usages) and Xrefs panel
 - ⬜ String scanning (ASCII/UTF‑16) with xrefs
 - ⬜ PDB symbol loading (MSF/DBI) for local symbol names
-- ⬜ Rich header, authenticode summary, entropy per section (packer hints)
+- ⬜ Authenticode signature summary (the certificate directory in the overlay)
 
 ## Phase 2 — Decompiler quality ⬜
 - ⬜ SSA construction (cross-block propagation), register aliasing normalisation

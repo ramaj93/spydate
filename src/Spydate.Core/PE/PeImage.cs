@@ -16,6 +16,11 @@ public sealed class PeImage
     private const int MaxImportFunctions = 65536;
     private const int MaxExports = 65536;
     private const int MaxDebugEntries = 64;
+    private const int MaxRelocationBlocks = 65536;
+    private const int MaxRelocationsPerBlock = 4096;
+    private const int MaxTlsCallbacks = 1024;
+    private const int MaxGuardFunctions = 1_000_000;
+    private const int MaxResourceNodes = 65536;
 
     private readonly ReadOnlyMemory<byte> _data;
     private readonly List<string> _warnings = new();
@@ -55,6 +60,11 @@ public sealed class PeImage
         ClrHeader = Guard(ParseClrHeader, "CLR header", null);
         Debug = Guard(ParseDebug, "debug directory", Array.Empty<DebugEntry>());
         ExceptionTable = Guard(ParseExceptionTable, "exception directory", Array.Empty<RuntimeFunction>());
+        Relocations = Guard(ParseRelocations, "base relocation table", Array.Empty<RelocationBlock>());
+        Tls = Guard(ParseTls, "TLS directory", null);
+        LoadConfig = Guard(ParseLoadConfig, "load config directory", null);
+        Resources = Guard(ParseResources, "resource directory", null);
+        RichHeader = Guard(ParseRichHeader, "Rich header", null);
 
         Overlay = ComputeOverlay();
     }
@@ -119,6 +129,16 @@ public sealed class PeImage
     public IReadOnlyList<DebugEntry> Debug { get; }
     /// <summary>x64 unwind table (RUNTIME_FUNCTION entries); empty for x86 or when absent.</summary>
     public IReadOnlyList<RuntimeFunction> ExceptionTable { get; }
+    /// <summary>Base relocation blocks; empty when the image is not relocatable.</summary>
+    public IReadOnlyList<RelocationBlock> Relocations { get; }
+    /// <summary>TLS directory, including callbacks that run before the entry point.</summary>
+    public TlsDirectory? Tls { get; }
+    /// <summary>Load config: security cookie, SafeSEH and Control Flow Guard tables.</summary>
+    public LoadConfig? LoadConfig { get; }
+    /// <summary>Root of the resource tree (type -> name -> language), or null when absent.</summary>
+    public ResourceNode? Resources { get; }
+    /// <summary>Microsoft linker build stamp hidden in the DOS stub, or null.</summary>
+    public RichHeader? RichHeader { get; }
     public IReadOnlyList<string> Warnings => new ReadOnlyCollection<string>(_warnings);
 
     /// <summary>File offset and length of any data past the last section (0,0 if none).</summary>
@@ -132,7 +152,8 @@ public sealed class PeImage
     public Subsystem Subsystem => OptionalHeader.Subsystem;
     public bool IsDll => FileHeader.IsDll;
     public bool IsManaged => ClrHeader is not null;
-
+    /// <summary>Total number of base relocations across all blocks.</summary>
+    public int RelocationCount => Relocations.Sum(b => b.Entries.Count);
     /// <summary>Bit width of code addresses for disassembly (32 or 64). Falls back to the optional header magic.</summary>
     public int Bitness => Machine switch
     {
@@ -893,6 +914,402 @@ public sealed class PeImage
         }
 
         return list;
+    }
+
+    private IReadOnlyList<RelocationBlock> ParseRelocations()
+    {
+        var dir = GetDirectory(DataDirectoryIndex.BaseRelocation);
+        if (!dir.IsPresent)
+        {
+            return Array.Empty<RelocationBlock>();
+        }
+
+        var blocks = new List<RelocationBlock>();
+        int start = RequireOffset(dir.Rva, "Base relocation directory");
+        var r = new SpanReader(_data.Span, start);
+        long end = (long)start + dir.Size;
+
+        while (r.Position < end && blocks.Count < MaxRelocationBlocks)
+        {
+            if (!r.CanRead(8))
+            {
+                _warnings.Add("Base relocation table is truncated.");
+                break;
+            }
+
+            uint pageRva = r.ReadU32();
+            uint blockSize = r.ReadU32();
+            if (blockSize < 8)
+            {
+                if (pageRva != 0 || blockSize != 0)
+                {
+                    _warnings.Add($"Base relocation block at RVA 0x{pageRva:X} has an invalid size ({blockSize}).");
+                }
+
+                break; // a zero-sized block would loop forever
+            }
+
+            int count = (int)Math.Min((blockSize - 8) / 2, MaxRelocationsPerBlock);
+            var entries = new List<RelocationEntry>(count);
+            for (int i = 0; i < count && r.CanRead(2); i++)
+            {
+                ushort raw = r.ReadU16();
+                var type = (RelocationType)(raw >> 12);
+                if (type == RelocationType.Absolute)
+                {
+                    continue; // padding entries
+                }
+
+                entries.Add(new RelocationEntry(type, pageRva + (uint)(raw & 0x0FFF)));
+            }
+
+            blocks.Add(new RelocationBlock { PageRva = pageRva, BlockSize = blockSize, Entries = entries });
+        }
+
+        return blocks;
+    }
+
+    private TlsDirectory? ParseTls()
+    {
+        var dir = GetDirectory(DataDirectoryIndex.Tls);
+        if (!dir.IsPresent)
+        {
+            return null;
+        }
+
+        var r = new SpanReader(_data.Span, RequireOffset(dir.Rva, "TLS directory"));
+        int pointerSize = Is64Bit ? 8 : 4;
+        if (!r.CanRead((pointerSize * 4) + 8))
+        {
+            _warnings.Add("TLS directory is truncated.");
+            return null;
+        }
+
+        ulong startData = r.ReadPointer(Is64Bit);
+        ulong endData = r.ReadPointer(Is64Bit);
+        ulong indexVa = r.ReadPointer(Is64Bit);
+        ulong callbacksVa = r.ReadPointer(Is64Bit);
+        uint zeroFill = r.ReadU32();
+        uint characteristics = r.ReadU32();
+
+        var callbacks = new List<ulong>();
+        if (callbacksVa != 0 && VaToRva(callbacksVa) is { } listRva)
+        {
+            for (int i = 0; i < MaxTlsCallbacks; i++)
+            {
+                if (ReadPointerAtRva(listRva + (uint)(i * pointerSize)) is not { } callback || callback == 0)
+                {
+                    break;
+                }
+
+                callbacks.Add(callback);
+            }
+        }
+
+        return new TlsDirectory
+        {
+            StartAddressOfRawData = startData,
+            EndAddressOfRawData = endData,
+            AddressOfIndex = indexVa,
+            AddressOfCallBacks = callbacksVa,
+            SizeOfZeroFill = zeroFill,
+            Characteristics = characteristics,
+            CallbackVas = callbacks,
+        };
+    }
+
+    private LoadConfig? ParseLoadConfig()
+    {
+        var dir = GetDirectory(DataDirectoryIndex.LoadConfig);
+        if (!dir.IsPresent)
+        {
+            return null;
+        }
+
+        int baseOffset = RequireOffset(dir.Rva, "Load config directory");
+        var r = new SpanReader(_data.Span, baseOffset);
+        if (!r.CanRead(12))
+        {
+            _warnings.Add("Load config directory is truncated.");
+            return null;
+        }
+
+        uint size = r.ReadU32();
+        uint timeStamp = r.ReadU32();
+        ushort major = r.ReadU16();
+        ushort minor = r.ReadU16();
+
+        // Everything past the version fields is optional - older toolchains emit a short structure -
+        // and the field offsets differ between PE32 and PE32+, so read them by explicit offset.
+        ulong Pointer(int offset32, int offset64)
+        {
+            int offset = Is64Bit ? offset64 : offset32;
+            int width = Is64Bit ? 8 : 4;
+            if (offset + width > size || baseOffset + offset + width > _data.Length)
+            {
+                return 0;
+            }
+
+            var fr = new SpanReader(_data.Span, baseOffset + offset);
+            return fr.ReadPointer(Is64Bit);
+        }
+
+        uint Dword(int offset32, int offset64)
+        {
+            int offset = Is64Bit ? offset64 : offset32;
+            if (offset + 4 > size || baseOffset + offset + 4 > _data.Length)
+            {
+                return 0;
+            }
+
+            var fr = new SpanReader(_data.Span, baseOffset + offset);
+            return fr.ReadU32();
+        }
+
+        ulong securityCookie = Pointer(0x3C, 0x58);
+        ulong seHandlerTable = Pointer(0x40, 0x60);
+        ulong seHandlerCount = Pointer(0x44, 0x68);
+        ulong cfCheck = Pointer(0x48, 0x70);
+        ulong cfDispatch = Pointer(0x4C, 0x78);
+        ulong cfTable = Pointer(0x50, 0x80);
+        ulong cfCount = Pointer(0x54, 0x88);
+        uint rawGuardFlags = Dword(0x58, 0x90);
+
+        // The top nibble holds extra metadata bytes appended to each table entry, not a flag.
+        int stride = 4 + (int)((rawGuardFlags >> 28) & 0xF);
+        var guardFlags = (GuardFlags)(rawGuardFlags & 0x0FFF_FFFF);
+        var cfRvas = ReadRvaTable(cfTable, cfCount, stride, "Control Flow Guard function table");
+        var sehRvas = Is64Bit ? Array.Empty<uint>() : ReadRvaTable(seHandlerTable, seHandlerCount, 4, "SafeSEH handler table");
+
+        return new LoadConfig
+        {
+            Size = size,
+            TimeDateStamp = timeStamp,
+            MajorVersion = major,
+            MinorVersion = minor,
+            SecurityCookieVa = securityCookie,
+            SeHandlerTableVa = seHandlerTable,
+            SeHandlerCount = seHandlerCount,
+            GuardCfCheckFunctionPointerVa = cfCheck,
+            GuardCfDispatchFunctionPointerVa = cfDispatch,
+            GuardCfFunctionTableVa = cfTable,
+            GuardCfFunctionCount = cfCount,
+            GuardFlags = guardFlags,
+            GuardCfFunctionTableStride = stride,
+            GuardCfFunctionRvas = cfRvas,
+            SeHandlerRvas = sehRvas,
+        };
+    }
+
+    /// <summary>Reads a table of 4-byte RVAs (optionally with trailing per-entry metadata) located at a VA.</summary>
+    private IReadOnlyList<uint> ReadRvaTable(ulong tableVa, ulong count, int stride, string what)
+    {
+        if (tableVa == 0 || count == 0 || stride < 4)
+        {
+            return Array.Empty<uint>();
+        }
+
+        if (VaToRva(tableVa) is not { } tableRva)
+        {
+            _warnings.Add($"{what} VA 0x{tableVa:X} is outside the image.");
+            return Array.Empty<uint>();
+        }
+
+        int wanted = (int)Math.Min(count, MaxGuardFunctions);
+        var mem = ReadAtRva(tableRva, wanted * stride);
+        if (mem.IsEmpty)
+        {
+            _warnings.Add($"{what} at RVA 0x{tableRva:X} is not backed by file data.");
+            return Array.Empty<uint>();
+        }
+
+        int usable = mem.Length / stride;
+        if (usable < wanted)
+        {
+            _warnings.Add($"{what} is truncated ({usable} of {wanted} entries readable).");
+        }
+
+        var rvas = new List<uint>(usable);
+        var r = new SpanReader(mem.Span);
+        for (int i = 0; i < usable; i++)
+        {
+            r.Seek(i * stride);
+            rvas.Add(r.ReadU32());
+        }
+
+        return rvas;
+    }
+
+    private ResourceNode? ParseResources()
+    {
+        var dir = GetDirectory(DataDirectoryIndex.Resource);
+        if (!dir.IsPresent)
+        {
+            return null;
+        }
+
+        uint rootRva = dir.Rva;
+        int budget = MaxResourceNodes;
+        var visited = new HashSet<uint>();
+
+        ResourceNode? ReadDataEntry(uint entryOffset, int level, string? name, uint id)
+        {
+            var mem = ReadAtRva(rootRva + entryOffset, 16);
+            if (mem.Length < 16)
+            {
+                _warnings.Add("Resource data entry is truncated.");
+                return null;
+            }
+
+            var r = new SpanReader(mem.Span);
+            return new ResourceNode
+            {
+                Name = name,
+                Id = id,
+                Level = level,
+                DataRva = r.ReadU32(),
+                DataSize = r.ReadU32(),
+                CodePage = r.ReadU32(),
+            };
+        }
+
+        ResourceNode? ReadDirectory(uint dirOffset, int level, string? name, uint id)
+        {
+            // Malformed images can point a subdirectory back at an ancestor; visited breaks the cycle.
+            if (level > 3 || budget <= 0 || !visited.Add(dirOffset))
+            {
+                return null;
+            }
+
+            var header = ReadAtRva(rootRva + dirOffset, 16);
+            if (header.Length < 16)
+            {
+                _warnings.Add($"Resource directory at 0x{dirOffset:X} is truncated.");
+                return null;
+            }
+
+            var hr = new SpanReader(header.Span);
+            hr.Skip(12); // Characteristics, TimeDateStamp, MajorVersion, MinorVersion
+            int named = hr.ReadU16();
+            int numbered = hr.ReadU16();
+            int total = named + numbered;
+
+            var children = new List<ResourceNode>(total);
+            for (int i = 0; i < total && budget > 0; i++)
+            {
+                var entry = ReadAtRva(rootRva + dirOffset + 16 + (uint)(i * 8), 8);
+                if (entry.Length < 8)
+                {
+                    _warnings.Add("Resource directory entries are truncated.");
+                    break;
+                }
+
+                var er = new SpanReader(entry.Span);
+                uint nameField = er.ReadU32();
+                uint offsetField = er.ReadU32();
+                budget--;
+
+                string? childName = null;
+                uint childId = nameField;
+                if ((nameField & 0x8000_0000) != 0)
+                {
+                    childName = ReadResourceString(rootRva + (nameField & 0x7FFF_FFFF));
+                    childId = 0;
+                }
+
+                uint childOffset = offsetField & 0x7FFF_FFFF;
+                var child = (offsetField & 0x8000_0000) != 0
+                    ? ReadDirectory(childOffset, level + 1, childName, childId)
+                    : ReadDataEntry(childOffset, level + 1, childName, childId);
+                if (child is not null)
+                {
+                    children.Add(child);
+                }
+            }
+
+            return new ResourceNode { Name = name, Id = id, Level = level, Children = children };
+        }
+
+        return ReadDirectory(0, 0, null, 0);
+    }
+
+    /// <summary>Reads a length-prefixed UTF-16 resource name.</summary>
+    private string ReadResourceString(uint rva)
+    {
+        var lengthMem = ReadAtRva(rva, 2);
+        if (lengthMem.Length < 2)
+        {
+            return string.Empty;
+        }
+
+        int chars = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(lengthMem.Span);
+        var mem = ReadAtRva(rva + 2, Math.Min(chars, 512) * 2);
+        return mem.IsEmpty ? string.Empty : System.Text.Encoding.Unicode.GetString(mem.Span);
+    }
+
+    /// <summary>
+    /// Decodes the undocumented "Rich" header the Microsoft linker hides in the DOS stub:
+    /// XOR-encrypted (tool id, build, use count) triples between the DanS marker and the Rich signature.
+    /// </summary>
+    private RichHeader? ParseRichHeader()
+    {
+        var span = _data.Span;
+        int limit = Math.Min((int)DosHeader.NewHeaderOffset, span.Length);
+        if (limit < 0x80)
+        {
+            return null;
+        }
+
+        const uint RichSignature = 0x6863_6952; // "Rich"
+        const uint DanSMarker = 0x536E_6144;    // "DanS"
+
+        int richOffset = -1;
+        for (int i = limit - 4; i >= 0x40; i -= 4)
+        {
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(i, 4)) == RichSignature)
+            {
+                richOffset = i;
+                break;
+            }
+        }
+
+        if (richOffset < 0 || richOffset + 8 > span.Length)
+        {
+            return null;
+        }
+
+        uint key = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(richOffset + 4, 4));
+
+        int startOffset = -1;
+        for (int i = richOffset - 4; i >= 0; i -= 4)
+        {
+            if ((System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(i, 4)) ^ key) == DanSMarker)
+            {
+                startOffset = i;
+                break;
+            }
+        }
+
+        if (startOffset < 0)
+        {
+            _warnings.Add("Found a Rich signature without its DanS marker.");
+            return null;
+        }
+
+        var entries = new List<RichEntry>();
+        for (int i = startOffset + 16; i + 8 <= richOffset; i += 8)
+        {
+            uint idField = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(i, 4)) ^ key;
+            uint count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(span.Slice(i + 4, 4)) ^ key;
+            if (idField == 0 && count == 0)
+            {
+                continue; // padding
+            }
+
+            entries.Add(new RichEntry((ushort)(idField >> 16), (ushort)(idField & 0xFFFF), count));
+        }
+
+        return new RichHeader { Offset = (uint)startOffset, Checksum = key, Entries = entries };
     }
 
     private (uint, uint) ComputeOverlay()

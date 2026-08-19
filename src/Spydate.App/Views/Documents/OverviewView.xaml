@@ -17,13 +17,14 @@
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
                            Foreground="{DynamicResource Text.Secondary}" />
-                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                    <TextBlock Text="{Binding Value}" Style="{StaticResource MonoText}" VerticalAlignment="Center"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{Binding Note}" Margin="8,0,0,0" VerticalAlignment="Center"
-                               Foreground="{DynamicResource Text.Tertiary}"
-                               Visibility="{Binding Note, Converter={StaticResource NullToCollapsed}}" />
-                </StackPanel>
+                <!-- One wrapping block, not a horizontal stack: long values (guard flag lists)
+                     must wrap, and the note has to stay next to the value it annotates. -->
+                <TextBlock Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"
+                           FontFamily="{DynamicResource Mono.FontFamily}">
+                    <Run Text="{Binding Value, Mode=OneWay}" />
+                    <Run Text="{Binding Note, Mode=OneWay}" FontFamily="{DynamicResource App.FontFamily}"
+                         Foreground="{DynamicResource Text.Tertiary}" />
+                </TextBlock>
             </Grid>
         </DataTemplate>
     </UserControl.Resources>
@@ -63,6 +64,20 @@
                 <TextBlock Text=".NET / CLR" Style="{StaticResource SectionHeader}" />
                 <Border Style="{StaticResource Card}">
                     <ItemsControl ItemsSource="{Binding Managed}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
+                </Border>
+            </StackPanel>
+
+            <StackPanel Visibility="{Binding HasSecurity, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="Security and TLS" Style="{StaticResource SectionHeader}" />
+                <Border Style="{StaticResource Card}">
+                    <ItemsControl ItemsSource="{Binding Security}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
+                </Border>
+            </StackPanel>
+
+            <StackPanel Visibility="{Binding HasBuild, Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="Build toolchain (Rich header)" Style="{StaticResource SectionHeader}" />
+                <Border Style="{StaticResource Card}">
+                    <ItemsControl ItemsSource="{Binding Build}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
                 </Border>
             </StackPanel>
 

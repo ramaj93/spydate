@@ -37,6 +37,9 @@
             <DataTemplate DataType="{x:Type docs:ExportsDocumentViewModel}">
                 <views:ExportsView />
             </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:ResourcesDocumentViewModel}">
+                <views:ResourcesView />
+            </DataTemplate>
             <DataTemplate DataType="{x:Type docs:HexDocumentViewModel}">
                 <views:HexView />
             </DataTemplate>

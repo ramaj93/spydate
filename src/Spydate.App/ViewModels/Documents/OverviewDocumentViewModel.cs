@@ -36,8 +36,45 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             new("Checksum", $"0x{pe.OptionalHeader.CheckSum:X8}"),
             new("Imports", $"{pe.Imports.Count} modules, {pe.Imports.Sum(m => m.Functions.Count)} functions" + (pe.DelayImports.Count > 0 ? $" (+{pe.DelayImports.Count} delay-load modules)" : string.Empty)),
             new("Exports", pe.Exports is { } ex ? $"{ex.Entries.Count} entries ({ex.Name})" : "(none)"),
+            new("Resources", pe.Resources is { Children.Count: > 0 } res ? $"{res.Children.Count} types" : "(none)"),
+            new("Relocations", pe.Relocations.Count > 0 ? $"{pe.RelocationCount:N0} fix-ups in {pe.Relocations.Count:N0} blocks" : "(none)"),
             new("Overlay", pe.Overlay.Length > 0 ? $"{pe.Overlay.Length:N0} bytes at 0x{pe.Overlay.Offset:X}" : "(none)"),
         };
+
+        Security = new List<PropertyRow>();
+        if (pe.LoadConfig is { } config)
+        {
+            Security.Add(new PropertyRow("Load config size", $"0x{config.Size:X}"));
+            Security.Add(new PropertyRow("Security cookie", config.SecurityCookieVa == 0 ? "(none)" : $"0x{config.SecurityCookieVa:X}"));
+            Security.Add(new PropertyRow("Guard flags", config.GuardFlags == GuardFlags.None ? "(none)" : config.GuardFlags.ToString()));
+            Security.Add(new PropertyRow(
+                "CFG targets",
+                config.GuardCfFunctionRvas.Count > 0 ? $"{config.GuardCfFunctionRvas.Count:N0} valid call targets" : "(none)",
+                config.GuardCfFunctionTableVa == 0 ? null : $"table at 0x{config.GuardCfFunctionTableVa:X}, {config.GuardCfFunctionTableStride} bytes/entry"));
+            if (config.SeHandlerRvas.Count > 0)
+            {
+                Security.Add(new PropertyRow("SafeSEH handlers", $"{config.SeHandlerRvas.Count:N0}", $"table at 0x{config.SeHandlerTableVa:X}"));
+            }
+        }
+
+        if (pe.Tls is { } tls)
+        {
+            Security.Add(new PropertyRow("TLS data", $"0x{tls.StartAddressOfRawData:X} … 0x{tls.EndAddressOfRawData:X}", $"{tls.RawDataSize:N0} bytes + {tls.SizeOfZeroFill:N0} zero-fill"));
+            Security.Add(new PropertyRow(
+                "TLS callbacks",
+                tls.CallbackVas.Count == 0 ? "(none)" : string.Join(", ", tls.CallbackVas.Select(v => $"0x{v:X}")),
+                tls.CallbackVas.Count > 0 ? "run before the entry point" : null));
+        }
+
+        Build = pe.RichHeader is { } rich
+            ? rich.Entries
+                .OrderByDescending(e => e.UseCount)
+                .Select(e => new PropertyRow(
+                    $"tool 0x{e.ProductId:X4}",
+                    $"{e.UseCount:N0} object{(e.UseCount == 1 ? string.Empty : "s")}",
+                    e.BuildNumber == 0 ? "no build stamp" : $"build {e.BuildNumber}"))
+                .ToList()
+            : new List<PropertyRow>();
 
         if (pe.ClrHeader is { } clr)
         {
@@ -82,6 +119,12 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
     public List<PropertyRow> General { get; }
     public List<PropertyRow>? Managed { get; }
     public bool HasManaged => Managed is not null;
+    /// <summary>Mitigations and loader-visible security data (load config, CFG, TLS).</summary>
+    public List<PropertyRow> Security { get; }
+    public bool HasSecurity => Security.Count > 0;
+    /// <summary>Toolchain stamp decoded from the Rich header.</summary>
+    public List<PropertyRow> Build { get; }
+    public bool HasBuild => Build.Count > 0;
     public List<PropertyRow> Debug { get; }
     public bool HasDebug => Debug.Count > 0;
     public List<string> Warnings { get; }

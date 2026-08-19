@@ -362,6 +362,7 @@ public sealed partial class MainViewModel : ObservableObject
             HeadersTarget => Find("headers") ?? new HeadersDocumentViewModel(pe),
             SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
             ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe),
+            ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, offset => OpenTarget(new HexTarget(offset))),
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),

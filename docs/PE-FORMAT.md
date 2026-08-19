@@ -110,3 +110,58 @@ cb · MajorRuntimeVersion · MinorRuntimeVersion · MetaData (dir) · Flags
 0x10000 NATIVE_ENTRYPOINT, 0x20000 32BITPREFERRED) · EntryPointToken/RVA ·
 Resources · StrongNameSignature · CodeManagerTable · VTableFixups ·
 ExportAddressTableJumps · ManagedNativeHeader.
+
+## Base relocations (dir 5)
+
+A chain of `IMAGE_BASE_RELOCATION` blocks: PageRVA u32 · BlockSize u32,
+then `(BlockSize - 8) / 2` u16 entries of `type:4 | offset:12`.
+Fix-up RVA = PageRVA + offset. Type 0 (ABSOLUTE) is padding and is dropped;
+10 (DIR64) is the x64 pointer patch, 3 (HIGHLOW) the x86 one.
+A block whose size is < 8 is invalid — trusting it loops forever.
+
+## TLS (dir 9) — `IMAGE_TLS_DIRECTORY`
+
+StartAddressOfRawData · EndAddressOfRawData · AddressOfIndex ·
+AddressOfCallBacks (all pointer-sized **VAs**, not RVAs) · SizeOfZeroFill u32 ·
+Characteristics u32. `AddressOfCallBacks` points at a NULL-terminated array of
+function pointers that run **before** the entry point — always seed analysis
+with them.
+
+## Load config (dir 10) — `IMAGE_LOAD_CONFIG_DIRECTORY`
+
+Size-prefixed and grown over time, so every field past the version must be
+range-checked against `Size`. Offsets differ between PE32 and PE32+:
+
+| Field | PE32 | PE32+ |
+|---|---|---|
+| SecurityCookie | 0x3C | 0x58 |
+| SEHandlerTable / Count | 0x40 / 0x44 | – (x86 only) |
+| GuardCFCheckFunctionPointer | 0x48 | 0x70 |
+| GuardCFDispatchFunctionPointer | 0x4C | 0x78 |
+| GuardCFFunctionTable / Count | 0x50 / 0x54 | 0x80 / 0x88 |
+| GuardFlags | 0x58 | 0x90 |
+
+`GuardCFFunctionTable` is an array of 4-byte RVAs — every address the image
+declares as a legal indirect-call target, i.e. a high-quality function seed.
+The **top nibble of GuardFlags is not a flag**: it is the count of extra
+metadata bytes per table entry, so the stride is `4 + (GuardFlags >> 28)`.
+
+## Resources (dir 2)
+
+Three nested `IMAGE_RESOURCE_DIRECTORY` levels — type → name → language —
+each 16 bytes (Characteristics · TimeDateStamp · Major/Minor · NumberOfNamed ·
+NumberOfId) followed by 8-byte entries: Name/Id u32 · OffsetToData u32.
+High bit of Name = offset to a `u16 length + UTF-16` string; high bit of
+OffsetToData = subdirectory, else an `IMAGE_RESOURCE_DATA_ENTRY`
+(DataRVA · Size · CodePage · Reserved). All offsets are relative to the
+directory start, and malformed files can point a child back at an ancestor —
+track visited offsets.
+
+## Rich header (DOS stub, undocumented)
+
+Between the DOS header and `e_lfanew` the Microsoft linker writes XOR-encrypted
+`(product id:16 | build:16, use count)` pairs: `DanS` marker, three padding
+DWORDs, the pairs, then the literal `Rich` followed by the XOR key. Product ids
+are undocumented and build numbers are **not** ordered across Visual Studio
+releases (30729 = VS2008 SP1, 23026 = VS2015), so do not infer a version from
+them — the optional header's linker version is the reliable signal.
