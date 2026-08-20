@@ -38,6 +38,23 @@ public sealed class SymbolTable
         return added;
     }
 
+    /// <summary>Removes the symbol at <paramref name="va"/>, if there is one.</summary>
+    public bool Remove(ulong va)
+    {
+        if (!_byVa.TryRemove(va, out var removed))
+        {
+            return false;
+        }
+
+        // The name index may already point at a different symbol with the same name.
+        if (_byName.TryGetValue(removed.Name, out var byName) && byName.Va == va)
+        {
+            _byName.TryRemove(removed.Name, out _);
+        }
+
+        return true;
+    }
+
     public bool TryGet(ulong va, out Symbol symbol) => _byVa.TryGetValue(va, out symbol!);
 
     public Symbol? Get(ulong va) => _byVa.TryGetValue(va, out var s) ? s : null;

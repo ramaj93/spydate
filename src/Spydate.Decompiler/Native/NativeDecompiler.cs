@@ -1,3 +1,4 @@
+using Spydate.Core.Project;
 using Spydate.Core.Symbols;
 using Spydate.Decompiler.Native.CodeGen;
 using Spydate.Decompiler.Native.IR;
@@ -17,17 +18,30 @@ public sealed class NativeDecompiler
     private readonly SymbolTable? _symbols;
     private readonly IReadOnlyList<IIrPass> _passes;
     private readonly Func<ulong, int>? _registerArguments;
+    private readonly AnnotationStore? _annotations;
 
-    public NativeDecompiler(int bitness, SymbolTable? symbols = null, IReadOnlyList<IIrPass>? passes = null, GlobalNames? names = null, Func<ulong, int>? registerArguments = null)
+    public NativeDecompiler(
+        int bitness,
+        SymbolTable? symbols = null,
+        IReadOnlyList<IIrPass>? passes = null,
+        GlobalNames? names = null,
+        Func<ulong, int>? registerArguments = null,
+        AnnotationStore? annotations = null)
     {
         _bitness = bitness;
         _symbols = symbols;
         _registerArguments = registerArguments;
+        _annotations = annotations;
         _passes = passes ?? DefaultPasses(names, registerArguments);
     }
 
     public NativeDecompiler(BinaryAnalysis analysis)
-        : this(analysis.Image.Bitness, analysis.Symbols, names: GlobalNames.For(analysis), registerArguments: va => RegisterArgumentsFor(analysis, va))
+        : this(
+            analysis.Image.Bitness,
+            analysis.Symbols,
+            names: GlobalNames.For(analysis),
+            registerArguments: va => RegisterArgumentsFor(analysis, va),
+            annotations: analysis.Annotations)
     {
     }
 
@@ -99,7 +113,7 @@ public sealed class NativeDecompiler
             }
         }
 
-        var text = new PseudoCEmitter().Emit(ir);
+        var text = new PseudoCEmitter { Annotations = _annotations }.Emit(ir);
         var warnings = ir.Warnings.Concat(function.Notes).ToList();
         return new DecompiledFunction(function, ir, text, warnings);
     }

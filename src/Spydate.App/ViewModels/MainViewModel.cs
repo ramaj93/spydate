@@ -489,9 +489,10 @@ public sealed partial class MainViewModel : ObservableObject
 
     private void OpenFunctionPseudoC(Function f)
     {
-        if (Binary?.NativeDecompiler is { } d)
+        if (Binary?.NativeDecompiler is { } d && Binary.Analysis is { } a)
         {
-            Show(Find($"pseudoc:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly));
+            Show(Find($"pseudoc:{f.EntryVa:X}")
+                 ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f));
         }
     }
 

@@ -86,7 +86,11 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             function.Name,
             SymbolRegular.Code24,
             HighlightingService.Asm,
-            _ => new CodeContent(FormatFunction(analysis, function), function.Notes),
+            _ =>
+            {
+                var current = analysis.TryGetFunction(function.EntryVa, out var latest) ? latest : function;
+                return new CodeContent(FormatFunction(analysis, current), current.Notes);
+            },
             actions.ToArray())
         {
             Address = function.EntryVa,
@@ -123,8 +127,9 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
         };
     }
 
-    public static CodeDocumentViewModel ForPseudoC(NativeDecompiler decompiler, Function function, Action<Function>? openDisassembly)
+    public static CodeDocumentViewModel ForPseudoC(NativeDecompiler decompiler, Function function, Action<Function>? openDisassembly, Func<Function>? current = null)
     {
+        current ??= () => function;
         var actions = new List<CodeAction>();
         if (openDisassembly is not null)
         {
@@ -138,7 +143,7 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             HighlightingService.PseudoC,
             _ =>
             {
-                var result = decompiler.Decompile(function);
+                var result = decompiler.Decompile(current());
                 return new CodeContent(result.Text, result.Warnings);
             },
             actions.ToArray())
@@ -225,7 +230,7 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
             if (labelTargets.Contains(block.StartVa) || block.Predecessors.Count > 1)
             {
                 sb.AppendLine();
-                sb.Append("loc_").Append(block.StartVa.ToString("X", CultureInfo.InvariantCulture)).Append(':').AppendLine();
+                sb.Append(analysis.NameFor(block.StartVa)).Append(':').AppendLine();
             }
 
             foreach (var ins in block.Instructions)
@@ -273,6 +278,11 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
         if (comment is not null)
         {
             sb.Append("    ; ").Append(comment);
+        }
+
+        if (analysis.CommentFor(ins.Va) is { } note)
+        {
+            sb.Append(comment is null ? "    ; " : "   ; ").Append(note);
         }
 
         sb.AppendLine();

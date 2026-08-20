@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using Spydate.Core.PE;
 using Spydate.Core.Pdb;
+using Spydate.Core.Project;
 using Spydate.Core.Strings;
 using Spydate.Core.Symbols;
 
@@ -58,6 +59,12 @@ public sealed class BinaryAnalysis
     /// <summary>Function extents declared by the x64 unwind table, keyed by start VA.</summary>
     private readonly Dictionary<ulong, ulong> _bounds = new();
 
+    /// <summary>
+    /// What the symbol table said at an address before the user renamed it, so clearing a name puts the
+    /// analysis back where it was rather than leaving a hole.
+    /// </summary>
+    private readonly ConcurrentDictionary<ulong, Symbol?> _renamedOver = new();
+
     public BinaryAnalysis(PeImage image, AsmSyntax syntax = AsmSyntax.Intel, DiscoveryOptions? options = null)
     {
         Image = image;
@@ -86,6 +93,8 @@ public sealed class BinaryAnalysis
         }
 
         CrtHelpers.ApplyLoadConfigSymbols(image, Symbols);
+
+        Annotations.Changed += OnAnnotationChanged;
 
         foreach (var rf in image.ExceptionTable)
         {
@@ -119,6 +128,12 @@ public sealed class BinaryAnalysis
         return result;
     }
 
+    /// <summary>
+    /// Names and comments the user has added. Kept apart from <see cref="Symbols"/>, which holds what
+    /// analysis found: setting a name here applies it on top, and clearing it restores what was there.
+    /// </summary>
+    public AnnotationStore Annotations { get; } = new();
+
     /// <summary>Cross-references collected from every function discovered so far.</summary>
     public XrefTable Xrefs { get; } = new();
 
@@ -130,6 +145,46 @@ public sealed class BinaryAnalysis
 
     /// <summary>The string literal covering <paramref name="va"/>, or null.</summary>
     public FoundString? StringAt(ulong va) => Strings.Find(va);
+
+    private void OnAnnotationChanged(object? sender, AnnotationChange change)
+    {
+        if (change.NameChanged)
+        {
+            ApplyUserName(change.Va, change.After?.Name);
+        }
+    }
+
+    /// <summary>Puts a user name into the symbol table, or takes it back out again.</summary>
+    private void ApplyUserName(ulong va, string? name)
+    {
+        if (name is null)
+        {
+            if (_renamedOver.TryRemove(va, out var original))
+            {
+                if (original is null)
+                {
+                    Symbols.Remove(va);
+                }
+                else
+                {
+                    Symbols.Add(original, overwrite: true);
+                }
+            }
+        }
+        else
+        {
+            var current = Symbols.Get(va);
+            _renamedOver.TryAdd(va, current);
+            var kind = current?.Kind ?? (_functions.ContainsKey(va) ? SymbolKind.Function : SymbolKind.Data);
+            Symbols.Add(new Symbol(va, name, kind, current?.Size ?? 0), overwrite: true);
+        }
+
+        // A discovered function carries the name it was given, so refresh it for listings and tab titles.
+        if (_functions.TryGetValue(va, out var function))
+        {
+            _functions[va] = function.WithName(NameFor(va));
+        }
+    }
 
     /// <summary>Whether the image's machine type is supported by the x86 disassembler.</summary>
     public bool CanDisassemble => Image.IsX86Family;
@@ -560,5 +615,8 @@ public sealed class BinaryAnalysis
     }
 
     /// <summary>Best-effort name for a VA: symbol, function, or <c>loc_XXXX</c>.</summary>
-    public string NameFor(ulong va) => Symbols.NameOrDefault(va);
+    public string NameFor(ulong va) => Annotations.NameFor(va) ?? Symbols.NameOrDefault(va);
+
+    /// <summary>The user's comment at an address, if any.</summary>
+    public string? CommentFor(ulong va) => Annotations.CommentFor(va);
 }

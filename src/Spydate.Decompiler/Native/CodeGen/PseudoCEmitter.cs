@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Spydate.Core.Project;
 using Spydate.Decompiler.Native.IR;
 using Spydate.Decompiler.Native.Structuring;
 
@@ -18,6 +19,20 @@ public sealed class PseudoCEmitter
     private static readonly string[] RegisterParameterNames = { "ecx", "edx" };
 
     public bool IncludeAddressComments { get; init; } = true;
+
+    /// <summary>User names and comments, applied on top of the generated ones.</summary>
+    public AnnotationStore? Annotations { get; init; }
+
+    /// <summary>
+    /// Address whose comment is already shown in the header, so it is not repeated inside the body. A
+    /// comment on the entry address is a comment about the function, and the statement it was attached to
+    /// may not have survived the passes.
+    /// </summary>
+    private ulong _headerCommentVa;
+
+    /// <summary>What to call the block at an address: the user's name for it, or <c>loc_XXXX</c>.</summary>
+    private string LabelFor(ulong va)
+        => Annotations?.NameFor(va) ?? "loc_" + va.ToString("X", CultureInfo.InvariantCulture);
 
     public string Emit(IrFunction fn)
     {
@@ -40,6 +55,13 @@ public sealed class PseudoCEmitter
         if (fn.Warnings.Count > 0)
         {
             sb.Append("// ").Append(fn.Warnings.Count).Append(" lifter warning(s); see analysis notes.").AppendLine();
+        }
+
+        _headerCommentVa = 0;
+        if (Annotations?.CommentFor(fn.EntryVa) is { } headerNote)
+        {
+            sb.Append("// ").Append(headerNote).AppendLine();
+            _headerCommentVa = fn.EntryVa;
         }
 
         // Only slots that are still referenced after the passes are declared (consumed pushes and elided
@@ -119,7 +141,7 @@ public sealed class PseudoCEmitter
             case CLabel label when labels.Contains(label.Va):
                 // Labels sit one level out, like a case label, so the code they head stays aligned.
                 sb.Append(' ', Math.Max(0, (depth - 1) * Indent.Length))
-                  .Append("loc_").Append(label.Va.ToString("X", CultureInfo.InvariantCulture)).Append(':').AppendLine();
+                  .Append(LabelFor(label.Va)).Append(':').AppendLine();
                 break;
 
             case CLabel:
@@ -131,8 +153,8 @@ public sealed class PseudoCEmitter
 
             case CGoto g:
                 WriteLine(sb, depth, g.External
-                    ? $"goto loc_{g.Va:X};   // outside this function"
-                    : $"goto loc_{g.Va:X};", null);
+                    ? $"goto {LabelFor(g.Va)};   // outside this function"
+                    : $"goto {LabelFor(g.Va)};", null);
                 break;
 
             case CBreak:
@@ -277,10 +299,23 @@ public sealed class PseudoCEmitter
         }
 
         sb.Append(text);
-        if (IncludeAddressComments && source is { Va: not 0 } and not IrComment)
+        if (source is { Va: not 0 } and not IrComment)
         {
-            PadTo(sb, 56);
-            sb.Append("// ").Append(source.Va.ToString("X", CultureInfo.InvariantCulture));
+            string? note = source.Va == _headerCommentVa ? null : Annotations?.CommentFor(source.Va);
+            if (IncludeAddressComments || note is not null)
+            {
+                PadTo(sb, 56);
+                sb.Append("// ");
+                if (IncludeAddressComments)
+                {
+                    sb.Append(source.Va.ToString("X", CultureInfo.InvariantCulture));
+                }
+
+                if (note is not null)
+                {
+                    sb.Append(IncludeAddressComments ? "  " : string.Empty).Append(note);
+                }
+            }
         }
 
         sb.AppendLine();
