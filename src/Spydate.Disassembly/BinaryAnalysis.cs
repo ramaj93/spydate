@@ -199,6 +199,10 @@ public sealed class BinaryAnalysis
     /// <summary>Returns the cached function at <paramref name="entryVa"/> or discovers it now.</summary>
     public Function GetOrDiscoverFunction(ulong entryVa, string? name = null)
     {
+        // A name the user chose outranks the one the caller suggests: seeds carry names of their own
+        // ("EntryPoint", an export), and those would otherwise win over the rename every time.
+        name = Annotations.NameFor(entryVa) ?? name;
+
         return _functions.GetOrAdd(entryVa, va =>
         {
             var f = NameHelpers(_discovery.Discover(va, name, BoundsFor(va)), name);

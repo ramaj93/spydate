@@ -122,6 +122,13 @@ public partial class MainWindow : FluentWindow
 
     private void OnExitClick(object sender, RoutedEventArgs e) => Close();
 
+    /// <summary>Annotations are the user's own work, so they are written out rather than dropped on exit.</summary>
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        _viewModel.SaveAnnotationsIfDirty();
+        base.OnClosing(e);
+    }
+
     private void OnAboutClick(object sender, RoutedEventArgs e)
     {
         var version = typeof(MainWindow).Assembly.GetName().Version;

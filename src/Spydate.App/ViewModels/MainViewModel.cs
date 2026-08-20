@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
 using Spydate.Core.PE;
+using Spydate.Core.Text;
 using Spydate.Disassembly;
 using SymbolRegular = Wpf.Ui.Controls.SymbolRegular;
 
@@ -189,6 +190,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     public async Task OpenPathAsync(string path)
     {
+        SaveAnnotationsIfDirty();
         _analysisCts?.Cancel();
         IsBusy = true;
         StatusText = $"Loading {Path.GetFileName(path)}…";
@@ -231,6 +233,19 @@ public sealed partial class MainViewModel : ObservableObject
                     : $"No symbols: {pdb.Reason}");
             }
 
+            if (opened.Project is { } project)
+            {
+                if (project.Loaded)
+                {
+                    Log($"Loaded {project.Applied} annotation(s) from {project.Path}.");
+                }
+                else if (project.Path is not null)
+                {
+                    Warnings.Add(project.Reason ?? "The project file was not loaded.");
+                    Log($"Project not loaded: {project.Reason}");
+                }
+            }
+
             if (Warnings.Count > 0)
             {
                 Log($"{Warnings.Count} warning(s) — see the Warnings tab.");
@@ -258,6 +273,7 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void CloseFile()
     {
+        SaveAnnotationsIfDirty();
         _analysisCts?.Cancel();
         Documents.Clear();
         Explorer.Clear();
@@ -443,6 +459,187 @@ public sealed partial class MainViewModel : ObservableObject
 
     [RelayCommand]
     private void ClearOutput() => Output.Clear();
+
+    // ------------------------------------------------------------------
+    // Naming and comments
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// The address a naming command should act on: the name under the caret if it points at one, then
+    /// the line the caret is on, then whatever the document is about. Reading the caret first is what
+    /// lets a called function be renamed from the code that calls it.
+    /// </summary>
+    private ulong? AnnotationTarget()
+    {
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return null;
+        }
+
+        if (ActiveDocument is CodeDocumentViewModel code)
+        {
+            if (code.CaretWord is { } word)
+            {
+                if (AddressText.FromGeneratedName(word) is { } generated)
+                {
+                    return generated;
+                }
+
+                if (analysis.Symbols.GetByName(word) is { } symbol)
+                {
+                    return symbol.Va;
+                }
+            }
+
+            if (code.CaretAddress is { } line)
+            {
+                return line;
+            }
+        }
+
+        return ActiveDocument?.Address;
+    }
+
+    [RelayCommand]
+    private async Task RenameSymbolAsync()
+    {
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        if (AnnotationTarget() is not { } va)
+        {
+            Log("Nothing to rename here: put the caret on an address or a name first.");
+            return;
+        }
+
+        string generated = analysis.Symbols.NameOrDefault(va);
+        string? entered = _dialogs.AskForText(
+            "Rename",
+            $"Name for 0x{va:X}",
+            $"Leave it empty to go back to {generated}.",
+            analysis.Annotations.NameFor(va) ?? analysis.NameFor(va));
+        if (entered is null)
+        {
+            return;
+        }
+
+        string? applied = analysis.Annotations.SetName(va, entered);
+        Log(applied is null
+            ? $"0x{va:X} is {analysis.NameFor(va)} again."
+            : $"0x{va:X} is now {applied}.");
+        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task EditCommentAsync()
+    {
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        if (AnnotationTarget() is not { } va)
+        {
+            Log("Nothing to comment here: put the caret on an address first.");
+            return;
+        }
+
+        string? entered = _dialogs.AskForText(
+            "Comment",
+            $"Comment for 0x{va:X}",
+            "Leave it empty to remove the comment.",
+            analysis.Annotations.CommentFor(va));
+        if (entered is null)
+        {
+            return;
+        }
+
+        string? applied = analysis.Annotations.SetComment(va, entered);
+        Log(applied is null ? $"Removed the comment at 0x{va:X}." : $"Commented 0x{va:X}.");
+        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Writes annotations out when the file is being put away. Renames are the user's work, so they are
+    /// not thrown away silently - but where they went is logged, since the file may have landed in the
+    /// per-user store rather than beside a binary nobody can write to.
+    /// </summary>
+    public void SaveAnnotationsIfDirty()
+    {
+        try
+        {
+            if (_workspace.SaveIfDirty() is { } path)
+            {
+                Log($"Saved annotations to {path}");
+            }
+        }
+        catch (IOException ex)
+        {
+            Log($"Could not save the project: {ex.Message}");
+        }
+    }
+
+    [RelayCommand]
+    private void SaveProject()
+    {
+        if (Binary is not { } binary || binary.Annotations is null)
+        {
+            return;
+        }
+
+        try
+        {
+            string? path = binary.SaveProject();
+            Log(path is null ? "Nothing to save: no names or comments yet." : $"Saved {binary.Annotations.Count} annotation(s) to {path}");
+            StatusText = path is null ? "Nothing to save" : "Project saved";
+        }
+        catch (IOException ex)
+        {
+            Log($"Could not save the project: {ex.Message}");
+            StatusText = "Project not saved";
+        }
+    }
+
+    /// <summary>
+    /// Re-runs the documents whose text mentions names, and retitles the tabs that are named after a
+    /// function. A rename can show up anywhere - in the function itself, and at every call site - so
+    /// everything that shows code is reloaded rather than guessing which ones changed.
+    /// </summary>
+    private async Task RefreshAnnotatedDocumentsAsync()
+    {
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        foreach (var document in Documents.ToList())
+        {
+            switch (document)
+            {
+                case CodeDocumentViewModel code:
+                    if (code.Address is { } va)
+                    {
+                        if (code.Key.StartsWith("disasm:", StringComparison.Ordinal))
+                        {
+                            code.Title = analysis.NameFor(va);
+                        }
+                        else if (code.Key.StartsWith("pseudoc:", StringComparison.Ordinal))
+                        {
+                            code.Title = $"{analysis.NameFor(va)} (C)";
+                        }
+                    }
+
+                    await code.ReloadAsync().ConfigureAwait(true);
+                    break;
+
+                case FunctionsDocumentViewModel functions:
+                    functions.Refresh();
+                    break;
+            }
+        }
+    }
 
     public void OpenTarget(NodeTarget target)
     {

@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using ICSharpCode.AvalonEdit;
 using Spydate.App.Services;
+using Spydate.Core.Text;
 
 namespace Spydate.App.Views.Controls;
 
@@ -19,6 +20,16 @@ public sealed class CodeEditor : TextEditor
     public static readonly DependencyProperty HighlightingNameProperty = DependencyProperty.Register(
         nameof(HighlightingName), typeof(string), typeof(CodeEditor),
         new FrameworkPropertyMetadata(string.Empty, OnHighlightingNameChanged));
+
+    /// <summary>Address of the line the caret is on, when the text carries one.</summary>
+    public static readonly DependencyProperty CaretAddressProperty = DependencyProperty.Register(
+        nameof(CaretAddress), typeof(ulong?), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
+
+    /// <summary>Identifier under the caret, so a name can be acted on where it is read.</summary>
+    public static readonly DependencyProperty CaretWordProperty = DependencyProperty.Register(
+        nameof(CaretWord), typeof(string), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
 
     public CodeEditor()
     {
@@ -58,6 +69,8 @@ public sealed class CodeEditor : TextEditor
         TextArea.Caret.CaretBrush = Resource<Brush>("Text.Primary") ?? Brushes.White;
         TextArea.LeftMargins.CollectionChanged += (_, _) => StyleLineNumberMargin();
         StyleLineNumberMargin();
+
+        TextArea.Caret.PositionChanged += (_, _) => UpdateCaretContext();
     }
 
     public string BoundText
@@ -70,6 +83,34 @@ public sealed class CodeEditor : TextEditor
     {
         get => (string)GetValue(HighlightingNameProperty);
         set => SetValue(HighlightingNameProperty, value);
+    }
+
+    public ulong? CaretAddress
+    {
+        get => (ulong?)GetValue(CaretAddressProperty);
+        set => SetValue(CaretAddressProperty, value);
+    }
+
+    public string? CaretWord
+    {
+        get => (string?)GetValue(CaretWordProperty);
+        set => SetValue(CaretWordProperty, value);
+    }
+
+    /// <summary>Publishes what the caret is on, so commands can act on the address the user is looking at.</summary>
+    private void UpdateCaretContext()
+    {
+        var line = Document?.GetLineByOffset(Math.Min(CaretOffset, Document.TextLength));
+        if (line is null)
+        {
+            CaretAddress = null;
+            CaretWord = null;
+            return;
+        }
+
+        string text = Document!.GetText(line.Offset, line.Length);
+        CaretAddress = AddressText.FromLine(text);
+        CaretWord = AddressText.WordAt(text, CaretOffset - line.Offset);
     }
 
     /// <summary>Gives the line-number gutter a separator line, the way IDE editors draw it.</summary>
@@ -98,6 +139,7 @@ public sealed class CodeEditor : TextEditor
         {
             editor.Text = text;
             editor.ScrollToHome();
+            editor.UpdateCaretContext();
         }
     }
 

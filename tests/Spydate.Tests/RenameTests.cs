@@ -95,6 +95,21 @@ public class RenameTests
     }
 
     [Fact]
+    public void ANameOutranksTheOneASeedCarries()
+    {
+        // Discovery seeds arrive with names of their own - "EntryPoint", an export, a CRT helper - and
+        // those are passed in when the function is first discovered. A rename has to win over them,
+        // whichever happens first.
+        var (analysis, _) = Open(TwoFunctions());
+        analysis.Annotations.SetName(Callee, "ChosenByHand");
+
+        var discovered = analysis.GetOrDiscoverFunction(Callee, "NameFromASeed");
+
+        Assert.Equal("ChosenByHand", discovered.Name);
+        Assert.Equal("ChosenByHand", analysis.NameFor(Callee));
+    }
+
+    [Fact]
     public void ARenamedFunctionKeepsItsKind()
     {
         var (analysis, _) = Open(TwoFunctions());

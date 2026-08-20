@@ -51,6 +51,14 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
     [ObservableProperty]
     private string _text = string.Empty;
 
+    /// <summary>Address of the line the caret is on, published by the editor.</summary>
+    [ObservableProperty]
+    private ulong? _caretAddress;
+
+    /// <summary>Identifier under the caret, so commands can act on the name being read.</summary>
+    [ObservableProperty]
+    private string? _caretWord;
+
     public ObservableCollection<string> Notes { get; } = new();
 
     [ObservableProperty]

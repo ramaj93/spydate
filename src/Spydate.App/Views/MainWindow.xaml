@@ -27,6 +27,9 @@
         <KeyBinding Key="F4" Modifiers="Control" Command="{Binding CloseActiveDocumentCommand}" />
         <KeyBinding Key="G" Modifiers="Control" Command="{Binding FocusGotoCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
         <KeyBinding Key="F5" Command="{Binding ReanalyzeCommand}" />
+        <KeyBinding Key="F2" Command="{Binding RenameSymbolCommand}" />
+        <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding EditCommentCommand}" />
+        <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
     </Window.InputBindings>
 
     <Grid>
@@ -53,11 +56,15 @@
             <Menu>
                 <MenuItem Header="_File">
                     <MenuItem Header="_Open…" InputGestureText="Ctrl+O" Command="{Binding OpenFileCommand}" />
+                    <MenuItem Header="_Save project" InputGestureText="Ctrl+S" Command="{Binding SaveProjectCommand}" />
                     <MenuItem Header="_Close file" Command="{Binding CloseFileCommand}" />
                     <Separator />
                     <MenuItem Header="E_xit" InputGestureText="Alt+F4" Click="OnExitClick" />
                 </MenuItem>
                 <MenuItem Header="_Edit">
+                    <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding RenameSymbolCommand}" />
+                    <MenuItem Header="Comment…" InputGestureText="Ctrl+;" Command="{Binding EditCommentCommand}" />
+                    <Separator />
                     <MenuItem Header="_Copy" InputGestureText="Ctrl+C" Command="ApplicationCommands.Copy" />
                     <MenuItem Header="Select _all" InputGestureText="Ctrl+A" Command="ApplicationCommands.SelectAll" />
                 </MenuItem>

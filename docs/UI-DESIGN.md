@@ -121,6 +121,10 @@ Type → Member** nodes that open C#/IL documents.
 
 - `Ctrl+O` open · `Ctrl+G` focus the address box · `Ctrl+W` / `Ctrl+F4` close tab
   · `F5` re‑analyze · `Alt+F4` exit.
+- `F2` rename · `Ctrl+;` comment · `Ctrl+S` save the project. Rename and comment
+  act on what the caret is on: the name under it if it is one (so a callee can be
+  renamed from the code that calls it), then the address of the line, then whatever
+  the document is about. Both are also on the editor's context menu.
 - Files can also be dropped on the window or passed on the command line.
 
 ## 7. Known gaps (see ROADMAP)

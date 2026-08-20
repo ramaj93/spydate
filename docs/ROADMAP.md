@@ -93,10 +93,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   and the VEX three-operand forms. The packed forms stay as inline asm rather than
   pretending a vector is a number (notepad x86: 202 → 162 unlifted instructions)
 
-## Phase 3 — UI ⬜
+## Phase 3 — UI 🚧
 - ⬜ CFG graph view (basic blocks as nodes)
 - ⬜ Go‑to address, search (bytes / text / symbol), navigation history
-- ⬜ Rename symbols / comments persisted to a `.spydate` project file
+- ✅ Rename (F2) and comment (Ctrl+;) any address — function, global or label —
+  persisted to a `.spydate` file beside the binary, or in a per-user store when
+  that folder cannot be written to. A name applies on top of what analysis found,
+  so clearing it restores the original; a project made for a different build is
+  refused with a reason, the way a mismatched PDB is
 - ⬜ Split view: disassembly ↔ pseudo‑C synchronised by address
 - ⬜ Settings: syntax (Intel/AT&T/MASM), font size, panel layout persistence
 - ⬜ Light theme (needs light-background XSHD syntax palettes)

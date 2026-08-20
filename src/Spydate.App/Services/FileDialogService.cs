@@ -1,4 +1,6 @@
+using System.Windows;
 using Microsoft.Win32;
+using Spydate.App.Views;
 
 namespace Spydate.App.Services;
 
@@ -6,6 +8,12 @@ public interface IFileDialogService
 {
     /// <summary>Shows an Open dialog for PE files; returns the selected path or null.</summary>
     string? OpenPeFile();
+
+    /// <summary>
+    /// Asks for one line of text. Returns null when the user cancels, which is different from an empty
+    /// string: empty means "clear it".
+    /// </summary>
+    string? AskForText(string title, string label, string? hint = null, string? initial = null);
 }
 
 public sealed class FileDialogService : IFileDialogService
@@ -20,5 +28,15 @@ public sealed class FileDialogService : IFileDialogService
             Multiselect = false,
         };
         return dialog.ShowDialog() == true ? dialog.FileName : null;
+    }
+
+    public string? AskForText(string title, string label, string? hint = null, string? initial = null)
+    {
+        var prompt = new PromptWindow(title, label, hint, initial)
+        {
+            Owner = Application.Current?.MainWindow,
+        };
+
+        return prompt.ShowDialog() == true ? prompt.Value : null;
     }
 }

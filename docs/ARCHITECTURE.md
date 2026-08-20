@@ -191,6 +191,29 @@ See `DECOMPILER-DESIGN.md`. Summary:
   members) and `ManagedDecompiler` (`DecompileType`, `DecompileMethod`,
   `DecompileWholeModule`, `DisassembleIl`) built on `ICSharpCode.Decompiler`.
 
+## 5b. User annotations and the project file
+
+`Spydate.Core.Project` holds what the user has said about an address:
+`AnnotationStore` (VA → name + comment, thread-safe, raises `Changed`) and
+`SpydateProject` (load/save). They are kept apart from `SymbolTable`, which holds
+what *analysis* found — a name typed by hand outranks a generated one and has to
+survive re-analysis, so the store is applied on top rather than merged in.
+
+`BinaryAnalysis.Annotations` is the live store. Setting a name there puts it into
+the symbol table (remembering what it displaced), refreshes the discovered
+`Function` that carries the name, and so reaches every call site, label, listing
+and tab that asks what an address is called; clearing it restores the symbol
+analysis had found, or removes the one the rename invented. A user name also wins
+over the name a discovery *seed* carries — `EntryPoint`, an export — which is
+otherwise passed in when the function is first discovered.
+
+The file is indented JSON with hex **RVAs**, not VAs, so it stays readable,
+diffable and correct if the image is ever examined at a different base. It lives
+beside the binary (`notepad.exe.spydate`) when that folder can be written to and
+in `%LOCALAPPDATA%\Spydate\Projects` when it cannot — which is the normal case for
+anything in System32. Both are probed on open, and a project whose recorded size,
+timestamp and checksum do not match the image is refused with a reason.
+
 ## 6. App: `Spydate.App`
 
 See `UI-DESIGN.md`. `WorkspaceService` loads a file (`PeImage`), builds a

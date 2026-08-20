@@ -44,7 +44,20 @@
         </Border>
 
         <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
-                             HighlightingName="{Binding Highlighting, Mode=OneWay}" />
+                             HighlightingName="{Binding Highlighting, Mode=OneWay}"
+                             CaretAddress="{Binding CaretAddress, Mode=OneWayToSource}"
+                             CaretWord="{Binding CaretWord, Mode=OneWayToSource}">
+            <controls:CodeEditor.ContextMenu>
+                <ContextMenu>
+                    <MenuItem Header="_Rename…" InputGestureText="F2"
+                              Command="{Binding DataContext.RenameSymbolCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
+                    <MenuItem Header="_Comment…" InputGestureText="Ctrl+;"
+                              Command="{Binding DataContext.EditCommentCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
+                    <Separator />
+                    <MenuItem Header="Cop_y" InputGestureText="Ctrl+C" Command="ApplicationCommands.Copy" />
+                </ContextMenu>
+            </controls:CodeEditor.ContextMenu>
+        </controls:CodeEditor>
 
         <Expander Grid.Row="2" IsExpanded="False" MaxHeight="150"
                   Visibility="{Binding HasNotes, Converter={StaticResource BoolToVisibility}}">

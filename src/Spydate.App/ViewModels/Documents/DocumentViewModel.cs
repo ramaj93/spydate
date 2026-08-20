@@ -46,6 +46,13 @@ public abstract partial class DocumentViewModel : ObservableObject
 
     private bool _loaded;
 
+    /// <summary>Runs the loader again, for when what the document shows has changed underneath it.</summary>
+    public async Task ReloadAsync(CancellationToken cancellationToken = default)
+    {
+        _loaded = false;
+        await EnsureLoadedAsync(cancellationToken).ConfigureAwait(true);
+    }
+
     public async Task EnsureLoadedAsync(CancellationToken cancellationToken = default)
     {
         if (_loaded)
