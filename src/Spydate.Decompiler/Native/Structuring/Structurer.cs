@@ -330,7 +330,27 @@ public sealed class Structurer
             }
         }
 
-        return new CLoop(loop.Kind, loop.Condition, CStmts.Sequence(Trim(items)));
+        return new CLoop(loop.Kind, loop.Condition, CStmts.Sequence(Trim(items)), ConditionVa(loop));
+    }
+
+    /// <summary>Where the loop's test lives, so the <c>while</c> line carries an address like any other.</summary>
+    private ulong ConditionVa(LoopInfo loop)
+    {
+        int block = loop.Kind switch
+        {
+            CLoopKind.While => loop.Header,
+            CLoopKind.DoWhile => loop.ConditionBlock,
+            _ => -1,
+        };
+
+        if (block < 0)
+        {
+            return 0;
+        }
+
+        var statements = _cfg.Blocks[block].Statements;
+        int term = TerminatorIndex(statements);
+        return term >= 0 ? statements[term].Va : 0;
     }
 
     /// <summary>Drops a <c>continue</c> that only says "go round again" at the end of a loop body.</summary>
@@ -406,11 +426,11 @@ public sealed class Structurer
         }
         else if (CStmts.IsEmpty(thenArm))
         {
-            items.Add(new CIf(CStmts.Invert(branch.Condition), elseArm, null));
+            items.Add(new CIf(CStmts.Invert(branch.Condition), elseArm, null, branch.Va));
         }
         else
         {
-            items.Add(new CIf(branch.Condition, thenArm, CStmts.IsEmpty(elseArm) ? null : elseArm));
+            items.Add(new CIf(branch.Condition, thenArm, CStmts.IsEmpty(elseArm) ? null : elseArm, branch.Va));
         }
 
         // An arm that prints nothing is still a block, and a goto elsewhere may target it. Its label
@@ -488,7 +508,7 @@ public sealed class Structurer
 
         _depth--;
 
-        items.Add(new CSwitch(dispatch.Value, cases));
+        items.Add(new CSwitch(dispatch.Value, cases, dispatch.Va));
         return ResolveNext(items, follow, ctx);
     }
 

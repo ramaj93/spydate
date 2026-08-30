@@ -154,15 +154,15 @@ public sealed class PseudoCEmitter
             case CGoto g:
                 WriteLine(sb, depth, g.External
                     ? $"goto {LabelFor(g.Va)};   // outside this function"
-                    : $"goto {LabelFor(g.Va)};", null);
+                    : $"goto {LabelFor(g.Va)};", 0UL);
                 break;
 
             case CBreak:
-                WriteLine(sb, depth, "break;", null);
+                WriteLine(sb, depth, "break;", 0UL);
                 break;
 
             case CContinue:
-                WriteLine(sb, depth, "continue;", null);
+                WriteLine(sb, depth, "continue;", 0UL);
                 break;
 
             case CIf branch:
@@ -181,7 +181,7 @@ public sealed class PseudoCEmitter
 
     private void WriteIf(StringBuilder sb, CIf branch, int depth, HashSet<ulong> labels)
     {
-        WriteLine(sb, depth, $"if ({IrPrinter.Print(branch.Condition)})", null);
+        WriteLine(sb, depth, $"if ({IrPrinter.Print(branch.Condition)})", branch.Va);
         WriteBlock(sb, branch.Then, depth, labels);
 
         if (branch.Else is not null)
@@ -195,7 +195,7 @@ public sealed class PseudoCEmitter
     {
         if (Unwrap(@else, labels) is CIf chained)
         {
-            WriteLine(sb, depth, $"else if ({IrPrinter.Print(chained.Condition)})", null);
+            WriteLine(sb, depth, $"else if ({IrPrinter.Print(chained.Condition)})", chained.Va);
             WriteBlock(sb, chained.Then, depth, labels);
             if (chained.Else is not null)
             {
@@ -205,7 +205,7 @@ public sealed class PseudoCEmitter
             return;
         }
 
-        WriteLine(sb, depth, "else", null);
+        WriteLine(sb, depth, "else", 0UL);
         WriteBlock(sb, @else, depth, labels);
     }
 
@@ -245,14 +245,14 @@ public sealed class PseudoCEmitter
         switch (loop.Kind)
         {
             case CLoopKind.While:
-                WriteLine(sb, depth, $"while ({IrPrinter.Print(loop.Condition!)})", null);
+                WriteLine(sb, depth, $"while ({IrPrinter.Print(loop.Condition!)})", loop.Va);
                 WriteBlock(sb, loop.Body, depth, labels);
                 break;
 
             case CLoopKind.DoWhile:
-                WriteLine(sb, depth, "do", null);
+                WriteLine(sb, depth, "do", 0);
                 WriteBlock(sb, loop.Body, depth, labels);
-                WriteLine(sb, depth, $"while ({IrPrinter.Print(loop.Condition!)});", null);
+                WriteLine(sb, depth, $"while ({IrPrinter.Print(loop.Condition!)});", loop.Va);
                 break;
 
             default:
@@ -264,29 +264,37 @@ public sealed class PseudoCEmitter
 
     private void WriteSwitch(StringBuilder sb, CSwitch dispatch, int depth, HashSet<ulong> labels)
     {
-        WriteLine(sb, depth, $"switch ({IrPrinter.Print(dispatch.Value)})", null);
-        WriteLine(sb, depth, "{", null);
+        WriteLine(sb, depth, $"switch ({IrPrinter.Print(dispatch.Value)})", dispatch.Va);
+        WriteLine(sb, depth, "{", 0UL);
         foreach (var arm in dispatch.Cases)
         {
             foreach (int label in arm.Labels)
             {
-                WriteLine(sb, depth + 1, $"case {label.ToString(CultureInfo.InvariantCulture)}:", null);
+                WriteLine(sb, depth + 1, $"case {label.ToString(CultureInfo.InvariantCulture)}:", 0UL);
             }
 
             Write(sb, arm.Body, depth + 2, labels);
         }
 
-        WriteLine(sb, depth, "}", null);
+        WriteLine(sb, depth, "}", 0UL);
     }
 
     private void WriteBlock(StringBuilder sb, CStmt body, int depth, HashSet<ulong> labels)
     {
-        WriteLine(sb, depth, "{", null);
+        WriteLine(sb, depth, "{", 0UL);
         Write(sb, body, depth + 1, labels);
-        WriteLine(sb, depth, "}", null);
+        WriteLine(sb, depth, "}", 0UL);
     }
 
     private void WriteLine(StringBuilder sb, int depth, string text, IrStmt? source)
+        => WriteLine(sb, depth, text, source is IrComment ? 0 : source?.Va ?? 0);
+
+    /// <summary>
+    /// One line, with the address it came from in a trailing comment. Every line that stands for an
+    /// instruction carries one, which is what lets a caret anywhere in the output be turned back into an
+    /// address to name or comment.
+    /// </summary>
+    private void WriteLine(StringBuilder sb, int depth, string text, ulong va)
     {
         if (text.Length == 0)
         {
@@ -299,16 +307,16 @@ public sealed class PseudoCEmitter
         }
 
         sb.Append(text);
-        if (source is { Va: not 0 } and not IrComment)
+        if (va != 0)
         {
-            string? note = source.Va == _headerCommentVa ? null : Annotations?.CommentFor(source.Va);
+            string? note = va == _headerCommentVa ? null : Annotations?.CommentFor(va);
             if (IncludeAddressComments || note is not null)
             {
                 PadTo(sb, 56);
                 sb.Append("// ");
                 if (IncludeAddressComments)
                 {
-                    sb.Append(source.Va.ToString("X", CultureInfo.InvariantCulture));
+                    sb.Append(va.ToString("X", CultureInfo.InvariantCulture));
                 }
 
                 if (note is not null)

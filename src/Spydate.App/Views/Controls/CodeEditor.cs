@@ -71,6 +71,7 @@ public sealed class CodeEditor : TextEditor
         StyleLineNumberMargin();
 
         TextArea.Caret.PositionChanged += (_, _) => UpdateCaretContext();
+        PreviewMouseRightButtonDown += MoveCaretToClick;
     }
 
     public string BoundText
@@ -95,6 +96,19 @@ public sealed class CodeEditor : TextEditor
     {
         get => (string?)GetValue(CaretWordProperty);
         set => SetValue(CaretWordProperty, value);
+    }
+
+    /// <summary>
+    /// Puts the caret where the right button went down. WPF opens a context menu without moving the
+    /// caret, so without this the menu would act on wherever the caret was last left.
+    /// </summary>
+    private void MoveCaretToClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var position = GetPositionFromPoint(e.GetPosition(this));
+        if (position is { } location)
+        {
+            TextArea.Caret.Position = location;
+        }
     }
 
     /// <summary>Publishes what the caret is on, so commands can act on the address the user is looking at.</summary>

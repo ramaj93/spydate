@@ -46,13 +46,14 @@
         <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
                              HighlightingName="{Binding Highlighting, Mode=OneWay}"
                              CaretAddress="{Binding CaretAddress, Mode=OneWayToSource}"
-                             CaretWord="{Binding CaretWord, Mode=OneWayToSource}">
+                             CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
+                             Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
             <controls:CodeEditor.ContextMenu>
-                <ContextMenu>
-                    <MenuItem Header="_Rename…" InputGestureText="F2"
-                              Command="{Binding DataContext.RenameSymbolCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
-                    <MenuItem Header="_Comment…" InputGestureText="Ctrl+;"
-                              Command="{Binding DataContext.EditCommentCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
+                <!-- A context menu is its own popup tree, with no Window above it: the commands come in
+                     through the editor's Tag, which is the main view model. -->
+                <ContextMenu DataContext="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource Self}}">
+                    <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding RenameSymbolCommand}" />
+                    <MenuItem Header="_Comment…" InputGestureText="Ctrl+;" Command="{Binding EditCommentCommand}" />
                     <Separator />
                     <MenuItem Header="Cop_y" InputGestureText="Ctrl+C" Command="ApplicationCommands.Copy" />
                 </ContextMenu>

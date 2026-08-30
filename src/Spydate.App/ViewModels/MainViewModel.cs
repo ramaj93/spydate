@@ -467,59 +467,31 @@ public sealed partial class MainViewModel : ObservableObject
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// The address a naming command should act on: the name under the caret if it points at one, then
-    /// the line the caret is on, then whatever the document is about. Reading the caret first is what
-    /// lets a called function be renamed from the code that calls it.
+    /// What a naming command should act on. The caret decides: a stack slot if it is on one, then the
+    /// name under it (so a callee can be renamed from the code that calls it), then the address of the
+    /// line, then whatever the document as a whole is about.
     /// </summary>
-    private ulong? AnnotationTarget()
+    private CaretTarget CurrentTarget()
     {
         if (Binary?.Analysis is not { } analysis)
         {
-            return null;
+            return CaretTarget.None;
         }
 
-        if (ActiveDocument is CodeDocumentViewModel code)
-        {
-            if (code.CaretWord is { } word)
-            {
-                if (AddressText.FromGeneratedName(word) is { } generated)
-                {
-                    return generated;
-                }
+        var code = ActiveDocument as CodeDocumentViewModel;
+        ulong? functionVa = code?.Address;
 
-                if (analysis.Symbols.GetByName(word) is { } symbol)
-                {
-                    return symbol.Va;
-                }
-            }
-
-            if (code.CaretAddress is { } line)
-            {
-                return line;
-            }
-        }
-
-        return ActiveDocument?.Address;
+        return CaretTargets.Resolve(
+            code?.CaretWord,
+            code?.CaretAddress,
+            ActiveDocument?.Address,
+            slotForName: word => functionVa is { } fn ? SlotNamed(analysis, fn, word) : null,
+            addressForSymbol: word => analysis.Symbols.GetByName(word)?.Va);
     }
 
-    /// <summary>
-    /// The stack slot the caret is on, if it is on one: either a generated name (the prefixes come from
-    /// StackFramePass) or the name the user has already given that slot.
-    /// </summary>
-    private string? SlotUnderCaret(ulong functionVa)
+    /// <summary>The slot a name belongs to, when the user has already renamed one to it.</summary>
+    private static string? SlotNamed(BinaryAnalysis analysis, ulong functionVa, string word)
     {
-        if (Binary?.Analysis is not { } analysis
-            || ActiveDocument is not CodeDocumentViewModel { CaretWord: { } word }
-            || word.Length == 0)
-        {
-            return null;
-        }
-
-        if (word.StartsWith("local_", StringComparison.Ordinal) || word.StartsWith("arg_", StringComparison.Ordinal))
-        {
-            return word;
-        }
-
         foreach (var (slot, chosen) in analysis.Annotations.LocalNamesFor(functionVa))
         {
             if (chosen == word)
@@ -531,32 +503,6 @@ public sealed partial class MainViewModel : ObservableObject
         return null;
     }
 
-    /// <summary>Renames one of the function's stack slots rather than an address.</summary>
-    private async Task<bool> TryRenameLocalAsync()
-    {
-        if (Binary?.Analysis is not { } analysis
-            || ActiveDocument is not CodeDocumentViewModel { Address: { } functionVa }
-            || SlotUnderCaret(functionVa) is not { } slot)
-        {
-            return false;
-        }
-
-        string? entered = _dialogs.AskForText(
-            "Rename",
-            $"Name for {slot} in {analysis.NameFor(functionVa)}",
-            $"Leave it empty to go back to {slot}.",
-            analysis.Annotations.LocalNameFor(functionVa, slot) ?? slot);
-        if (entered is null)
-        {
-            return true;   // asked and cancelled: do not fall through to renaming the address
-        }
-
-        string? applied = analysis.Annotations.SetLocalName(functionVa, slot, entered);
-        Log(applied is null ? $"{slot} is {slot} again." : $"{slot} is now {applied}.");
-        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
-        return true;
-    }
-
     [RelayCommand]
     private async Task RenameSymbolAsync()
     {
@@ -565,17 +511,20 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (await TryRenameLocalAsync().ConfigureAwait(true))
+        var target = CurrentTarget();
+        if (target.Kind == CaretTargetKind.StackSlot && ActiveDocument?.Address is { } owner)
         {
+            await RenameSlotAsync(analysis, owner, target.Slot!).ConfigureAwait(true);
             return;
         }
 
-        if (AnnotationTarget() is not { } va)
+        if (target.Kind != CaretTargetKind.Address)
         {
-            Log("Nothing to rename here: put the caret on an address or a name first.");
+            Log("Nothing to rename here: put the caret on a name or an address first.");
             return;
         }
 
+        ulong va = target.Address;
         string generated = analysis.Symbols.NameOrDefault(va);
         string? entered = _dialogs.AskForText(
             "Rename",
@@ -594,6 +543,24 @@ public sealed partial class MainViewModel : ObservableObject
         await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
     }
 
+    /// <summary>Renames one of a function's stack slots rather than an address.</summary>
+    private async Task RenameSlotAsync(BinaryAnalysis analysis, ulong functionVa, string slot)
+    {
+        string? entered = _dialogs.AskForText(
+            "Rename",
+            $"Name for {slot} in {analysis.NameFor(functionVa)}",
+            $"Leave it empty to go back to {slot}.",
+            analysis.Annotations.LocalNameFor(functionVa, slot) ?? slot);
+        if (entered is null)
+        {
+            return;
+        }
+
+        string? applied = analysis.Annotations.SetLocalName(functionVa, slot, entered);
+        Log(applied is null ? $"{slot} is {slot} again." : $"{slot} is now {applied}.");
+        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+    }
+
     [RelayCommand]
     private async Task EditCommentAsync()
     {
@@ -602,24 +569,31 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (AnnotationTarget() is not { } va)
+        // A comment belongs to an address; when the caret is on a stack slot, the line it sits on is
+        // what the note is about.
+        var target = CurrentTarget();
+        ulong? va = target.Kind == CaretTargetKind.Address
+            ? target.Address
+            : (ActiveDocument as CodeDocumentViewModel)?.CaretAddress ?? ActiveDocument?.Address;
+
+        if (va is not { } address)
         {
-            Log("Nothing to comment here: put the caret on an address first.");
+            Log("Nothing to comment here: put the caret on a line with an address first.");
             return;
         }
 
         string? entered = _dialogs.AskForText(
             "Comment",
-            $"Comment for 0x{va:X}",
+            $"Comment for 0x{address:X}",
             "Leave it empty to remove the comment.",
-            analysis.Annotations.CommentFor(va));
+            analysis.Annotations.CommentFor(address));
         if (entered is null)
         {
             return;
         }
 
-        string? applied = analysis.Annotations.SetComment(va, entered);
-        Log(applied is null ? $"Removed the comment at 0x{va:X}." : $"Commented 0x{va:X}.");
+        string? applied = analysis.Annotations.SetComment(address, entered);
+        Log(applied is null ? $"Removed the comment at 0x{address:X}." : $"Commented 0x{address:X}.");
         await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
     }
 

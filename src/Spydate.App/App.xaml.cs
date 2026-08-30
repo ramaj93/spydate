@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Diagnostics;
 using System.Windows.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Spydate.App.Services;
@@ -18,6 +20,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        TraceBindingsIfAsked();
 
         var sc = new ServiceCollection();
         sc.AddSingleton<IFileDialogService, FileDialogService>();
@@ -43,6 +46,30 @@ public partial class App : Application
         {
             _ = _services.GetRequiredService<MainViewModel>().OpenPathAsync(path);
         }
+    }
+
+    /// <summary>
+    /// Sends WPF's binding failures to a file when SPYDATE_TRACE_BINDINGS names one. A binding that
+    /// silently does nothing - a command that never arrives, a property that never updates - is invisible
+    /// otherwise, and that is exactly the kind of bug the window cannot show you.
+    /// </summary>
+    private static void TraceBindingsIfAsked()
+    {
+        string? path = Environment.GetEnvironmentVariable("SPYDATE_TRACE_BINDINGS");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        var listener = new TextWriterTraceListener(path) { TraceOutputOptions = TraceOptions.None };
+        PresentationTraceSources.Refresh();
+        PresentationTraceSources.DataBindingSource.Listeners.Add(listener);
+        PresentationTraceSources.DataBindingSource.Switch.Level = SourceLevels.Warning | SourceLevels.Error;
+        Trace.AutoFlush = true;
+
+        // Written straight away, so an empty log means "no binding failures" rather than "not enabled".
+        listener.WriteLine($"Spydate binding trace started {DateTime.Now:HH:mm:ss}");
+        listener.Flush();
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

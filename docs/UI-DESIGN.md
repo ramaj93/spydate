@@ -127,11 +127,22 @@ Type → Member** nodes that open C#/IL documents.
 - `F2` rename · `Ctrl+;` comment · `Ctrl+S` save the project. Rename and comment
   act on what the caret is on: a stack slot (`arg_0`, `local_18`) when it is one,
   then the name under the caret (so a callee can be renamed from the code that calls
-  it), then the address of the line, then whatever the document is about. Both are
-  also on the editor's context menu.
+  it), then the address of the line, then whatever the document is about. That
+  ordering lives in `CaretTargets` rather than in the window, because it is the part
+  worth testing. Right-clicking moves the caret first, so the context menu acts where
+  you clicked. Single letters are deliberately *not* bound (IDA's `n` and `;`): a
+  window-level key binding would take them from the address box.
 - Files can also be dropped on the window or passed on the command line.
 
-## 7. Known gaps (see ROADMAP)
+## 7. Diagnosing the window
+
+Set `SPYDATE_TRACE_BINDINGS` to a file path and WPF's binding failures are written
+there, with a header line so an empty log means "nothing failed" rather than "not
+enabled". A binding that silently does nothing — a command that never arrives
+because a context menu has no `Window` above it to bind through — is invisible
+otherwise, and is exactly the kind of bug the window cannot show you.
+
+## 7b. Known gaps (see ROADMAP)
 
 - Dark theme only (light theme needs light syntax palettes).
 - The Functions tree node lists up to 50 000 discovered functions eagerly;

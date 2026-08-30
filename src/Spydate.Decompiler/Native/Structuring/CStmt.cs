@@ -24,7 +24,8 @@ public sealed record CLabel(ulong Va) : CStmt;
 /// <summary><c>goto</c>, kept for edges no structure covers. <paramref name="External"/> marks a tail jump out of the function.</summary>
 public sealed record CGoto(ulong Va, bool External = false) : CStmt;
 
-public sealed record CIf(IrExpr Condition, CStmt Then, CStmt? Else) : CStmt;
+/// <param name="Va">Address of the test, so the line can be commented and lined up with the disassembly.</param>
+public sealed record CIf(IrExpr Condition, CStmt Then, CStmt? Else, ulong Va = 0) : CStmt;
 
 public enum CLoopKind
 {
@@ -36,7 +37,7 @@ public enum CLoopKind
     Forever,
 }
 
-public sealed record CLoop(CLoopKind Kind, IrExpr? Condition, CStmt Body) : CStmt;
+public sealed record CLoop(CLoopKind Kind, IrExpr? Condition, CStmt Body, ulong Va = 0) : CStmt;
 
 /// <summary>One arm of a <see cref="CSwitch"/>; several indices can share a body.</summary>
 public sealed record CCase(IReadOnlyList<int> Labels, CStmt Body);
@@ -45,7 +46,7 @@ public sealed record CCase(IReadOnlyList<int> Labels, CStmt Body);
 /// Dispatch on a value. Arms are in address order, so an arm that runs off its end falls into the next
 /// one exactly as C says it does; every other exit carries its own <c>break</c> or <c>goto</c>.
 /// </summary>
-public sealed record CSwitch(IrExpr Value, IReadOnlyList<CCase> Cases) : CStmt;
+public sealed record CSwitch(IrExpr Value, IReadOnlyList<CCase> Cases, ulong Va = 0) : CStmt;
 
 public sealed record CBreak : CStmt;
 
