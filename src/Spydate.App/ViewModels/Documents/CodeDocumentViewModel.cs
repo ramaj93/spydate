@@ -30,7 +30,7 @@ public sealed class CodeAction
 }
 
 /// <summary>Read-only syntax-highlighted text document (disassembly, pseudo-C, …) loaded lazily off-thread.</summary>
-public sealed partial class CodeDocumentViewModel : DocumentViewModel
+public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretContext
 {
     private readonly Func<CancellationToken, CodeContent> _loader;
 
@@ -59,6 +59,9 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
     [ObservableProperty]
     private string? _caretWord;
 
+    /// <summary>A single-pane document does not move, so what it is about is what it opened on.</summary>
+    public ulong? OwningFunctionVa => Address;
+
     public ObservableCollection<string> Notes { get; } = new();
 
     [ObservableProperty]
@@ -81,12 +84,17 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
     // Factories
     // ------------------------------------------------------------------
 
-    public static CodeDocumentViewModel ForFunctionDisassembly(BinaryAnalysis analysis, Function function, Action<Function>? openPseudoC)
+    public static CodeDocumentViewModel ForFunctionDisassembly(BinaryAnalysis analysis, Function function, Action<Function>? openPseudoC, Action<Function>? openSplit = null)
     {
         var actions = new List<CodeAction>();
         if (openPseudoC is not null)
         {
             actions.Add(new CodeAction("Decompile", SymbolRegular.Braces24, () => openPseudoC(function)));
+        }
+
+        if (openSplit is not null)
+        {
+            actions.Add(new CodeAction("Side by side", SymbolRegular.SplitHorizontal24, () => openSplit(function)));
         }
 
         return new CodeDocumentViewModel(
@@ -135,13 +143,18 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
         };
     }
 
-    public static CodeDocumentViewModel ForPseudoC(NativeDecompiler decompiler, Function function, Action<Function>? openDisassembly, Func<Function>? current = null)
+    public static CodeDocumentViewModel ForPseudoC(NativeDecompiler decompiler, Function function, Action<Function>? openDisassembly, Func<Function>? current = null, Action<Function>? openSplit = null)
     {
         current ??= () => function;
         var actions = new List<CodeAction>();
         if (openDisassembly is not null)
         {
             actions.Add(new CodeAction("Disassembly", SymbolRegular.Code24, () => openDisassembly(function)));
+        }
+
+        if (openSplit is not null)
+        {
+            actions.Add(new CodeAction("Side by side", SymbolRegular.SplitHorizontal24, () => openSplit(function)));
         }
 
         return new CodeDocumentViewModel(
@@ -185,6 +198,9 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel
 
         return null;
     }
+
+    /// <summary>The disassembly listing for a function, as the split view shows it too.</summary>
+    public static string FormatFunctionText(BinaryAnalysis analysis, Function function) => FormatFunction(analysis, function);
 
     private static string FormatFunction(BinaryAnalysis analysis, Function function)
     {

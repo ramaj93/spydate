@@ -32,6 +32,7 @@
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
         <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding NavigateForwardCommand}" />
+        <KeyBinding Key="F6" Command="{Binding OpenSideBySideCommand}" />
     </Window.InputBindings>
 
     <Grid>
@@ -75,6 +76,10 @@
                               IsChecked="{Binding IsExplorerVisible, RelativeSource={RelativeSource AncestorType=Window}}" />
                     <MenuItem Header="_Output" IsCheckable="True"
                               IsChecked="{Binding IsOutputVisible, RelativeSource={RelativeSource AncestorType=Window}}" />
+                    <Separator />
+                    <Separator />
+                    <MenuItem Header="_Side by side" InputGestureText="F6" Command="{Binding OpenSideBySideCommand}"
+                              ToolTip="Show this function's disassembly and pseudo-C together, each following the other" />
                     <Separator />
                     <MenuItem Header="Close _tab" InputGestureText="Ctrl+W" Command="{Binding CloseActiveDocumentCommand}" />
                     <MenuItem Header="Close all tabs" Command="{Binding CloseAllDocumentsCommand}" />

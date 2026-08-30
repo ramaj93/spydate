@@ -124,6 +124,12 @@ Type → Member** nodes that open C#/IL documents.
 - `Alt+←` / `Alt+→` back and forward through everywhere you have been, as a browser
   does: going somewhere new from the middle drops what was ahead, and a tab that has
   since been closed is reopened rather than skipped.
+- `F6` shows the current function side by side: disassembly left, pseudo-C right,
+  each following the other. The panes agree through `LineAddressMap`, built from the
+  addresses both texts already state — a listing line begins with one, a pseudo-C
+  line ends with one. An instruction with no line of its own (the passes fold most
+  of them away) resolves to the last statement at or before it, which is the one it
+  ended up inside.
 - `F2` rename · `Ctrl+;` comment · `Ctrl+S` save the project. Rename and comment
   act on what the caret is on: a stack slot (`arg_0`, `local_18`) when it is one,
   then the name under the caret (so a callee can be renamed from the code that calls

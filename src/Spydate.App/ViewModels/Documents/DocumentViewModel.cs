@@ -81,5 +81,24 @@ public abstract partial class DocumentViewModel : ObservableObject
     }
 }
 
+/// <summary>
+/// A document showing code, where the caret means something. The naming commands ask these three
+/// questions and nothing else, so a single-pane and a split document answer them the same way.
+/// </summary>
+public interface ICaretContext
+{
+    /// <summary>Address of the line the caret is on, if it states one.</summary>
+    ulong? CaretAddress { get; }
+
+    /// <summary>Identifier under the caret, if it is on one.</summary>
+    string? CaretWord { get; }
+
+    /// <summary>
+    /// The function this document is about. Distinct from the caret: in a split view the caret moves
+    /// around inside one function, and a stack slot belongs to the function, not to the line.
+    /// </summary>
+    ulong? OwningFunctionVa { get; }
+}
+
 /// <summary>A generic name/value row for property tables.</summary>
 public sealed record PropertyRow(string Name, string Value, string? Note = null);

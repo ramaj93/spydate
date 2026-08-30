@@ -107,7 +107,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Stack slots (`arg_0`, `local_18`) renamed too, keyed by the generated name under
   the function they belong to, since that is what they are: `arg_0` exists in most
   functions and naming one must not name them all
-- ⬜ Split view: disassembly ↔ pseudo‑C synchronised by address
+- ✅ Split view (F6, or View ▸ Side by side): one function in both panes, each
+  following the other by address. Every line that stands for an instruction states
+  its address, so picking a line in either pane moves the other to it; an
+  instruction the decompiler folded away lands on the statement it ended up inside
 - ⬜ Settings: syntax (Intel/AT&T/MASM), font size, panel layout persistence
 - ⬜ Light theme (needs light-background XSHD syntax palettes)
 - ⬜ Dockable/floating tool windows; per-document context menus

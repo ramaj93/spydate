@@ -31,6 +31,11 @@ public sealed class CodeEditor : TextEditor
         nameof(CaretWord), typeof(string), typeof(CodeEditor),
         new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
 
+    /// <summary>Line to move to and mark, 1-based. Zero leaves the editor alone.</summary>
+    public static readonly DependencyProperty RevealLineProperty = DependencyProperty.Register(
+        nameof(RevealLine), typeof(int), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(0, OnRevealLineChanged));
+
     public CodeEditor()
     {
         IsReadOnly = true;
@@ -96,6 +101,34 @@ public sealed class CodeEditor : TextEditor
     {
         get => (string?)GetValue(CaretWordProperty);
         set => SetValue(CaretWordProperty, value);
+    }
+
+    public int RevealLine
+    {
+        get => (int)GetValue(RevealLineProperty);
+        set => SetValue(RevealLineProperty, value);
+    }
+
+    /// <summary>
+    /// Scrolls a line into view and puts the caret on it, which is also what marks it: the editor already
+    /// paints the caret's line, so the two panes agree without a second kind of highlight.
+    /// </summary>
+    private static void OnRevealLineChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var editor = (CodeEditor)d;
+        int line = (int)e.NewValue;
+        if (line <= 0 || editor.Document is null || line > editor.Document.LineCount)
+        {
+            return;
+        }
+
+        var target = editor.Document.GetLineByNumber(line);
+        if (editor.TextArea.Caret.Line != line)
+        {
+            editor.TextArea.Caret.Offset = target.Offset;
+        }
+
+        editor.ScrollToLine(line);
     }
 
     /// <summary>

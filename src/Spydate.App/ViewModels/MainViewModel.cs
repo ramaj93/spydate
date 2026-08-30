@@ -478,8 +478,8 @@ public sealed partial class MainViewModel : ObservableObject
             return CaretTarget.None;
         }
 
-        var code = ActiveDocument as CodeDocumentViewModel;
-        ulong? functionVa = code?.Address;
+        var code = ActiveDocument as ICaretContext;
+        ulong? functionVa = code?.OwningFunctionVa;
 
         return CaretTargets.Resolve(
             code?.CaretWord,
@@ -512,7 +512,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         var target = CurrentTarget();
-        if (target.Kind == CaretTargetKind.StackSlot && ActiveDocument?.Address is { } owner)
+        if (target.Kind == CaretTargetKind.StackSlot && (ActiveDocument as ICaretContext)?.OwningFunctionVa is { } owner)
         {
             await RenameSlotAsync(analysis, owner, target.Slot!).ConfigureAwait(true);
             return;
@@ -574,7 +574,7 @@ public sealed partial class MainViewModel : ObservableObject
         var target = CurrentTarget();
         ulong? va = target.Kind == CaretTargetKind.Address
             ? target.Address
-            : (ActiveDocument as CodeDocumentViewModel)?.CaretAddress ?? ActiveDocument?.Address;
+            : (ActiveDocument as ICaretContext)?.CaretAddress ?? ActiveDocument?.Address;
 
         if (va is not { } address)
         {
@@ -654,6 +654,15 @@ public sealed partial class MainViewModel : ObservableObject
         {
             switch (document)
             {
+                case SplitCodeDocumentViewModel split:
+                    if (split.OwningFunctionVa is { } splitVa)
+                    {
+                        split.Title = $"{analysis.NameFor(splitVa)} (split)";
+                    }
+
+                    await split.ReloadAsync().ConfigureAwait(true);
+                    break;
+
                 case CodeDocumentViewModel code:
                     if (code.Address is { } va)
                     {
@@ -698,7 +707,7 @@ public sealed partial class MainViewModel : ObservableObject
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
-            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC),
+            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit),
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
             ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
@@ -713,11 +722,45 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>Opens the function the active document is about in both views at once.</summary>
+    [RelayCommand]
+    private void OpenSideBySide()
+    {
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        ulong? va = (ActiveDocument as ICaretContext)?.OwningFunctionVa ?? ActiveDocument?.Address;
+        if (va is not { } entry)
+        {
+            StatusText = "Open a function first: side by side shows one function in both views.";
+            return;
+        }
+
+        OpenFunctionSplit(analysis.GetOrDiscoverFunction(entry));
+    }
+
+    /// <summary>Opens the function in both views at once, each following the other.</summary>
+    private void OpenFunctionSplit(Function f)
+    {
+        if (Binary?.Analysis is not { } a || Binary.NativeDecompiler is not { } d)
+        {
+            return;
+        }
+
+        var doc = Find($"split:{f.EntryVa:X}")
+                  ?? SplitCodeDocumentViewModel.For(a, d, f, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f);
+        Show(doc);
+        Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
+    }
+
     private void OpenFunctionDisassembly(Function f)
     {
         if (Binary?.Analysis is { } a)
         {
-            var doc = Find($"disasm:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC);
+            var doc = Find($"disasm:{f.EntryVa:X}")
+                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit);
             Show(doc);
             Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
         }
@@ -728,7 +771,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Binary?.NativeDecompiler is { } d && Binary.Analysis is { } a)
         {
             var doc = Find($"pseudoc:{f.EntryVa:X}")
-                      ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f);
+                      ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f, OpenFunctionSplit);
             Show(doc);
             Record(doc, null, f.EntryVa);
         }

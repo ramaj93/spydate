@@ -219,6 +219,15 @@ in `%LOCALAPPDATA%\Spydate\Projects` when it cannot — which is the normal case
 anything in System32. Both are probed on open, and a project whose recorded size,
 timestamp and checksum do not match the image is refused with a reason.
 
+## 5c. Following one view from another
+
+`Spydate.Core.Text` holds the text-level analyses the window needs and the tests can
+reach: `AddressText` (read an address back out of a line, or out of a name like
+`sub_140001260`), `CaretTargets` (what a naming command should act on, in order:
+stack slot, symbol, line, document) and `LineAddressMap` (which line is about which
+address, both ways). Keeping them out of the window is deliberate — the ordering and
+the lookups are the part worth testing, and the window is the part that cannot be.
+
 ## 6. App: `Spydate.App`
 
 See `UI-DESIGN.md`. `WorkspaceService` loads a file (`PeImage`), builds a
