@@ -207,6 +207,11 @@ analysis had found, or removes the one the rename invented. A user name also win
 over the name a discovery *seed* carries — `EntryPoint`, an export — which is
 otherwise passed in when the function is first discovered.
 
+Stack slots are named too, but they are not addresses: `arg_0` exists in almost
+every function, so slot names hang off the *function's* annotation, keyed by the
+generated name. `LocalNamingPass` applies them at the end of the decompiler
+pipeline, once the frame pass has invented the names there is something to replace.
+
 The file is indented JSON with hex **RVAs**, not VAs, so it stays readable,
 diffable and correct if the image is ever examined at a different base. It lives
 beside the binary (`notepad.exe.spydate`) when that folder can be written to and

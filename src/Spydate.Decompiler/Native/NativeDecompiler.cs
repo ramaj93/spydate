@@ -32,7 +32,7 @@ public sealed class NativeDecompiler
         _symbols = symbols;
         _registerArguments = registerArguments;
         _annotations = annotations;
-        _passes = passes ?? DefaultPasses(names, registerArguments);
+        _passes = passes ?? DefaultPasses(names, registerArguments, annotations);
     }
 
     public NativeDecompiler(BinaryAnalysis analysis)
@@ -70,7 +70,7 @@ public sealed class NativeDecompiler
     /// The standard pipeline. Naming runs before copy propagation so a named global or a string literal
     /// is what gets forwarded into the expression that uses it.
     /// </summary>
-    public static IReadOnlyList<IIrPass> DefaultPasses(GlobalNames? names = null, Func<ulong, int>? registerArguments = null)
+    public static IReadOnlyList<IIrPass> DefaultPasses(GlobalNames? names = null, Func<ulong, int>? registerArguments = null, AnnotationStore? annotations = null)
     {
         var passes = new List<IIrPass> { new StackFramePass() };
         if (registerArguments is not null)
@@ -87,6 +87,11 @@ public sealed class NativeDecompiler
         passes.Add(new AlgebraicSimplificationPass());
         passes.Add(new DeadCodeEliminationPass());
         passes.Add(new ReturnValuePass());
+        if (annotations is not null)
+        {
+            passes.Add(new LocalNamingPass(annotations));
+        }
+
         return passes;
     }
 

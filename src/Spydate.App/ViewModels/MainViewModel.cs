@@ -500,10 +500,70 @@ public sealed partial class MainViewModel : ObservableObject
         return ActiveDocument?.Address;
     }
 
+    /// <summary>
+    /// The stack slot the caret is on, if it is on one: either a generated name (the prefixes come from
+    /// StackFramePass) or the name the user has already given that slot.
+    /// </summary>
+    private string? SlotUnderCaret(ulong functionVa)
+    {
+        if (Binary?.Analysis is not { } analysis
+            || ActiveDocument is not CodeDocumentViewModel { CaretWord: { } word }
+            || word.Length == 0)
+        {
+            return null;
+        }
+
+        if (word.StartsWith("local_", StringComparison.Ordinal) || word.StartsWith("arg_", StringComparison.Ordinal))
+        {
+            return word;
+        }
+
+        foreach (var (slot, chosen) in analysis.Annotations.LocalNamesFor(functionVa))
+        {
+            if (chosen == word)
+            {
+                return slot;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Renames one of the function's stack slots rather than an address.</summary>
+    private async Task<bool> TryRenameLocalAsync()
+    {
+        if (Binary?.Analysis is not { } analysis
+            || ActiveDocument is not CodeDocumentViewModel { Address: { } functionVa }
+            || SlotUnderCaret(functionVa) is not { } slot)
+        {
+            return false;
+        }
+
+        string? entered = _dialogs.AskForText(
+            "Rename",
+            $"Name for {slot} in {analysis.NameFor(functionVa)}",
+            $"Leave it empty to go back to {slot}.",
+            analysis.Annotations.LocalNameFor(functionVa, slot) ?? slot);
+        if (entered is null)
+        {
+            return true;   // asked and cancelled: do not fall through to renaming the address
+        }
+
+        string? applied = analysis.Annotations.SetLocalName(functionVa, slot, entered);
+        Log(applied is null ? $"{slot} is {slot} again." : $"{slot} is now {applied}.");
+        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+        return true;
+    }
+
     [RelayCommand]
     private async Task RenameSymbolAsync()
     {
         if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        if (await TryRenameLocalAsync().ConfigureAwait(true))
         {
             return;
         }

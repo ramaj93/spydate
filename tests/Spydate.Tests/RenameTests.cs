@@ -166,6 +166,68 @@ public class RenameTests
         Assert.DoesNotContain(label.Value, after);
     }
 
+    /// <summary>
+    /// x64 frame: mov [rsp+8], rcx ; sub rsp, 0x28 ; mov rax, [rsp+0x30] ; add rsp, 0x28 ; ret - the
+    /// argument goes into its home slot and comes back out, so the frame pass names a slot.
+    /// </summary>
+    private static PeImage FunctionWithAnArgument()
+    {
+        var code = new byte[0x20];
+        Array.Fill(code, (byte)0xCC);
+        new byte[]
+        {
+            0x48, 0x89, 0x4C, 0x24, 0x08,
+            0x48, 0x83, 0xEC, 0x28,
+            0x48, 0x8B, 0x44, 0x24, 0x30,
+            0x48, 0x83, 0xC4, 0x28,
+            0xC3,
+        }.CopyTo(code, 0);
+        return SyntheticPe.WithSectionData(code);
+    }
+
+    [Fact]
+    public void AStackSlotCanBeNamed()
+    {
+        var image = FunctionWithAnArgument();
+        var analysis = new BinaryAnalysis(image);
+        var decompiler = new NativeDecompiler(64, analysis.Symbols, annotations: analysis.Annotations);
+        var function = analysis.GetOrDiscoverFunction(0x140001000);
+
+        Assert.Contains("arg_0", decompiler.Decompile(function).Text);
+
+        analysis.Annotations.SetLocalName(0x140001000, "arg_0", "count");
+        string text = decompiler.Decompile(function).Text;
+
+        Assert.Contains("uint64_t count", text);
+        Assert.DoesNotContain("arg_0", text);
+    }
+
+    [Fact]
+    public void ClearingASlotNameGivesTheGeneratedOneBack()
+    {
+        var image = FunctionWithAnArgument();
+        var analysis = new BinaryAnalysis(image);
+        var decompiler = new NativeDecompiler(64, analysis.Symbols, annotations: analysis.Annotations);
+        var function = analysis.GetOrDiscoverFunction(0x140001000);
+
+        analysis.Annotations.SetLocalName(0x140001000, "arg_0", "count");
+        analysis.Annotations.SetLocalName(0x140001000, "arg_0", null);
+
+        Assert.Contains("arg_0", decompiler.Decompile(function).Text);
+        Assert.Null(analysis.Annotations.LocalNameFor(0x140001000, "arg_0"));
+    }
+
+    [Fact]
+    public void SlotNamesBelongToTheirOwnFunction()
+    {
+        // arg_0 exists in most functions; naming one must not name them all.
+        var analysis = new BinaryAnalysis(FunctionWithAnArgument());
+        analysis.Annotations.SetLocalName(0x140001000, "arg_0", "count");
+
+        Assert.Equal("count", analysis.Annotations.LocalNameFor(0x140001000, "arg_0"));
+        Assert.Null(analysis.Annotations.LocalNameFor(0x140002000, "arg_0"));
+    }
+
     [Fact]
     public void RenamingIsUndoneAndRedoneWithoutLosingTheOriginal()
     {

@@ -101,6 +101,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   that folder cannot be written to. A name applies on top of what analysis found,
   so clearing it restores the original; a project made for a different build is
   refused with a reason, the way a mismatched PDB is
+- ✅ Stack slots (`arg_0`, `local_18`) renamed too, keyed by the generated name under
+  the function they belong to, since that is what they are: `arg_0` exists in most
+  functions and naming one must not name them all
 - ⬜ Split view: disassembly ↔ pseudo‑C synchronised by address
 - ⬜ Settings: syntax (Intel/AT&T/MASM), font size, panel layout persistence
 - ⬜ Light theme (needs light-background XSHD syntax palettes)

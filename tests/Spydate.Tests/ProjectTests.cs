@@ -127,6 +127,41 @@ public class ProjectTests : IDisposable
     }
 
     [Fact]
+    public void SlotNamesRoundTripUnderTheirFunction()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0 });
+        ulong functionVa = image.RvaToVa(0x1000);
+        string path = TempFile("locals.spydate");
+
+        var saved = new AnnotationStore();
+        saved.SetName(functionVa, "ParseCommandLine");
+        saved.SetLocalName(functionVa, "arg_0", "argc");
+        saved.SetLocalName(functionVa, "local_18", "buffer");
+        SpydateProject.SaveTo(path, image, saved);
+
+        var loaded = new AnnotationStore();
+        Assert.True(SpydateProject.Load(path, image, loaded).Loaded);
+
+        Assert.Equal("ParseCommandLine", loaded.NameFor(functionVa));
+        Assert.Equal("argc", loaded.LocalNameFor(functionVa, "arg_0"));
+        Assert.Equal("buffer", loaded.LocalNameFor(functionVa, "local_18"));
+        Assert.Equal(2, loaded.LocalNamesFor(functionVa).Count);
+    }
+
+    [Fact]
+    public void AFunctionWithOnlySlotNamesIsStillWorthKeeping()
+    {
+        var store = new AnnotationStore();
+        store.SetLocalName(0x1000, "arg_0", "argc");
+
+        Assert.Equal(1, store.Count);
+
+        store.SetLocalName(0x1000, "arg_0", null);
+
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
     public void AddressesAreStoredAsRvas()
     {
         // The file must describe the image, not where it happened to be based when it was written.

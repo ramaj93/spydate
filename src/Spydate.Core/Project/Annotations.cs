@@ -11,7 +11,13 @@ public sealed record Annotation
     /// <summary>Free text shown beside the address in listings.</summary>
     public string? Comment { get; init; }
 
-    public bool IsEmpty => string.IsNullOrEmpty(Name) && string.IsNullOrEmpty(Comment);
+    /// <summary>
+    /// Names for this function's stack slots, keyed by the generated one (<c>arg_0</c>, <c>local_18</c>).
+    /// They belong to the function rather than to an address of their own, which is also how they read.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? Locals { get; init; }
+
+    public bool IsEmpty => string.IsNullOrEmpty(Name) && string.IsNullOrEmpty(Comment) && Locals is not { Count: > 0 };
 }
 
 /// <summary>What changed, so views can refresh only what they need to.</summary>
@@ -62,6 +68,42 @@ public sealed class AnnotationStore
 
     public string? CommentFor(ulong va) => Get(va)?.Comment;
 
+    /// <summary>What the user calls one of a function's stack slots, if anything.</summary>
+    public string? LocalNameFor(ulong functionVa, string slot)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(slot);
+        return Get(functionVa)?.Locals is { } locals && locals.TryGetValue(slot, out string? name) ? name : null;
+    }
+
+    /// <summary>Every slot the user has named in a function, keyed by the generated name.</summary>
+    public IReadOnlyDictionary<string, string> LocalNamesFor(ulong functionVa)
+        => Get(functionVa)?.Locals ?? EmptyLocals;
+
+    private static readonly Dictionary<string, string> EmptyLocals = new(StringComparer.Ordinal);
+
+    /// <summary>Names or un-names one stack slot. Returns the name that was stored, or null if cleared.</summary>
+    public string? SetLocalName(ulong functionVa, string slot, string? name)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(slot);
+        string? clean = CleanName(name);
+        var updated = Update(functionVa, current =>
+        {
+            var locals = new Dictionary<string, string>(current.Locals ?? EmptyLocals, StringComparer.Ordinal);
+            if (clean is null)
+            {
+                locals.Remove(slot);
+            }
+            else
+            {
+                locals[slot] = clean;
+            }
+
+            return current with { Locals = locals.Count == 0 ? null : locals };
+        });
+
+        return updated?.Locals is { } after && after.TryGetValue(slot, out string? stored) ? stored : null;
+    }
+
     /// <summary>Sets or clears the name at an address. Returns the name that was stored, or null if cleared.</summary>
     public string? SetName(ulong va, string? name) => Update(va, a => a with { Name = CleanName(name) })?.Name;
 
@@ -71,7 +113,12 @@ public sealed class AnnotationStore
     public void Set(ulong va, Annotation annotation)
     {
         ArgumentNullException.ThrowIfNull(annotation);
-        Update(va, _ => new Annotation { Name = CleanName(annotation.Name), Comment = CleanComment(annotation.Comment) });
+        Update(va, _ => new Annotation
+        {
+            Name = CleanName(annotation.Name),
+            Comment = CleanComment(annotation.Comment),
+            Locals = CleanLocals(annotation.Locals),
+        });
     }
 
     /// <summary>Every annotation, in address order.</summary>
@@ -113,7 +160,7 @@ public sealed class AnnotationStore
                 _byVa[va] = after;
             }
 
-            if (before == after)
+            if (Same(before, after))
             {
                 return after;
             }
@@ -123,6 +170,44 @@ public sealed class AnnotationStore
 
         Changed?.Invoke(this, new AnnotationChange(va, before, after));
         return after;
+    }
+
+    /// <summary>Cleans every slot name, dropping any that cleans away to nothing.</summary>
+    private static IReadOnlyDictionary<string, string>? CleanLocals(IReadOnlyDictionary<string, string>? locals)
+    {
+        if (locals is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        var cleaned = new Dictionary<string, string>(locals.Count, StringComparer.Ordinal);
+        foreach (var (slot, name) in locals)
+        {
+            if (!string.IsNullOrWhiteSpace(slot) && CleanName(name) is { } clean)
+            {
+                cleaned[slot] = clean;
+            }
+        }
+
+        return cleaned.Count == 0 ? null : cleaned;
+    }
+
+    /// <summary>Value equality, including the slot names a record's default comparison would miss.</summary>
+    private static bool Same(Annotation? a, Annotation? b)
+    {
+        if (ReferenceEquals(a, b))
+        {
+            return true;
+        }
+
+        if (a is null || b is null || a.Name != b.Name || a.Comment != b.Comment)
+        {
+            return false;
+        }
+
+        var left = a.Locals ?? EmptyLocals;
+        var right = b.Locals ?? EmptyLocals;
+        return left.Count == right.Count && left.All(e => right.TryGetValue(e.Key, out string? v) && v == e.Value);
     }
 
     /// <summary>

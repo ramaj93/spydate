@@ -157,7 +157,13 @@ public static class SpydateProject
                 continue; // an address outside the image cannot be described in a portable way
             }
 
-            file.Annotations.Add(new AnnotationDto { Rva = Hex(rva), Name = annotation.Name, Comment = annotation.Comment });
+            file.Annotations.Add(new AnnotationDto
+            {
+                Rva = Hex(rva),
+                Name = annotation.Name,
+                Comment = annotation.Comment,
+                Locals = annotation.Locals is { Count: > 0 } locals ? new Dictionary<string, string>(locals, StringComparer.Ordinal) : null,
+            });
         }
 
         string? directory = System.IO.Path.GetDirectoryName(path);
@@ -247,7 +253,12 @@ public static class SpydateProject
                 continue;
             }
 
-            annotations.Set(image.RvaToVa(rva), new Annotation { Name = entry.Name, Comment = entry.Comment });
+            annotations.Set(image.RvaToVa(rva), new Annotation
+            {
+                Name = entry.Name,
+                Comment = entry.Comment,
+                Locals = entry.Locals is { Count: > 0 } ? entry.Locals : null,
+            });
             applied++;
         }
 
@@ -303,5 +314,6 @@ public static class SpydateProject
         [JsonPropertyName("rva")] public string? Rva { get; set; }
         [JsonPropertyName("name")] public string? Name { get; set; }
         [JsonPropertyName("comment")] public string? Comment { get; set; }
+        [JsonPropertyName("locals")] public Dictionary<string, string>? Locals { get; set; }
     }
 }
