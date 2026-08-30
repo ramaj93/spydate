@@ -16,8 +16,9 @@
             <TextBlock x:Name="LabelText" Margin="0,0,0,6" TextWrapping="Wrap"
                        Foreground="{DynamicResource Text.Secondary}" />
 
-            <TextBox x:Name="Input" FontFamily="{DynamicResource Mono.FontFamily}" Padding="4,3"
-                     AcceptsReturn="False" MaxLength="255" />
+            <TextBox x:Name="Input" FontFamily="{DynamicResource Mono.FontFamily}"
+                     FontSize="{DynamicResource Mono.FontSize}" Padding="5,3" MinHeight="26"
+                     VerticalContentAlignment="Center" AcceptsReturn="False" MaxLength="255" />
 
             <TextBlock x:Name="HintText" Margin="0,6,0,0" TextWrapping="Wrap" FontSize="11"
                        Foreground="{DynamicResource Text.Tertiary}" />

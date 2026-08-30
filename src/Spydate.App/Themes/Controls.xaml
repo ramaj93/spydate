@@ -353,8 +353,10 @@
         <Setter Property="SelectionBrush" Value="{DynamicResource Selection.Background}" />
         <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
         <Setter Property="FontSize" Value="{DynamicResource App.FontSize}" />
-        <Setter Property="Height" Value="21" />
-        <Setter Property="Padding" Value="3,0" />
+        <!-- Dense like the rest of the chrome, but a minimum rather than a fixed height: a box with
+             padding, or a taller font, has to be able to grow instead of clipping what it shows. -->
+        <Setter Property="MinHeight" Value="21" />
+        <Setter Property="Padding" Value="3,1" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
         <Setter Property="Template">
