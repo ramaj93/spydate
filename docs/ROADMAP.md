@@ -95,7 +95,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 
 ## Phase 3 — UI 🚧
 - ⬜ CFG graph view (basic blocks as nodes)
-- ⬜ Go‑to address, search (bytes / text / symbol), navigation history
+- ✅ Navigation history: back and forward over everywhere you have been, with the
+  next stop named in the tooltip. A closed tab is reopened from what it was, so
+  going back does not dead-end
+- ⬜ Search (bytes / text / symbol) — go-to address and symbol already work
 - ✅ Rename (F2) and comment (Ctrl+;) any address — function, global or label —
   persisted to a `.spydate` file beside the binary, or in a per-user store when
   that folder cannot be written to. A name applies on top of what analysis found,

@@ -200,6 +200,7 @@ public sealed partial class MainViewModel : ObservableObject
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
             Documents.Clear();
             ActiveDocument = null;
+            ClearHistory();
             Binary = opened;
             Explorer.Clear();
             Explorer.Add(ExplorerTreeBuilder.Build(opened));
@@ -279,6 +280,7 @@ public sealed partial class MainViewModel : ObservableObject
         Explorer.Clear();
         Warnings.Clear();
         ActiveDocument = null;
+        ClearHistory();
         _workspace.Close();
         Binary = null;
         AnalysisText = string.Empty;
@@ -733,6 +735,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (doc is not null)
         {
             Show(doc);
+            Record(doc, target);
         }
     }
 
@@ -740,7 +743,9 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (Binary?.Analysis is { } a)
         {
-            Show(Find($"disasm:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC));
+            var doc = Find($"disasm:{f.EntryVa:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC);
+            Show(doc);
+            Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
         }
     }
 
@@ -748,8 +753,10 @@ public sealed partial class MainViewModel : ObservableObject
     {
         if (Binary?.NativeDecompiler is { } d && Binary.Analysis is { } a)
         {
-            Show(Find($"pseudoc:{f.EntryVa:X}")
-                 ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f));
+            var doc = Find($"pseudoc:{f.EntryVa:X}")
+                      ?? CodeDocumentViewModel.ForPseudoC(d, f, OpenFunctionDisassembly, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f);
+            Show(doc);
+            Record(doc, null, f.EntryVa);
         }
     }
 
@@ -841,5 +848,124 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         ActiveDocument = doc;
+    }
+
+    // ------------------------------------------------------------------
+    // Navigation history
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// One place the user has been. The key finds the document while it is open; the target (or the
+    /// function address, for pseudo-C, which has no target of its own) is how it is opened again after
+    /// the tab has been closed.
+    /// </summary>
+    private sealed record HistoryEntry(string Key, string Title, NodeTarget? Target, ulong? PseudoCVa);
+
+    private readonly List<HistoryEntry> _history = new();
+    private int _historyCursor = -1;
+
+    /// <summary>Set while replaying history, so going back does not itself become history.</summary>
+    private bool _navigating;
+
+    public bool CanNavigateBack => _historyCursor > 0;
+
+    public bool CanNavigateForward => _historyCursor >= 0 && _historyCursor < _history.Count - 1;
+
+    /// <summary>Where Back would take you, for the button's tooltip.</summary>
+    public string BackTooltip => CanNavigateBack ? $"Back to {_history[_historyCursor - 1].Title} (Alt+Left)" : "Back (Alt+Left)";
+
+    public string ForwardTooltip => CanNavigateForward ? $"Forward to {_history[_historyCursor + 1].Title} (Alt+Right)" : "Forward (Alt+Right)";
+
+    private void Record(DocumentViewModel? document, NodeTarget? target, ulong? pseudoCVa = null)
+    {
+        if (document is null || _navigating)
+        {
+            return;
+        }
+
+        // Re-showing where you already are is not a move.
+        if (_historyCursor >= 0 && _history[_historyCursor].Key == document.Key)
+        {
+            return;
+        }
+
+        // Going somewhere new from the middle of the history drops what was ahead, as a browser does.
+        if (_historyCursor < _history.Count - 1)
+        {
+            _history.RemoveRange(_historyCursor + 1, _history.Count - _historyCursor - 1);
+        }
+
+        _history.Add(new HistoryEntry(document.Key, document.Title, target, pseudoCVa));
+        _historyCursor = _history.Count - 1;
+
+        const int limit = 200;
+        if (_history.Count > limit)
+        {
+            _history.RemoveRange(0, _history.Count - limit);
+            _historyCursor = _history.Count - 1;
+        }
+
+        NotifyHistoryChanged();
+    }
+
+    private void NotifyHistoryChanged()
+    {
+        OnPropertyChanged(nameof(CanNavigateBack));
+        OnPropertyChanged(nameof(CanNavigateForward));
+        OnPropertyChanged(nameof(BackTooltip));
+        OnPropertyChanged(nameof(ForwardTooltip));
+        NavigateBackCommand.NotifyCanExecuteChanged();
+        NavigateForwardCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ClearHistory()
+    {
+        _history.Clear();
+        _historyCursor = -1;
+        NotifyHistoryChanged();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanNavigateBack))]
+    private void NavigateBack() => GoToHistory(_historyCursor - 1);
+
+    [RelayCommand(CanExecute = nameof(CanNavigateForward))]
+    private void NavigateForward() => GoToHistory(_historyCursor + 1);
+
+    private void GoToHistory(int index)
+    {
+        if (index < 0 || index >= _history.Count)
+        {
+            return;
+        }
+
+        var entry = _history[index];
+        _navigating = true;
+        try
+        {
+            if (Find(entry.Key) is { } open)
+            {
+                Show(open);
+            }
+            else if (entry.PseudoCVa is { } va && Binary?.Analysis is { } analysis)
+            {
+                OpenFunctionPseudoC(analysis.GetOrDiscoverFunction(va));
+            }
+            else if (entry.Target is { } target)
+            {
+                OpenTarget(target);
+            }
+            else
+            {
+                StatusText = $"{entry.Title} is closed and cannot be reopened.";
+                return;
+            }
+
+            _historyCursor = index;
+            NotifyHistoryChanged();
+        }
+        finally
+        {
+            _navigating = false;
+        }
     }
 }

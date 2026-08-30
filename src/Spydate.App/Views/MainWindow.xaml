@@ -30,6 +30,8 @@
         <KeyBinding Key="F2" Command="{Binding RenameSymbolCommand}" />
         <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding EditCommentCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
+        <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
+        <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding NavigateForwardCommand}" />
     </Window.InputBindings>
 
     <Grid>
@@ -78,6 +80,9 @@
                     <MenuItem Header="Close all tabs" Command="{Binding CloseAllDocumentsCommand}" />
                 </MenuItem>
                 <MenuItem Header="_Analyze">
+                    <MenuItem Header="_Back" InputGestureText="Alt+Left" Command="{Binding NavigateBackCommand}" />
+                    <MenuItem Header="_Forward" InputGestureText="Alt+Right" Command="{Binding NavigateForwardCommand}" />
+                    <Separator />
                     <MenuItem Header="_Go to address…" InputGestureText="Ctrl+G"
                               Command="{Binding FocusGotoCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
                     <MenuItem Header="Go to _entry point" Command="{Binding OpenEntryPointCommand}" />
@@ -106,6 +111,17 @@
                         <ui:SymbolIcon Symbol="Dismiss24" FontSize="13" Margin="0,0,4,0" />
                         <TextBlock Text="Close" VerticalAlignment="Center" />
                     </StackPanel>
+                </Button>
+
+                <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />
+
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding NavigateBackCommand}"
+                        AutomationProperties.Name="Back" ToolTip="{Binding BackTooltip}">
+                    <ui:SymbolIcon Symbol="ArrowLeft24" FontSize="13" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding NavigateForwardCommand}"
+                        AutomationProperties.Name="Forward" ToolTip="{Binding ForwardTooltip}">
+                    <ui:SymbolIcon Symbol="ArrowRight24" FontSize="13" />
                 </Button>
 
                 <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />

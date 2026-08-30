@@ -121,6 +121,9 @@ Type → Member** nodes that open C#/IL documents.
 
 - `Ctrl+O` open · `Ctrl+G` focus the address box · `Ctrl+W` / `Ctrl+F4` close tab
   · `F5` re‑analyze · `Alt+F4` exit.
+- `Alt+←` / `Alt+→` back and forward through everywhere you have been, as a browser
+  does: going somewhere new from the middle drops what was ahead, and a tab that has
+  since been closed is reopened rather than skipped.
 - `F2` rename · `Ctrl+;` comment · `Ctrl+S` save the project. Rename and comment
   act on what the caret is on: a stack slot (`arg_0`, `local_18`) when it is one,
   then the name under the caret (so a callee can be renamed from the code that calls
