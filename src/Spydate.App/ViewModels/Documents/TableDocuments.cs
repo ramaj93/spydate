@@ -279,12 +279,19 @@ public sealed partial class StringsDocumentViewModel : DocumentViewModel
 // Imports
 // ---------------------------------------------------------------------------
 
-public sealed record ImportRow(string Module, string Function, string Hint, string IatRva, string IatVa, string Kind);
-
-public sealed class ImportsDocumentViewModel : DocumentViewModel
+public sealed record ImportRow(string Module, string Function, string Hint, string IatRva, string IatVa, string Kind)
 {
-    public ImportsDocumentViewModel(PeImage pe) : base("imports", "Imports", SymbolRegular.ArrowImport24)
+    /// <summary>What the DLL on disk says this import takes; empty when it could not be read.</summary>
+    public string Takes { get; init; } = string.Empty;
+}
+
+public sealed partial class ImportsDocumentViewModel : DocumentViewModel
+{
+    private readonly BinaryAnalysis? _analysis;
+
+    public ImportsDocumentViewModel(PeImage pe, BinaryAnalysis? analysis = null) : base("imports", "Imports", SymbolRegular.ArrowImport24)
     {
+        _analysis = analysis;
         Rows = pe.Imports.Concat(pe.DelayImports)
             .SelectMany(m => m.Functions.Select(f => new ImportRow(
                 m.Name,
@@ -297,9 +304,73 @@ public sealed class ImportsDocumentViewModel : DocumentViewModel
         ModuleCount = pe.Imports.Count + pe.DelayImports.Count;
     }
 
-    public List<ImportRow> Rows { get; }
+    [ObservableProperty]
+    private List<ImportRow> _rows;
+
     public int ModuleCount { get; }
+
     public string Summary => $"{ModuleCount} modules, {Rows.Count} functions";
+
+    /// <summary>
+    /// Opening every DLL an image imports and reading its exports takes about a second, so it happens
+    /// when the document is first shown rather than when it is created.
+    /// </summary>
+    public override async Task LoadAsync(CancellationToken cancellationToken)
+    {
+        if (_analysis?.Signatures is not { } signatures)
+        {
+            return;
+        }
+
+        var rows = Rows;
+        var (described, resolved) = await Task.Run(
+            () =>
+            {
+                var built = new List<ImportRow>(rows.Count);
+                int found = 0;
+                foreach (var row in rows)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var signature = row.Kind == "ordinal"
+                        ? CalleeSignature.Unknown
+                        : signatures.Lookup(row.Module, row.Function);
+                    if (signature.Source != SignatureSource.None)
+                    {
+                        found++;
+                    }
+
+                    built.Add(row with { Takes = Describe(signature) });
+                }
+
+                return (built, found);
+            },
+            cancellationToken).ConfigureAwait(true);
+
+        Rows = described;
+        StatusMessage = $"{resolved} of {rows.Count} imports read from the DLLs on disk";
+    }
+
+    /// <summary>
+    /// What was learned, in a column's worth of words. A count and a float slot are different kinds of
+    /// fact and both are worth seeing; "caller-cleaned" is what is known about a cdecl import, whose
+    /// argument count its own code does not state.
+    /// </summary>
+    private static string Describe(CalleeSignature signature)
+    {
+        if (signature.Source == SignatureSource.None)
+        {
+            return string.Empty;
+        }
+
+        if (!signature.HasArgumentCount)
+        {
+            return signature.StackCleanupBytes == 0 ? "caller-cleaned" : string.Empty;
+        }
+
+        string text = signature.ArgumentCount == 1 ? "1 arg" : $"{signature.ArgumentCount} args";
+        var floats = Enumerable.Range(0, signature.ArgumentCount).Where(signature.IsFloat).ToList();
+        return floats.Count == 0 ? text : $"{text} (float: {string.Join(", ", floats)})";
+    }
 }
 
 // ---------------------------------------------------------------------------

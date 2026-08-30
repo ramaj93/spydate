@@ -92,7 +92,7 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
 
 1. `StackFramePass` — simulates the stack pointer through the CFG (push/pop,
    `sub/add rsp`, `mov rbp,rsp`, `mov r11,rsp`, `lea rbp,[rsp+x]`, x86
-   stdcall-vs-cdecl cleanup heuristic) so every stack slot gets a frame offset
+   stdcall-vs-cdecl cleanup) so every stack slot gets a frame offset
    relative to the entry `rsp`: `local_XX` below the return address, `arg_XX`
    above it, `&local_XX` for `lea`. Removes stack bookkeeping and frame-pointer
    setup, elides `push rbx … pop rbx` spill/restore pairs of callee-saved
@@ -102,6 +102,22 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    registers fill gaps in the entry block); on x86 the values pushed since the
    previous call (forwarded into the call when unchanged in between, otherwise
    the named slot is passed).
+
+   Given a `signatureFor` delegate the pass stops guessing three of those things.
+   **Cleanup**: an x86 callee's `ret N` states how much it removes, so there is
+   nothing to infer from what follows the call. **How many**: a stdcall count is
+   exact, so pushes above it belong to an outer call and are left there — x86
+   notepad has 169 calls that were quietly taking someone else's arguments.
+   **Which register**: an x64 slot holds either the integer register or the xmm
+   register that shares it, never both, and only the callee knows which; looking
+   for the wrong one finds nothing, which is how every float argument used to
+   disappear. Because the x64 count is a lower bound (only the entry block is
+   read) it may only add or retype an argument, never drop one the call site
+   really passes. Without the delegate the pass behaves exactly as before.
+
+   `CalleeSignature.ArgumentCount` from `ret N` counts arguments on the *stack*:
+   a `__thiscall` callee that removes four bytes takes one stack argument and
+   `this` in `ecx` besides, and the register ones are pass 2's to add.
 2. `X86RegisterArgumentsPass` — gives x86 calls their register arguments. Neither
    `__thiscall` nor `__fastcall` leaves a trace at the call site, so `RegisterUse`
    asks the callee: a function whose **entry block** reads `ecx` before writing it is
@@ -110,7 +126,10 @@ Interface `IIrPass { void Run(IrFunction f); }`. Order matters and is defined in
    and `push ecx` does not count (it is how MSVC reserves four bytes of stack) — the
    cost is missing a convention, and the alternative is inventing arguments. Calls
    answered this way are marked `ConventionKnown`, which is what lets dead-code
-   elimination stop keeping `ecx`/`edx` alive at them. The function being decompiled
+   elimination stop keeping `ecx`/`edx` alive at them. Every other argument
+   register a call does not name stays live: on x64 the ABI settles *which*
+   registers carry arguments but never how many, so a float slot the call site
+   was not seen to write is exactly the case that needs it. The function being decompiled
    declares its own register parameters the same way, under the register's name.
 3. `GlobalNamingPass` — replaces absolute addresses with names, using a
    `GlobalNames` view of the image (symbols, discovered functions, scanned

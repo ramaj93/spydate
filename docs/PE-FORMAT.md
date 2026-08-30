@@ -157,6 +157,34 @@ OffsetToData = subdirectory, else an `IMAGE_RESOURCE_DATA_ENTRY`
 directory start, and malformed files can point a child back at an ancestor —
 track visited offsets.
 
+## API set schema (`.apiset` section of `apisetschema.dll`, undocumented)
+
+Not part of any image being analysed, but needed to read one: since Windows 7
+most system imports name an api set (`api-ms-win-core-synch-l1-1-0.dll`) rather
+than the DLL that implements them, and no such file exists. The redirect table
+lives in the `.apiset` section of `apisetschema.dll`. Version 6 (Windows 10/11):
+
+    namespace header, 28 bytes:  Version u32 (6) · Size u32 · Flags u32 ·
+                                 Count u32 · EntryOffset u32 · HashOffset u32 ·
+                                 HashFactor u32
+    entry, 24 bytes:             Flags u32 · NameOffset u32 · NameLength u32 ·
+                                 HashedLength u32 · ValueOffset u32 · ValueCount u32
+    value, 20 bytes:             Flags u32 · NameOffset u32 · NameLength u32 ·
+                                 ValueOffset u32 · ValueLength u32
+
+Every offset is from the start of the namespace, and every name is UTF-16 with a
+length in **bytes** and no terminator.
+
+Two things are easy to get wrong. `HashedLength` marks the part of the name the
+loader keys on, and it stops one version component short — so an import of
+`...-l1-1-0` is served by a schema entry named `...-l1-1-1`, and matching on the
+whole name misses most imports. And an entry's values are one default plus
+per-importer overrides: the default is the value whose *name* (the importer) is
+empty, not the first one.
+
+A value names the implementing module, usually a DLL but occasionally a driver
+(`winaccel.sys`), so do not assume the extension.
+
 ## Rich header (DOS stub, undocumented)
 
 Between the DOS header and `e_lfanew` the Microsoft linker writes XOR-encrypted

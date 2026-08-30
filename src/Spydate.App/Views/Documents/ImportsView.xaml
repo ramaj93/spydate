@@ -20,12 +20,15 @@
                          TextChanged="OnFilterChanged" />
                 <TextBlock Text="{Binding Summary}" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="{DynamicResource Text.Secondary}" />
+                <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Foreground="{DynamicResource Text.Tertiary}" />
             </DockPanel>
         </Border>
         <DataGrid Grid.Row="1" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Module" Binding="{Binding Module}" Width="265" />
                 <DataGridTextColumn Header="Function" Binding="{Binding Function}" Width="*" />
+                <DataGridTextColumn Header="Takes" Binding="{Binding Takes}" Width="128" />
                 <DataGridTextColumn Header="Hint" Binding="{Binding Hint}" Width="52" />
                 <DataGridTextColumn Header="IAT RVA" Binding="{Binding IatRva}" Width="100" />
                 <DataGridTextColumn Header="IAT VA" Binding="{Binding IatVa}" Width="140" />

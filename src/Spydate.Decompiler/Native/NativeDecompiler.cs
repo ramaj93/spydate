@@ -26,13 +26,14 @@ public sealed class NativeDecompiler
         IReadOnlyList<IIrPass>? passes = null,
         GlobalNames? names = null,
         Func<ulong, int>? registerArguments = null,
-        AnnotationStore? annotations = null)
+        AnnotationStore? annotations = null,
+        Func<ulong, CalleeSignature>? signatureFor = null)
     {
         _bitness = bitness;
         _symbols = symbols;
         _registerArguments = registerArguments;
         _annotations = annotations;
-        _passes = passes ?? DefaultPasses(names, registerArguments, annotations);
+        _passes = passes ?? DefaultPasses(names, registerArguments, annotations, signatureFor);
     }
 
     public NativeDecompiler(BinaryAnalysis analysis)
@@ -41,7 +42,8 @@ public sealed class NativeDecompiler
             analysis.Symbols,
             names: GlobalNames.For(analysis),
             registerArguments: va => RegisterArgumentsFor(analysis, va),
-            annotations: analysis.Annotations)
+            annotations: analysis.Annotations,
+            signatureFor: analysis.SignatureFor)
     {
     }
 
@@ -70,9 +72,13 @@ public sealed class NativeDecompiler
     /// The standard pipeline. Naming runs before copy propagation so a named global or a string literal
     /// is what gets forwarded into the expression that uses it.
     /// </summary>
-    public static IReadOnlyList<IIrPass> DefaultPasses(GlobalNames? names = null, Func<ulong, int>? registerArguments = null, AnnotationStore? annotations = null)
+    public static IReadOnlyList<IIrPass> DefaultPasses(
+        GlobalNames? names = null,
+        Func<ulong, int>? registerArguments = null,
+        AnnotationStore? annotations = null,
+        Func<ulong, CalleeSignature>? signatureFor = null)
     {
-        var passes = new List<IIrPass> { new StackFramePass() };
+        var passes = new List<IIrPass> { new StackFramePass(signatureFor) };
         if (registerArguments is not null)
         {
             passes.Add(new X86RegisterArgumentsPass(registerArguments));

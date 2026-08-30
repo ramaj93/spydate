@@ -700,7 +700,7 @@ public sealed partial class MainViewModel : ObservableObject
             OverviewTarget => Find("overview") ?? new OverviewDocumentViewModel(b),
             HeadersTarget => Find("headers") ?? new HeadersDocumentViewModel(pe),
             SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
-            ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe),
+            ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe, b.Analysis),
             ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
             ResourcePreviewTarget preview => OpenResource(preview),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, b.Analysis, offset => OpenTarget(new HexTarget(offset))),

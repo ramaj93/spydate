@@ -1,4 +1,5 @@
 using Spydate.Decompiler.Native.IR;
+using Spydate.Disassembly;
 
 namespace Spydate.Decompiler.Native.Passes;
 
@@ -9,16 +10,33 @@ namespace Spydate.Decompiler.Native.Passes;
 /// removed, <c>lea</c> of a stack slot becomes <c>&amp;local_XX</c>, and calls receive their arguments:
 /// on x64 the contiguous prefix of <c>rcx, rdx, r8, r9</c> defined since the previous call in the block;
 /// on x86 the values pushed since the previous call (cdecl/stdcall convention).
+///
+/// Where the callee can be read - it is in this image, or it is an import whose DLL is on disk - its own
+/// code answers three questions the call site cannot. How many bytes it removes from the stack, so x86
+/// cleanup stops being a guess about what follows the call; how many arguments it takes, so a run of
+/// unrelated pushes is not swept into one call; and which of the x64 argument slots arrive in an xmm
+/// register, which is the only way a float argument is ever visible.
 /// </summary>
 public sealed class StackFramePass : IIrPass
 {
+    private readonly Func<ulong, CalleeSignature>? _signatureFor;
+
+    /// <param name="signatureFor">
+    /// What the function at a VA takes, or <see cref="CalleeSignature.Unknown"/>. Without it the pass
+    /// behaves exactly as it did before: every convention question is answered from the call site alone.
+    /// </param>
+    public StackFramePass(Func<ulong, CalleeSignature>? signatureFor = null) => _signatureFor = signatureFor;
+
     public string Name => "stack-frame";
 
     private static readonly string[] Win64ArgRegs = { "rcx", "rdx", "r8", "r9" };
 
+    /// <summary>The xmm register that shares each argument slot with the integer register above it.</summary>
+    private static readonly string[] Win64FloatArgRegs = { "xmm0", "xmm1", "xmm2", "xmm3" };
+
     public void Run(IrFunction function)
     {
-        var ctx = new Context(function);
+        var ctx = new Context(function, _signatureFor);
         ctx.ComputeDepths();
         ctx.RewriteAndCleanup();
         ctx.RecoverCallArguments();
@@ -32,6 +50,8 @@ public sealed class StackFramePass : IIrPass
         private readonly IrFunction _fn;
         private readonly int _ptr;
         private readonly string _sp;
+        private readonly Func<ulong, CalleeSignature>? _signatureFor;
+        private readonly Dictionary<ulong, CalleeSignature> _signatures = new();
 
         /// <summary>Frame-pointer aliases: register → frame offset it points at (rbp after "mov rbp, rsp", r11, …).</summary>
         private sealed record Aliases(Dictionary<string, long> Map)
@@ -74,11 +94,28 @@ public sealed class StackFramePass : IIrPass
         private readonly Dictionary<IrStmt, string> _aliasSetups = new(ReferenceEqualityComparer.Instance);
         private readonly Dictionary<IrStmt, IrStmt> _removedOriginals = new(ReferenceEqualityComparer.Instance);
 
-        public Context(IrFunction fn)
+        public Context(IrFunction fn, Func<ulong, CalleeSignature>? signatureFor)
         {
             _fn = fn;
             _ptr = fn.Bitness / 8;
             _sp = fn.Bitness == 64 ? "rsp" : "esp";
+            _signatureFor = signatureFor;
+        }
+
+        /// <summary>What the target of this call takes, asked once per address.</summary>
+        private CalleeSignature SignatureOf(IrCall call)
+        {
+            if (_signatureFor is null || call.Target is not IrSymbol { Va: not 0 } target)
+            {
+                return CalleeSignature.Unknown;
+            }
+
+            if (!_signatures.TryGetValue(target.Va, out var signature))
+            {
+                _signatures[target.Va] = signature = _signatureFor(target.Va);
+            }
+
+            return signature;
         }
 
         // ------------------------------------------------------------------
@@ -197,10 +234,12 @@ public sealed class StackFramePass : IIrPass
 
                     if (_fn.Bitness == 32 && depth is not null)
                     {
-                        // stdcall callee pops its arguments; cdecl callers adjust esp themselves afterwards.
-                        // Heuristic: if no "esp = esp + c" follows before the next call/return in this block,
-                        // assume the callee removed the arguments pushed since the previous call.
-                        depth += CalleeCleanupBytes(block, index);
+                        // The callee states how much it removes, in the `ret N` it ends with. Where that
+                        // could be read there is nothing left to infer; otherwise fall back to reading the
+                        // caller: if no "esp = esp + c" follows before the next call or return in this
+                        // block, assume the callee removed the arguments pushed since the previous call.
+                        var settled = SignatureOf(call.Call);
+                        depth += settled.HasStackCleanup ? settled.StackCleanupBytes : CalleeCleanupBytes(block, index);
                         MarkJunkPops(block, index);
                     }
 
@@ -435,15 +474,18 @@ public sealed class StackFramePass : IIrPass
                         continue;
                     }
 
+                    var signature = SignatureOf(call);
                     var args = _fn.Bitness == 64
-                        ? Win64Args(block, i, byVa)
-                        : X86Args(block, i, depths is not null && i < depths.Length ? depths[i] : null);
+                        ? Win64Args(block, i, byVa, signature)
+                        : X86Args(block, i, depths is not null && i < depths.Length ? depths[i] : null, signature);
                     if (args.Count == 0)
                     {
                         continue;
                     }
 
-                    var newCall = call with { Args = args };
+                    // A recovered list is only known to be the whole list when something said how long it
+                    // is; without that, later passes stay conservative about what else the callee reads.
+                    var newCall = call with { Args = args, ConventionKnown = call.ConventionKnown || signature.HasArgumentCount };
                     block.Statements[i] = block.Statements[i] switch
                     {
                         IrCallStmt cs => cs with { Call = newCall },
@@ -458,8 +500,17 @@ public sealed class StackFramePass : IIrPass
         /// Contiguous prefix of rcx/rdx/r8/r9 defined since the previous call, scanning backwards through
         /// this block and then through single-predecessor blocks (a jcc between "mov rcx, x" and the call is common).
         /// </summary>
-        private static List<IrExpr> Win64Args(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa)
+        private static List<IrExpr> Win64Args(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, CalleeSignature signature)
         {
+            // A slot holds either an integer register or the xmm register that shares it, never both, and
+            // only the callee knows which. Looking for the wrong one finds nothing, which is how float
+            // arguments used to disappear.
+            var slots = new string[Win64ArgRegs.Length];
+            for (int k = 0; k < slots.Length; k++)
+            {
+                slots[k] = signature.IsFloat(k) ? Win64FloatArgRegs[k] : Win64ArgRegs[k];
+            }
+
             var defined = new IrReg?[Win64ArgRegs.Length];
             var current = block;
             int start = callIndex - 1;
@@ -476,9 +527,9 @@ public sealed class StackFramePass : IIrPass
 
                     if (IrRewriter.Destination(s) is IrReg r)
                     {
-                        for (int k = 0; k < Win64ArgRegs.Length; k++)
+                        for (int k = 0; k < slots.Length; k++)
                         {
-                            if (defined[k] is null && RegisterAliases.Overlap(r.Name, Win64ArgRegs[k]))
+                            if (defined[k] is null && RegisterAliases.Overlap(r.Name, slots[k]))
                             {
                                 defined[k] = r;
                             }
@@ -493,7 +544,7 @@ public sealed class StackFramePass : IIrPass
                     int highest = Array.FindLastIndex(defined, d => d is not null);
                     for (int k = 0; k < highest; k++)
                     {
-                        defined[k] ??= new IrReg(Win64ArgRegs[k], 64);
+                        defined[k] ??= new IrReg(slots[k], 64);
                     }
 
                     break;
@@ -506,6 +557,14 @@ public sealed class StackFramePass : IIrPass
 
                 current = pred;
                 start = current.Statements.Count - 1;
+            }
+
+            // Slots the callee reads that the call site never wrote: they already held what it wants, or
+            // they were set somewhere this backwards walk could not follow. Naming the register is honest
+            // - it is what is in the slot - and it is what makes a float argument appear at all.
+            for (int k = 0; k < signature.ArgumentCount && k < defined.Length; k++)
+            {
+                defined[k] ??= new IrReg(slots[k], 64);
             }
 
             return Prefix(defined);
@@ -532,7 +591,7 @@ public sealed class StackFramePass : IIrPass
         /// When the pushed expression is unchanged between push and call, the push is removed and the value
         /// is placed directly in the call; otherwise the named stack slot is passed.
         /// </summary>
-        private List<IrExpr> X86Args(IrBlock block, int callIndex, long? depthAtCall)
+        private List<IrExpr> X86Args(IrBlock block, int callIndex, long? depthAtCall, CalleeSignature signature)
         {
             if (depthAtCall is null)
             {
@@ -562,6 +621,11 @@ public sealed class StackFramePass : IIrPass
                 if (offset != expected)
                 {
                     break; // arguments must be contiguous from the call depth upwards
+                }
+
+                if (signature.HasArgumentCount && args.Count >= signature.ArgumentCount)
+                {
+                    break; // the callee said how many it takes; pushes above those belong to someone else
                 }
 
                 var push = (IrAssign)block.Statements[index];

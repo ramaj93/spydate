@@ -161,16 +161,20 @@ public sealed class DeadCodeEliminationPass : IIrPass
                 live.Add("zmm0");
             }
 
-            // A call whose arguments were never recovered may still be reading them out of registers.
-            // Once the frame pass has named them, what is left in an argument register is not an argument
-            // - but only where the convention is settled: on x64 by the ABI, on x86 by having read the
-            // callee. Otherwise a value in ecx or edx may be a fastcall argument nobody recovered.
-            if (statement is IrCallStmt call2
-                && ((bitness == 32 && !call2.Call.ConventionKnown) || call2.Call.Args.Count == 0))
+            // A call may be reading arguments out of registers the recovery never named, so those stay
+            // live. Naming one is what settles it: an argument register the call already passes is live
+            // anyway, and the rest are only safe to drop where the whole list is known - which on x86
+            // means the callee was read and said so, and on x64 means nothing at all. The x64 count is a
+            // lower bound, and a float slot the call site never wrote is exactly the case that needs it.
+            if (statement is IrCallStmt call2 && !(bitness == 32 && call2.Call.ConventionKnown))
             {
+                var named = call2.Call.Args.Select(Key).ToHashSet(StringComparer.Ordinal);
                 foreach (string register in ArgumentRegisters(bitness))
                 {
-                    live.Add(register);
+                    if (!named.Contains(register))
+                    {
+                        live.Add(register);
+                    }
                 }
             }
         }

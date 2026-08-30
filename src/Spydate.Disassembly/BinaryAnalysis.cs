@@ -59,6 +59,10 @@ public sealed class BinaryAnalysis
     /// <summary>Function extents declared by the x64 unwind table, keyed by start VA.</summary>
     private readonly Dictionary<ulong, ulong> _bounds = new();
 
+    private readonly ConcurrentDictionary<ulong, CalleeSignature> _signatureCache = new();
+    private readonly Lock _signatureGate = new();
+    private ImportSignatures? _signatures;
+
     /// <summary>
     /// What the symbol table said at an address before the user renamed it, so clearing a name puts the
     /// analysis back where it was rather than leaving a hole.
@@ -116,6 +120,87 @@ public sealed class BinaryAnalysis
 
     /// <summary>Result of looking for the image's PDB, once <see cref="LoadPdbSymbols"/> has run.</summary>
     public PdbLoadResult? Pdb { get; private set; }
+
+    /// <summary>
+    /// Whether imported functions may be looked up in the DLLs on disk to learn what they take. On,
+    /// analysis reads files outside the image; off, every import stays unknown and nothing else changes.
+    /// Set it before the first call to <see cref="SignatureFor"/>.
+    /// </summary>
+    public bool ResolveImportSignatures { get; set; } = true;
+
+    /// <summary>
+    /// The DLLs behind this image's imports, opened on demand. Null when
+    /// <see cref="ResolveImportSignatures"/> is off.
+    /// </summary>
+    public ImportSignatures? Signatures
+    {
+        get
+        {
+            if (!ResolveImportSignatures)
+            {
+                return null;
+            }
+
+            lock (_signatureGate)
+            {
+                return _signatures ??= ImportSignatures.For(Image);
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the function called at <paramref name="va"/> takes. An import is answered by the DLL that
+    /// exports it; anything inside this image is answered by its own code. A thunk that jumps straight
+    /// at an import is followed, since that is the call the code really makes.
+    /// </summary>
+    public CalleeSignature SignatureFor(ulong va)
+    {
+        if (va == 0)
+        {
+            return CalleeSignature.Unknown;
+        }
+
+        if (_signatureCache.TryGetValue(va, out var cached))
+        {
+            return cached;
+        }
+
+        var signature = ComputeSignature(va);
+        _signatureCache[va] = signature;
+        return signature;
+    }
+
+    private CalleeSignature ComputeSignature(ulong va)
+    {
+        if (Symbols.TryGet(va, out var symbol) && symbol.Kind == SymbolKind.Import)
+        {
+            return Signatures?.LookupSymbol(symbol.Name) ?? CalleeSignature.Unknown;
+        }
+
+        if (Image.SectionFromVa(va) is not { IsExecutable: true })
+        {
+            return CalleeSignature.Unknown;
+        }
+
+        Function function;
+        try
+        {
+            function = GetOrDiscoverFunction(va);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+        {
+            return CalleeSignature.Unknown;
+        }
+
+        // `jmp [__imp_X]` is not a function that takes nothing; it is the import, one instruction later.
+        if (function.InstructionCount == 1 && function.Blocks[0].Last is { Flow: InstructionFlow.IndirectBranch, IndirectSlotVa: { } slot }
+            && Symbols.TryGet(slot, out var imported) && imported.Kind == SymbolKind.Import)
+        {
+            return Signatures?.LookupSymbol(imported.Name) ?? CalleeSignature.Unknown;
+        }
+
+        return CalleeSignatures.FromCode(function, Image.Bitness);
+    }
 
     /// <summary>
     /// Finds and applies the matching PDB. Not done in the constructor: it touches the file system

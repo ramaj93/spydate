@@ -110,7 +110,26 @@ addresses, which is worse than having none. Publics are mapped through the
 section table (segment is a 1-based section index) and added without overwriting
 existing names, since an export carries the undecorated name a reader expects.
 
-### 3.5 Symbols
+### 3.5 API set schema
+
+`ApiSetSchema` reads the `.apiset` section of `apisetschema.dll` — the version 6
+layout used by Windows 10 and 11 — into "api set name → the DLL behind it". Since
+Windows 7 most system imports name `api-ms-win-core-synch-l1-1-0.dll`, for which
+no file exists; the loader redirects it, and so must anything that wants to read
+what those imports take.
+
+Two details decide whether the parse is right or merely plausible. Entry names are
+UTF-16 and not terminated, with `HashedLength` marking the part the loader keys
+on — which stops one version component short, so an import of `...-l1-1-0` is
+matched by a schema entry for `...-l1-1-1`. And an entry can name several hosts;
+the one with an empty importer name is the default and the rest are per-importer
+overrides, which are about which copy runs rather than what it takes.
+
+Everything is bounds-checked against the section and an unrecognised version
+yields an empty schema, because the file is opportunistic: it must never stop the
+analysis of the binary that prompted the lookup.
+
+### 3.6 Symbols
 
 `SymbolTable` maps VA → `Symbol(Name, Kind, Address, Size)`. Populated from
 exports, import thunks (`kernel32!CreateFileW`), the entry point, and later PDB
@@ -176,9 +195,28 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   Whole-image discovery (`BinaryAnalysis.DiscoverAll`) seeds from the entry
   point, executable exports and every non-chained x64 `RUNTIME_FUNCTION`, then
   follows direct call targets transitively.
+- `CalleeSignature` / `CalleeSignatures` — what a function takes, read out of its
+  own instructions. On x86 from `ret N`, which a `__stdcall` callee uses to remove
+  its own arguments and which therefore states their number exactly; on x64 from
+  which of `rcx/rdx/r8/r9` and `xmm0`-`xmm3` the entry block reads before writing,
+  which is a lower bound but the only place a float argument is visible. Reads
+  disagreeing across two `ret`s claim nothing: that is a sign discovery ran two
+  functions together. `CalleeSignature.Unknown` is `default`, so a struct out of an
+  uninitialised slot means "unknown" rather than "takes nothing".
+- `ImportSignatures` — the same question for an import, answered by opening the
+  DLL that exports it. Three hops are needed for a real Win32 import and each is
+  the difference between working and not: an api set name is redirected through
+  `ApiSetSchema`; a one-instruction export thunk (`jmp [otherdll!Name]`) is
+  followed; a forwarder (`NTDLL.RtlAllocateHeap`) is followed. Everything fails
+  soft — a missing DLL yields "unknown" and the output is what it was — and
+  `Modules` records what was opened and why anything was not. Off with
+  `BinaryAnalysis.ResolveImportSignatures = false`. See DECISIONS.md for why this
+  exists instead of a signature table.
 - `BinaryAnalysis` — analysis session for one `PeImage`: owns the disassembler,
-  symbol table, discovered functions; provides `DisassembleRange` and
-  `GetOrDiscoverFunction(va)`. Thread‑safe for concurrent reads.
+  symbol table, discovered functions; provides `DisassembleRange`,
+  `GetOrDiscoverFunction(va)` and `SignatureFor(va)` (imports answered by their
+  DLL, in-image functions by their own code, and a `jmp [iat]` thunk followed to
+  the import behind it). Thread‑safe for concurrent reads.
 
 ## 5. Decompiler: `Spydate.Decompiler`
 

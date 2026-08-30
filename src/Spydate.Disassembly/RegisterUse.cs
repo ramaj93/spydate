@@ -4,8 +4,9 @@ namespace Spydate.Disassembly;
 
 /// <summary>
 /// Answers "does this function use a register it was handed?" — which, for <c>ecx</c> and <c>edx</c> on
-/// x86, is the same question as "is this a <c>__fastcall</c> or <c>__thiscall</c> function?". The answer
-/// comes from the callee's own code rather than from a guess at the call site.
+/// x86, is the same question as "is this a <c>__fastcall</c> or <c>__thiscall</c> function?", and on x64
+/// is how a float argument in <c>xmm0</c>-<c>xmm3</c> is found. The answer comes from the callee's own
+/// code rather than from a guess at the call site.
 ///
 /// Only the entry block is read, and only a use that consumes the value counts. Both restrictions are
 /// deliberate. A function that reads <c>ecx</c> somewhere down a rare path is not taking an argument in
@@ -64,8 +65,9 @@ public static class RegisterUse
                 continue;
             }
 
-            // `xor ecx, ecx` and `sub ecx, ecx` read the register only to produce zero.
-            if (instr.Mnemonic is Mnemonic.Xor or Mnemonic.Sub
+            // `xor ecx, ecx`, `sub ecx, ecx` and `xorps xmm0, xmm0` read the register only to produce zero.
+            if (instr.Mnemonic is Mnemonic.Xor or Mnemonic.Sub or Mnemonic.Xorps or Mnemonic.Xorpd or Mnemonic.Pxor
+                or Mnemonic.Vxorps or Mnemonic.Vxorpd or Mnemonic.Vpxor
                 && instr.Op0Kind == OpKind.Register && instr.Op1Kind == OpKind.Register
                 && instr.Op0Register == instr.Op1Register)
             {
@@ -75,6 +77,16 @@ public static class RegisterUse
                 }
 
                 continue;
+            }
+
+            // Scalar SSE preserves the upper lanes of its destination, so Iced reports that destination
+            // as read as well as written. That read is an artifact of the encoding, not a use of
+            // anything the caller passed: `cvtsi2sd xmm0, rcx` produces xmm0, it does not consume it.
+            // Without this, almost every function that touches a float would look like it takes one.
+            if (MergesIntoDestination(instr) && instr.Op0Kind == OpKind.Register && Covers(instr.Op0Register, register)
+                && !ReadsAsSource(instr, register))
+            {
+                return Verdict.Settled;
             }
 
             var info = factory.GetInfo(instr);
@@ -100,6 +112,31 @@ public static class RegisterUse
         }
 
         return Verdict.Undecided;
+    }
+
+    /// <summary>
+    /// Scalar SSE forms that write their destination's low lane and leave the rest of it alone. The
+    /// merge makes the destination look read; the low lane, which is the part that carries a value, is
+    /// produced outright.
+    /// </summary>
+    private static bool MergesIntoDestination(in Instruction instr) => instr.Mnemonic is
+        Mnemonic.Movss or Mnemonic.Movsd
+        or Mnemonic.Cvtsi2ss or Mnemonic.Cvtsi2sd or Mnemonic.Cvtss2sd or Mnemonic.Cvtsd2ss
+        or Mnemonic.Sqrtss or Mnemonic.Sqrtsd or Mnemonic.Rcpss or Mnemonic.Rsqrtss
+        or Mnemonic.Roundss or Mnemonic.Roundsd;
+
+    /// <summary>True when <paramref name="register"/> appears as something the instruction reads from.</summary>
+    private static bool ReadsAsSource(in Instruction instr, Register register)
+    {
+        for (int i = 1; i < instr.OpCount; i++)
+        {
+            if (instr.GetOpKind(i) == OpKind.Register && Covers(instr.GetOpRegister(i), register))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>True when a write to <paramref name="wider"/> replaces the whole of <paramref name="part"/>.</summary>
