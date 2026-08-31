@@ -26,6 +26,9 @@
             <DataTemplate DataType="{x:Type docs:SplitCodeDocumentViewModel}">
                 <views:SplitCodeView />
             </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:GraphDocumentViewModel}">
+                <views:GraphView />
+            </DataTemplate>
             <DataTemplate DataType="{x:Type docs:OverviewDocumentViewModel}">
                 <views:OverviewView />
             </DataTemplate>

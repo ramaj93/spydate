@@ -110,6 +110,32 @@ addresses, which is worse than having none. Publics are mapped through the
 section table (segment is a 1-based section index) and added without overwriting
 existing names, since an export carries the undecorated name a reader expects.
 
+### 3.4b Graph layout (`Spydate.Core.Graph`)
+
+`LayeredLayout` turns nodes and edges into rectangles and polylines: rank by longest
+path from the entry, order within each rank to reduce crossings, place, then route.
+It knows nothing about functions, blocks or text — sizes come in, geometry comes out —
+which is what lets the whole of it be tested, and that matters more than usual because
+the window it is drawn in cannot be inspected (see UI-DESIGN §7b).
+
+Two decisions are worth knowing:
+
+- **Loop edges are not ranked.** Ranking needs an acyclic graph, so the back edges
+  found by a depth-first walk come out first; they are then drawn in channels down the
+  left. Routing them back through the middle instead would have them leave the *top*
+  of the block they come from, when what a reader needs to see is control leaving the
+  bottom and returning to the head of the loop. See DECISIONS.md.
+- **Every bend happens between two layers.** A line runs vertically through a layer,
+  in a column the ordering step reserved for it, and only changes direction in the
+  empty band between layers. That is what makes "no edge crosses a box" true rather
+  than usually true — a short block beside a tall one would otherwise have its edge
+  cut straight across its neighbour. It is asserted over every function of both
+  notepads.
+
+`GraphSvg` renders a layout to SVG. It backs "Export SVG", and it is also the only way
+to *look* at a layout at all: the numbers can be asserted, but only a picture shows
+whether the result reads well.
+
 ### 3.5 API set schema
 
 `ApiSetSchema` reads the `.apiset` section of `apisetschema.dll` — the version 6
@@ -212,6 +238,12 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   `Modules` records what was opened and why anything was not. Off with
   `BinaryAnalysis.ResolveImportSignatures = false`. See DECISIONS.md for why this
   exists instead of a signature table.
+- `FunctionGraphs` — a discovered `Function` as something to draw: one box per basic
+  block holding its instructions, one edge per way control leaves it. Edge kind comes
+  from the block's last instruction rather than from the successor list, since a list
+  of two says nothing about which one the branch was taken to — discovery records the
+  fall-through first, and that ordering is what makes the distinction recoverable. A
+  block past the line budget keeps its head and tail and says how much was left out.
 - `BinaryAnalysis` — analysis session for one `PeImage`: owns the disassembler,
   symbol table, discovered functions; provides `DisassembleRange`,
   `GetOrDiscoverFunction(va)` and `SignatureFor(va)` (imports answered by their

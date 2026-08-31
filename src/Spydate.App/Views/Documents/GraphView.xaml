@@ -1,0 +1,79 @@
+<UserControl x:Class="Spydate.App.Views.Documents.GraphView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             xmlns:controls="clr-namespace:Spydate.App.Views.Controls"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:GraphDocumentViewModel}"
+             Background="{DynamicResource Graph.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+            <DockPanel>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Content="&#x2212;"
+                        Command="{Binding ZoomOutCommand}" ToolTip="Zoom out (Ctrl+scroll)" AutomationProperties.Name="Zoom out" />
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Content="&#x2b;"
+                        Command="{Binding ZoomInCommand}" ToolTip="Zoom in (Ctrl+scroll)" AutomationProperties.Name="Zoom in" />
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Content="1:1"
+                        Command="{Binding ZoomResetCommand}" ToolTip="Actual size" AutomationProperties.Name="Actual size" />
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Content="Export SVG"
+                        Command="{Binding ExportSvgCommand}" ToolTip="Write this graph to an SVG file"
+                        AutomationProperties.Name="Export SVG" />
+                <TextBlock DockPanel.Dock="Right" Text="{Binding StatusMessage}" VerticalAlignment="Center" Margin="0,0,6,0"
+                           Foreground="{DynamicResource Text.Tertiary}" />
+                <TextBlock Text="{Binding Summary}" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Foreground="{DynamicResource Text.Secondary}" />
+            </DockPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" x:Name="Scroller"
+                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                      ScrollChanged="OnScrollChanged"
+                      Visibility="{Binding HasGraph, Converter={StaticResource BoolToVisibility}}">
+            <controls:GraphCanvas x:Name="Canvas"
+                                  Graph="{Binding Graph}"
+                                  Zoom="{Binding Zoom, Mode=TwoWay}"
+                                  SelectedVa="{Binding SelectedVa, Mode=TwoWay}"
+                                  ActivateCommand="{Binding DataContext.OpenBlockCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  FontFamily="{DynamicResource Mono.FontFamily}"
+                                  FontSize="11"
+                                  NodeFill="{DynamicResource Graph.Node}"
+                                  NodeBorder="{DynamicResource Graph.NodeBorder}"
+                                  EntryBorder="{DynamicResource Graph.Entry}"
+                                  SelectedBorder="{DynamicResource Graph.Selected}"
+                                  TextBrush="{DynamicResource Editor.Foreground}"
+                                  HeaderBrush="{DynamicResource Text.Tertiary}"
+                                  HorizontalAlignment="Left" VerticalAlignment="Top">
+                <controls:GraphCanvas.EdgeBrushes>
+                    <!-- Ordered by GraphEdgeKind: fall-through, taken, jump, loop, switch arm. Resolved
+                         at parse time: these brushes are in a plain list, not in the visual tree, so a
+                         deferred lookup would have nowhere to look. -->
+                    <controls:BrushCollection>
+                        <StaticResource ResourceKey="Graph.Fallthrough" />
+                        <StaticResource ResourceKey="Graph.Taken" />
+                        <StaticResource ResourceKey="Graph.Jump" />
+                        <StaticResource ResourceKey="Graph.Back" />
+                        <StaticResource ResourceKey="Graph.Switch" />
+                    </controls:BrushCollection>
+                </controls:GraphCanvas.EdgeBrushes>
+                <controls:GraphCanvas.ContextMenu>
+                    <ContextMenu DataContext="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource Self}}">
+                        <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding RenameSymbolCommand}" />
+                        <MenuItem Header="_Comment…" InputGestureText="Ctrl+;" Command="{Binding EditCommentCommand}" />
+                    </ContextMenu>
+                </controls:GraphCanvas.ContextMenu>
+            </controls:GraphCanvas>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="1" Text="{Binding Problem}" TextWrapping="Wrap" MaxWidth="420"
+                   HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center"
+                   Foreground="{DynamicResource Text.Tertiary}"
+                   Visibility="{Binding HasGraph, Converter={StaticResource InverseBoolToVisibility}}" />
+    </Grid>
+</UserControl>

@@ -707,7 +707,7 @@ public sealed partial class MainViewModel : ObservableObject
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
-            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit),
+            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph),
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
             ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
@@ -741,6 +741,55 @@ public sealed partial class MainViewModel : ObservableObject
         OpenFunctionSplit(analysis.GetOrDiscoverFunction(entry));
     }
 
+    /// <summary>Opens the control-flow graph of the function the active document is about.</summary>
+    [RelayCommand]
+    private void OpenGraph()
+    {
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        ulong? va = (ActiveDocument as ICaretContext)?.OwningFunctionVa ?? ActiveDocument?.Address;
+        if (va is not { } entry)
+        {
+            StatusText = "Open a function first: the graph shows one function's control flow.";
+            return;
+        }
+
+        OpenFunctionGraph(analysis.GetOrDiscoverFunction(entry));
+    }
+
+    private void OpenFunctionGraph(Function f)
+    {
+        if (Binary?.Analysis is not { } a)
+        {
+            return;
+        }
+
+        var doc = Find($"graph:{f.EntryVa:X}")
+                  ?? GraphDocumentViewModel.For(a, f, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f, _dialogs);
+        Show(doc);
+        Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
+    }
+
+    /// <summary>
+    /// Double-clicking a block in the graph opens the listing for the function it belongs to. The graph
+    /// is for the shape of the function; reading the instructions properly is what the listing is for.
+    /// </summary>
+    [RelayCommand]
+    private void OpenBlock(ulong va)
+    {
+        if (Binary?.Analysis is not { } analysis || ActiveDocument is not GraphDocumentViewModel graph
+            || graph.OwningFunctionVa is not { } entry)
+        {
+            return;
+        }
+
+        _ = va;   // the block is already selected, which is what the Xrefs panel follows
+        OpenFunctionDisassembly(analysis.GetOrDiscoverFunction(entry));
+    }
+
     /// <summary>Opens the function in both views at once, each following the other.</summary>
     private void OpenFunctionSplit(Function f)
     {
@@ -760,7 +809,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Binary?.Analysis is { } a)
         {
             var doc = Find($"disasm:{f.EntryVa:X}")
-                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit);
+                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph);
             Show(doc);
             Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
         }

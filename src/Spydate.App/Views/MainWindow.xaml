@@ -33,6 +33,7 @@
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
         <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding NavigateForwardCommand}" />
         <KeyBinding Key="F6" Command="{Binding OpenSideBySideCommand}" />
+        <KeyBinding Key="F7" Command="{Binding OpenGraphCommand}" />
     </Window.InputBindings>
 
     <Grid>
@@ -80,6 +81,8 @@
                     <Separator />
                     <MenuItem Header="_Side by side" InputGestureText="F6" Command="{Binding OpenSideBySideCommand}"
                               ToolTip="Show this function's disassembly and pseudo-C together, each following the other" />
+                    <MenuItem Header="Control-flow _graph" InputGestureText="F7" Command="{Binding OpenGraphCommand}"
+                              ToolTip="Draw this function as basic blocks and the edges between them" />
                     <Separator />
                     <MenuItem Header="Close _tab" InputGestureText="Ctrl+W" Command="{Binding CloseActiveDocumentCommand}" />
                     <MenuItem Header="Close all tabs" Command="{Binding CloseAllDocumentsCommand}" />

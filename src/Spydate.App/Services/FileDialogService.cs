@@ -14,6 +14,9 @@ public interface IFileDialogService
     /// string: empty means "clear it".
     /// </summary>
     string? AskForText(string title, string label, string? hint = null, string? initial = null);
+
+    /// <summary>Asks where to write a file; returns the chosen path or null.</summary>
+    string? SaveFile(string title, string filter, string suggestedName);
 }
 
 public sealed class FileDialogService : IFileDialogService
@@ -38,5 +41,18 @@ public sealed class FileDialogService : IFileDialogService
         };
 
         return prompt.ShowDialog() == true ? prompt.Value : null;
+    }
+
+    public string? SaveFile(string title, string filter, string suggestedName)
+    {
+        var dialog = new SaveFileDialog
+        {
+            Title = title,
+            Filter = filter,
+            FileName = suggestedName,
+            OverwritePrompt = true,
+        };
+
+        return dialog.ShowDialog() == true ? dialog.FileName : null;
     }
 }

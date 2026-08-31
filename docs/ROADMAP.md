@@ -104,7 +104,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
   pretending a vector is a number (notepad x86: 202 → 162 unlifted instructions)
 
 ## Phase 3 — UI 🚧
-- ⬜ CFG graph view (basic blocks as nodes)
+- ✅ Control-flow graph (F7, or View ▸ Control-flow graph): a box per basic block
+  laid out with the entry at the top and control running downwards, edges coloured by
+  how control got there — fall-through, branch taken, jump, loop, switch arm. Clicking
+  a block points the Xrefs panel at it and lets it be renamed or commented like any
+  other address; Ctrl+scroll zooms; "Export SVG" writes the same drawing to a file.
+  A function past 600 blocks says so instead of drawing something unreadable
 - ✅ Navigation history: back and forward over everywhere you have been, with the
   next stop named in the tooltip. A closed tab is reopened from what it was, so
   going back does not dead-end

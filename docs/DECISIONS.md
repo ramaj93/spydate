@@ -93,6 +93,51 @@ Two things would make it viable, and either is worth doing before the table is:
 Until then argument *values* are shown, which is what the recovery can prove,
 and the parameter names are left out.
 
+## The control-flow graph is laid out in Core, not in the window
+
+The graph view is drawn in a document tab, and nothing inside a document tab is
+visible to UI Automation — the only way anything in this window can be inspected
+from outside it. Screenshots do not work either: the desktop renders as a flat
+colour and `PrintWindow` returns blank.
+
+So the split is drawn on purpose. `Spydate.Core.Graph` takes node sizes and edges
+and returns rectangles and polylines; it knows nothing about functions, blocks,
+instructions or fonts. The WPF control does nothing but put ink on the geometry it
+is handed.
+
+That puts every question with a right answer on the testable side:
+
+- no two boxes overlap, so no block is hidden or unclickable;
+- an edge begins on the block it leaves and ends on the block it reaches, so an
+  arrowhead always points at a box;
+- no edge passes through a box it is not attached to;
+- forward edges run downwards;
+- the same graph is always drawn the same way, so a block does not move out from
+  under the pointer between redraws.
+
+These are asserted over every function of both notepads, not just over made-up
+examples. What remains unverifiable is whether the ink appears — and for that the
+same geometry is rendered to SVG, which can be opened and looked at.
+
+## A loop edge is drawn round the side, not through the layers
+
+Ranking a layered drawing needs an acyclic graph, so the back edges a depth-first
+walk finds have to come out before ranking either way. The usual next step is to put
+them back in reversed, let them take part in ordering, and un-reverse the route at
+the end.
+
+Spydate does not. A reversed back edge is laid out from the loop header *down* to the
+block that jumps back, so un-reversing it produces a line that leaves the **top** of
+the block it comes from. That is geometrically consistent and reads wrongly: control
+leaves the *end* of a block, and a loop is the one place a reader is specifically
+looking for where it goes back to.
+
+Instead each loop edge gets a channel down the left of the drawing and is routed out
+of the bottom of its source, along the band below that layer, up the channel, and
+into the top of the header. The cost is a wider drawing when a function has many
+loops, and lines that are longer than they would otherwise be. What it buys is that
+the picture says what the code does.
+
 ## Import signatures are read from the DLLs, not from a table
 
 The first of the two options above is now what Spydate does, and the table is

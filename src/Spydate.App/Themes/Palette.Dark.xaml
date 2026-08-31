@@ -83,6 +83,18 @@
     <SolidColorBrush x:Key="Semantic.Ascii" Color="#4EC9B0" />
     <SolidColorBrush x:Key="Semantic.Address" Color="#858585" />
 
+    <!-- Control-flow graph. Edge colours say how control got there, not what it is. -->
+    <SolidColorBrush x:Key="Graph.Background" Color="#1B1B1F" />
+    <SolidColorBrush x:Key="Graph.Node" Color="#242429" />
+    <SolidColorBrush x:Key="Graph.NodeBorder" Color="#3A3A42" />
+    <SolidColorBrush x:Key="Graph.Entry" Color="#6AA9FF" />
+    <SolidColorBrush x:Key="Graph.Selected" Color="#DCDCAA" />
+    <SolidColorBrush x:Key="Graph.Fallthrough" Color="#8A8A96" />
+    <SolidColorBrush x:Key="Graph.Taken" Color="#5FBF72" />
+    <SolidColorBrush x:Key="Graph.Jump" Color="#6AA9FF" />
+    <SolidColorBrush x:Key="Graph.Back" Color="#D08A4A" />
+    <SolidColorBrush x:Key="Graph.Switch" Color="#B07AD0" />
+
     <!-- Code surfaces (AvalonEdit) -->
     <SolidColorBrush x:Key="Editor.Background" Color="#1E1E1E" />
     <SolidColorBrush x:Key="Editor.Foreground" Color="#D4D4D4" />

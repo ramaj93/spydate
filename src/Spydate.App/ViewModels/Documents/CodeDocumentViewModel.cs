@@ -84,7 +84,12 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
     // Factories
     // ------------------------------------------------------------------
 
-    public static CodeDocumentViewModel ForFunctionDisassembly(BinaryAnalysis analysis, Function function, Action<Function>? openPseudoC, Action<Function>? openSplit = null)
+    public static CodeDocumentViewModel ForFunctionDisassembly(
+        BinaryAnalysis analysis,
+        Function function,
+        Action<Function>? openPseudoC,
+        Action<Function>? openSplit = null,
+        Action<Function>? openGraph = null)
     {
         var actions = new List<CodeAction>();
         if (openPseudoC is not null)
@@ -95,6 +100,11 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
         if (openSplit is not null)
         {
             actions.Add(new CodeAction("Side by side", SymbolRegular.SplitHorizontal24, () => openSplit(function)));
+        }
+
+        if (openGraph is not null)
+        {
+            actions.Add(new CodeAction("Graph", SymbolRegular.Flowchart24, () => openGraph(function)));
         }
 
         return new CodeDocumentViewModel(

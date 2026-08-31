@@ -116,6 +116,11 @@ Type → Member** nodes that open C#/IL documents.
 - Decompilation and metadata loading run in `Task.Run`; the document shows
   "working…" and the status bar shows an indeterminate 2px bar.
 - Trees, grids and the output list are virtualized (`VirtualizationMode=Recycling`).
+- The graph is drawn directly into a `DrawingContext` rather than as a control per
+  block: a few hundred blocks of thirty instructions is tens of thousands of runs of
+  text. Only what the scroller says is on screen is built, and below 45% zoom the
+  text is dropped entirely — it could not be read at that size anyway. Laying out a
+  111-block function takes about 40 ms, and it happens off the UI thread.
 
 ## 6. Keyboard
 
@@ -130,6 +135,13 @@ Type → Member** nodes that open C#/IL documents.
   line ends with one. An instruction with no line of its own (the passes fold most
   of them away) resolves to the last statement at or before it, which is the one it
   ended up inside.
+- `F7` draws the current function as a control-flow graph: a box per basic block,
+  entry at the top, control downwards. Edge colour says how control got there —
+  grey fall-through, green branch taken, blue jump, orange the edge that closes a
+  loop, purple a switch arm — because that is the distinction a listing makes you
+  work out. Clicking a block selects it, which is what the Xrefs panel and the
+  naming commands follow; double-clicking opens the listing, since the graph is for
+  the shape of a function and the listing is for reading it. `Ctrl`+scroll zooms.
 - `F2` rename · `Ctrl+;` comment · `Ctrl+S` save the project. Rename and comment
   act on what the caret is on: a stack slot (`arg_0`, `local_18`) when it is one,
   then the name under the caret (so a callee can be renamed from the code that calls
@@ -157,4 +169,9 @@ otherwise, and is exactly the kind of bug the window cannot show you.
 - The Strings view hides hits in executable sections by default (they are mostly
   instruction bytes) and can be narrowed to strings some instruction points at.
 - Toolbar/menu items expose `AutomationProperties.Name`, but buttons inside
-  document toolbars do not yet appear in the UI Automation tree.
+  document toolbars do not yet appear in the UI Automation tree. Nothing inside a
+  document does, in fact — which is why anything worth verifying is kept out of the
+  window (see `Spydate.Core.Graph`, `Spydate.Core.Text`).
+- The graph does not lay out a function past 600 blocks; it says so and points at
+  the listing. Notepad's largest function is 1620 blocks, which would be a drawing
+  70,000 by 210,000 pixels.
