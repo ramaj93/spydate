@@ -54,7 +54,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Authenticode summary: the certificate table decoded to signer, issuer, serial,
   digest algorithm, validity window and RFC 3161 timestamp (described, not verified)
 
-## Phase 2 — Decompiler quality 🚧
+## Phase 2 — Decompiler quality ✅
 - ✅ Cross-block propagation: values every predecessor agrees on reach a block from
   outside it, so a register set in one block reads as its value in the next. Only
   values that cannot change behind the analysis (constants, registers, frame
