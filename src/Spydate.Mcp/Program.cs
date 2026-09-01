@@ -1,6 +1,8 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Spydate.Core.PE;
+using Spydate.Mcp.Session;
 
 namespace Spydate.Mcp;
 
@@ -24,12 +26,35 @@ internal static class Program
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 
+        var options = McpOptions.Parse(args);
+        builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton<SessionStore>();
         builder.Services
-            .AddMcpServer(options => options.ServerInfo = new() { Name = "spydate", Version = ThisVersion })
+            .AddMcpServer(server => server.ServerInfo = new() { Name = "spydate", Version = ThisVersion })
             .WithStdioServerTransport()
             .WithToolsFromAssembly();
 
-        await builder.Build().RunAsync().ConfigureAwait(false);
+        var host = builder.Build();
+
+        // A binary named on the command line is opened before the first tool call, so a client
+        // configured for one program does not have to be told about it again.
+        if (options.OpenAtStartup is { } path && options.Allows(path) && File.Exists(path))
+        {
+            try
+            {
+                host.Services.GetRequiredService<SessionStore>().Set(BinarySession.Open(path, options));
+            }
+            catch (Exception ex) when (ex is PeParseException or IOException or UnauthorizedAccessException)
+            {
+                // Reported through stderr by the logger; the server still starts, and open_binary
+                // works, so a bad path in a client's configuration is not fatal to the session.
+                host.Services.GetRequiredService<ILoggerFactory>()
+                    .CreateLogger(nameof(Program))
+                    .LogWarning("could not open {Path}: {Message}", path, ex.Message);
+            }
+        }
+
+        await host.RunAsync().ConfigureAwait(false);
         return 0;
     }
 
