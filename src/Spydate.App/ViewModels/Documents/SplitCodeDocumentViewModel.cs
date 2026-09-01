@@ -42,7 +42,7 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
         {
             var latest = current();
             var decompiled = decompiler.Decompile(latest);
-            return (CodeDocumentViewModel.FormatFunctionText(analysis, latest), decompiled.Text, decompiled.Warnings);
+            return (AsmListing.ForFunction(analysis, latest), decompiled.Text, decompiled.Warnings);
         });
     }
 
