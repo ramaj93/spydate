@@ -530,6 +530,9 @@ public sealed partial class MainViewModel : ObservableObject
 
             OpenTarget(new OverviewTarget());
 
+            // The assistant and any MCP client write into this same store, so the tab follows what
+            // they do rather than only what the menus do.
+            opened.Patches.Changed += (_, _) => Application.Current?.Dispatcher.Invoke(RefreshPatches);
             RefreshPatches();
 
             // Recorded only once it has opened, so a file that turns out not to be a PE does not

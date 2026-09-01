@@ -1,3 +1,6 @@
+using Spydate.Mcp;
+using Spydate.Mcp.Session;
+using Spydate.Mcp.Tools;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Disassembly;
@@ -693,5 +696,138 @@ public sealed class PatchedListingTests
         // others are the middle of one instruction and have nothing of their own to say.
         int becomes = marked.Split('\n').Count(l => l.Contains("mov", StringComparison.OrdinalIgnoreCase) && l.Contains("PATCHED", StringComparison.Ordinal));
         Assert.Equal(1, becomes);
+    }
+}
+
+/// <summary>The patch tools an agent sees.</summary>
+public sealed class McpPatchToolTests
+{
+    private static (PatchTools Tools, BinarySession Session) Open(bool readOnly = false)
+    {
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        var store = new SessionStore();
+        var session = new BinarySession(
+            Corpus.NotepadX64,
+            Corpus.Image(Corpus.NotepadX64),
+            analysis,
+            null,
+            new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero),
+            save: (_, _) => null);           // no project file is written in a test run
+        store.Set(session);
+
+        var options = readOnly ? McpOptions.Default with { ReadOnly = true } : McpOptions.Default;
+        return (new PatchTools(store, options), session);
+    }
+
+    [Fact]
+    public void AnAgentCanRecordAPatchAndReadItBack()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var (tools, session) = Open();
+        ulong va = session.Image.RvaToVa(session.Image.EntryPointRva);
+
+        string result = tools.Patch($"0x{va:X}", "xor eax, eax; ret", "the licence check always passes");
+
+        Assert.Contains("patched", result, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, session.Patches.Count);
+
+        // Stamped as the agent's, the same way a name it gives is, so a person can tell them apart.
+        Assert.Equal(AnnotationSource.Agent, session.Patches.Snapshot()[0].Source);
+
+        string listed = tools.ListPatches();
+        Assert.Contains("licence check", listed, StringComparison.Ordinal);
+        Assert.Contains($"0x{va:X}", listed, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ItSaysPlainlyThatNothingIsWrittenToABinary()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var (tools, session) = Open();
+        ulong va = session.Image.RvaToVa(session.Image.EntryPointRva);
+
+        // The one property that makes pointing an agent at a hostile executable reasonable. If this
+        // ever stops being true, this test is the place it should fail.
+        string result = tools.Patch($"0x{va:X}", "nop");
+
+        Assert.Contains("Nothing is written to any binary", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ThereIsNoToolThatWritesAPatchedBinary()
+    {
+        var names = typeof(PatchTools).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolTypeAttribute), false).Length > 0)
+            .SelectMany(t => t.GetMethods())
+            .Select(m => (m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false)
+                .FirstOrDefault() as ModelContextProtocol.Server.McpServerToolAttribute)?.Name)
+            .OfType<string>()
+            .ToList();
+
+        Assert.Contains("patch", names);
+        Assert.DoesNotContain(names, n => n.Contains("save_patched", StringComparison.Ordinal)
+                                          || n.Contains("write_binary", StringComparison.Ordinal)
+                                          || n.Contains("apply_patch", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ReadOnlyRefusesToRecordOrRevert()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var (tools, session) = Open(readOnly: true);
+        ulong va = session.Image.RvaToVa(session.Image.EntryPointRva);
+
+        Assert.Contains("--read-only", tools.Patch($"0x{va:X}", "nop"), StringComparison.Ordinal);
+        Assert.Contains("--read-only", tools.RevertPatch($"0x{va:X}"), StringComparison.Ordinal);
+        Assert.Equal(0, session.Patches.Count);
+    }
+
+    [Fact]
+    public void APatchIsRevertedFromAnywhereInsideIt()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var (tools, session) = Open();
+        ulong va = session.Image.RvaToVa(session.Image.EntryPointRva);
+        tools.Patch($"0x{va:X}", "nop");
+
+        var patch = session.Patches.Snapshot()[0];
+        Assert.True(patch.Length > 1, "expected a patch covering more than one byte");
+
+        // An address read off a listing may be the middle of a patched run.
+        string result = tools.RevertPatch($"0x{va + 1:X}");
+
+        Assert.Contains("reverted", result, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, session.Patches.Count);
+    }
+
+    [Fact]
+    public void NonsenseIsExplainedRatherThanRecorded()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var (tools, session) = Open();
+        ulong va = session.Image.RvaToVa(session.Image.EntryPointRva);
+
+        Assert.Contains("bytes:", tools.Patch($"0x{va:X}", "frobnicate rax"), StringComparison.Ordinal);
+        Assert.Equal(0, session.Patches.Count);
     }
 }

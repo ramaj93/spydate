@@ -344,7 +344,13 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             binary.Image,
             binary.Analysis,
             binary.Project,
-            new DiscoveryState(binary.Analysis!.FunctionCount, true, TimeSpan.Zero)));
+            new DiscoveryState(binary.Analysis!.FunctionCount, true, TimeSpan.Zero),
+            save: null,
+
+            // The window's own store, so a patch the assistant records appears in the Patches tab
+            // rather than in a copy nobody is looking at — the same reason it works on the window's
+            // analysis rather than re-reading the file.
+            patches: binary.Patches));
 
         var provider = Settings.ToProviderSettings();
         _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, McpOptions.Default, provider);

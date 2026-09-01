@@ -44,11 +44,13 @@ public sealed class BinarySession : IDisposable
         BinaryAnalysis? analysis,
         ProjectLoadResult? project,
         DiscoveryState discovery,
-        Func<PeImage, AnnotationStore, string?>? save = null)
+        Func<PeImage, AnnotationStore, string?>? save = null,
+        PatchStore? patches = null)
     {
         // A lambda rather than the method group: SpydateProject.Save takes an optional patch store
         // now, and a group with a defaulted parameter no longer converts on its own.
-        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations));
+        Patches = patches ?? new PatchStore();
+        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations, Patches));
         Path = path;
         Image = image;
         Analysis = analysis;
@@ -76,6 +78,9 @@ public sealed class BinarySession : IDisposable
     public ProjectLoadResult? Project { get; }
 
     public DiscoveryState Discovery { get; }
+
+    /// <summary>Byte changes recorded against this image. Never written to any binary from here.</summary>
+    public PatchStore Patches { get; }
 
     /// <summary>Writes the annotations out, returning where they went.</summary>
     public Func<PeImage, AnnotationStore, string?> Save { get; }
