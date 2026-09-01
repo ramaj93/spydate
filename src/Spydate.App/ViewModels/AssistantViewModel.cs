@@ -33,6 +33,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private readonly WorkspaceService _workspace;
     private readonly ISecretStore _secrets;
     private readonly IFileDialogService _dialogs;
+    private Views.ProviderSettingsWindow? _providerDialog;
     private AnalysisAgent? _agent;
     private SessionStore? _session;
     private CancellationTokenSource? _turn;
@@ -133,21 +134,48 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         UpdateStatus();
     }
 
-    /// <summary>Asks for a provider, a model and a key, and remembers all but the key in plain text.</summary>
-    [RelayCommand]
+    /// <summary>
+    /// Asks for a provider, a model and a key, and remembers all but the key in plain text.
+    ///
+    /// There are two ways in — the panel's button and the View menu — with one command behind both,
+    /// so this refuses to open a second copy and brings the open one forward instead. Modality is
+    /// not enough on its own to rely on: it turns on the owner being set, and two dialogs saving the
+    /// same settings is worth ruling out outright rather than by argument.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanConfigure))]
     private void Configure()
     {
-        var window = new Views.ProviderSettingsWindow(Settings, _secrets) { Owner = Application.Current?.MainWindow };
-        if (window.ShowDialog() != true)
+        if (_providerDialog is { } already)
         {
+            already.Activate();
             return;
         }
 
-        Settings = window.Result;
-        Settings.Save();
-        StartOver();
-        Add("tool", $"Using {Settings.Provider} / {Settings.Model}.");
+        var window = new Views.ProviderSettingsWindow(Settings, _secrets) { Owner = Application.Current?.MainWindow };
+        _providerDialog = window;
+        ConfigureCommand.NotifyCanExecuteChanged();
+
+        try
+        {
+            if (window.ShowDialog() != true)
+            {
+                return;
+            }
+
+            Settings = window.Result;
+            Settings.Save();
+            StartOver();
+            Add("tool", $"Using {Settings.Provider} / {Settings.Model}.");
+        }
+        finally
+        {
+            _providerDialog = null;
+            ConfigureCommand.NotifyCanExecuteChanged();
+        }
     }
+
+    /// <summary>False while the dialog is open, so both ways in show as unavailable.</summary>
+    private bool CanConfigure() => _providerDialog is null;
 
     private AnalysisAgent Agent()
     {

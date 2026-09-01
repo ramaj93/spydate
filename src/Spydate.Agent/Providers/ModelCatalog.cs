@@ -34,6 +34,9 @@ public static class ModelCatalog
 
     private const string AnthropicVersion = "2023-06-01";
 
+    /// <summary>How much of a provider's complaint is worth repeating.</summary>
+    private const int MaxDetailChars = 120;
+
     public static async Task<ModelListResult> ListAsync(
         ProviderSettings settings,
         string? apiKey,
@@ -138,7 +141,9 @@ public static class ModelCatalog
             return string.Empty;
         }
 
+        // A line of status, not a transcript: enough to name the complaint, short enough that it does
+        // not become the largest thing in the dialog that shows it.
         string line = body.Trim().ReplaceLineEndings(" ");
-        return $": {(line.Length > 160 ? line[..160] + "..." : line)}";
+        return $": {(line.Length > MaxDetailChars ? line[..MaxDetailChars] + "..." : line)}";
     }
 }

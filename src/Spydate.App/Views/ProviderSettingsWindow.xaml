@@ -16,6 +16,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
@@ -42,20 +43,33 @@
         <PasswordBox x:Name="KeyBox" Grid.Row="2" Grid.Column="1" Margin="0,0,0,8" />
 
         <TextBlock Grid.Row="3" Grid.Column="0" Text="Endpoint" VerticalAlignment="Center" Margin="0,0,10,4" />
-        <TextBox x:Name="EndpointBox" Grid.Row="3" Grid.Column="1" Margin="0,0,0,4" />
+        <TextBox x:Name="EndpointBox" Grid.Row="3" Grid.Column="1" Margin="0,0,0,4"
+                 AutomationProperties.Name="Endpoint" />
 
         <TextBlock Grid.Row="4" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="Leave the endpoint empty unless you are going through a proxy or a compatible server." />
 
-        <TextBlock x:Name="ModelStatus" Grid.Row="4" Grid.Column="0" VerticalAlignment="Top" Margin="0,0,10,0"
-                   TextWrapping="Wrap" Foreground="{DynamicResource Text.Tertiary}" />
+        <!-- Across both columns, and not in the label column. That one is Auto-width, which measures
+             at infinite width, so TextWrapping there does nothing: a provider's error would lay out
+             on one line, widen the column past the whole dialog, squeeze the star column to nothing
+             and leave the hint above wrapping one word per line.
 
-        <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
+             The height is fixed rather than capped, so the space is reserved whether or not there is
+             anything to say. The window is SizeToContent, and a status line that appears out of
+             nothing moves every control below it — including the buttons, at the moment someone is
+             reaching for them. A long message scrolls inside this box instead. -->
+        <ScrollViewer Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Height="52" Margin="0,0,0,10"
+                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <TextBlock x:Name="ModelStatus" TextWrapping="Wrap"
+                       Foreground="{DynamicResource Text.Tertiary}" />
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="The key is encrypted to your Windows account and kept apart from these settings, so it is not in any file you might share. It is sent only to the provider above. Everything the assistant reads comes from the binary you have open — treat what it reports the way you would treat the binary itself." />
 
-        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Forget key" Width="92" Margin="0,0,8,0" Click="OnForgetClick" />
             <Button Content="Cancel" Width="80" Margin="0,0,8,0" IsCancel="True" />
             <Button Content="Save" Width="80" IsDefault="True" Click="OnSaveClick" />
