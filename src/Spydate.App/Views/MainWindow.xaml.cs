@@ -1,6 +1,10 @@
+using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.ViewModels;
 using Wpf.Ui.Controls;
@@ -28,9 +32,23 @@ public partial class MainWindow : FluentWindow
         InitializeComponent();
         _viewModel.Output.CollectionChanged += (_, _) => ScrollOutputToEnd();
 
+        _viewModel.Assistant.Transcript.CollectionChanged += (_, e) => OnTranscriptChanged(e);
+
         // Not CollectionChanged: an answer streams into a line that is already in the list, so the
         // transcript grows without the collection changing at all.
-        _viewModel.Assistant.Advancing += (_, _) => ScrollAssistantToEnd();
+        _viewModel.Assistant.Advancing += (_, _) => RedrawStreamingLine();
+        _viewModel.Assistant.TurnFinished += (_, _) => FinishStreamingLine();
+
+        // A restored conversation is loaded while the Output tab is the one showing, so the
+        // transcript has never been laid out and there is nothing to scroll. Without this it opens
+        // at the top of a conversation whose newest line is the point of opening it.
+        AssistantTranscript.IsVisibleChanged += (_, e) =>
+        {
+            if (e.NewValue is true)
+            {
+                ScrollAssistantToEnd();
+            }
+        };
     }
 
     /// <summary>Ctrl+G: focus the go-to box.</summary>
@@ -140,13 +158,121 @@ public partial class MainWindow : FluentWindow
         }
     }
 
-    private void ScrollAssistantToEnd()
+    // ------------------------------------------------------------------
+    // Assistant transcript
+    //
+    // The document is built here rather than bound, because a transcript is one flowing document —
+    // that is what makes it selectable across messages and scrollable by content rather than by
+    // item. The view model still owns the lines; this only draws them.
+    // ------------------------------------------------------------------
+
+    /// <summary>How many blocks the line being streamed into currently occupies, so it can be redrawn.</summary>
+    private int _streamingBlocks;
+
+    private void OnTranscriptChanged(NotifyCollectionChangedEventArgs e)
     {
-        if (AssistantTranscript.Items.Count > 0)
+        if (e.Action == NotifyCollectionChangedAction.Reset)
         {
-            AssistantTranscript.ScrollIntoView(AssistantTranscript.Items[^1]);
+            AssistantTranscript.Document.Blocks.Clear();
+            _streamingBlocks = 0;
+            return;
+        }
+
+        foreach (ViewModels.AssistantLine line in e.NewItems?.OfType<ViewModels.AssistantLine>() ?? [])
+        {
+            // A new line means the previous one is finished, whatever it was.
+            _streamingBlocks = 0;
+            Append(line);
+        }
+
+        ScrollAssistantToEnd();
+    }
+
+    /// <summary>The last line grew. Redraw just that line, as plain text while it is still arriving.</summary>
+    private void RedrawStreamingLine()
+    {
+        if (_streamingBlocks == 0 || _viewModel.Assistant.Transcript.Count == 0)
+        {
+            return;
+        }
+
+        var line = _viewModel.Assistant.Transcript[^1];
+        RemoveLastBlocks(_streamingBlocks);
+        _streamingBlocks = Add(MarkdownFlow.Plain(line.Text), line);
+        ScrollAssistantToEnd();
+    }
+
+    /// <summary>The turn ended: draw the answer properly, now that all of it is known.</summary>
+    private void FinishStreamingLine()
+    {
+        if (_streamingBlocks == 0 || _viewModel.Assistant.Transcript.Count == 0)
+        {
+            return;
+        }
+
+        var line = _viewModel.Assistant.Transcript[^1];
+        RemoveLastBlocks(_streamingBlocks);
+        _streamingBlocks = 0;
+        Append(line);
+        ScrollAssistantToEnd();
+    }
+
+    private void Append(ViewModels.AssistantLine line)
+    {
+        int count = Add(Blocks(line), line);
+        if (line.Kind == "assistant" && _viewModel.Assistant.IsBusy)
+        {
+            _streamingBlocks = count;
         }
     }
+
+    private static IEnumerable<Block> Blocks(ViewModels.AssistantLine line) => line.Kind switch
+    {
+        "tool" => MarkdownFlow.Tool(line.Text),
+        "note" => MarkdownFlow.Note(line.Text),
+        "assistant" => MarkdownFlow.Render(line.Text),
+        _ => MarkdownFlow.Plain(line.Text),
+    };
+
+    private int Add(IEnumerable<Block> blocks, ViewModels.AssistantLine line)
+    {
+        int count = 0;
+        foreach (var block in blocks)
+        {
+            if (line.IsYou)
+            {
+                block.Foreground = (Brush)FindResource("Accent.Hover");
+                block.FontWeight = FontWeights.SemiBold;
+            }
+            else if (line.IsProblem)
+            {
+                block.Foreground = (Brush)FindResource("Semantic.Error");
+            }
+
+            AssistantTranscript.Document.Blocks.Add(block);
+            count++;
+        }
+
+        return count;
+    }
+
+    private void RemoveLastBlocks(int count)
+    {
+        for (int i = 0; i < count && AssistantTranscript.Document.Blocks.LastBlock is { } last; i++)
+        {
+            AssistantTranscript.Document.Blocks.Remove(last);
+        }
+    }
+
+    /// <summary>
+    /// After layout, not during it. Blocks have just been added and the document has not been
+    /// measured yet, so scrolling now scrolls to the end of what was there a moment ago — which for
+    /// a restored conversation means sitting at the top of it, and for a streaming answer means
+    /// falling steadily further behind.
+    /// </summary>
+    private void ScrollAssistantToEnd() => Dispatcher.BeginInvoke(
+        DispatcherPriority.Background,
+        new Action(() => AssistantTranscript.ScrollToEnd()));
 
     // ------------------------------------------------------------------
     // Menu / window plumbing

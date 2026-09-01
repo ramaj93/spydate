@@ -346,33 +346,19 @@
                                         </DockPanel>
                                     </Border>
 
-                                    <ListBox Grid.Row="1" x:Name="AssistantTranscript" ItemsSource="{Binding Transcript}"
-                                             HorizontalContentAlignment="Stretch"
-                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                                        <ListBox.ItemTemplate>
-                                            <DataTemplate>
-                                                <TextBlock Text="{Binding Text}" TextWrapping="Wrap" Margin="0,1">
-                                                    <TextBlock.Style>
-                                                        <Style TargetType="TextBlock">
-                                                            <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
-                                                            <Style.Triggers>
-                                                                <DataTrigger Binding="{Binding IsYou}" Value="True">
-                                                                    <Setter Property="Foreground" Value="{DynamicResource Accent.Hover}" />
-                                                                </DataTrigger>
-                                                                <DataTrigger Binding="{Binding IsTool}" Value="True">
-                                                                    <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
-                                                                    <Setter Property="FontFamily" Value="{DynamicResource Mono.FontFamily}" />
-                                                                </DataTrigger>
-                                                                <DataTrigger Binding="{Binding IsProblem}" Value="True">
-                                                                    <Setter Property="Foreground" Value="{DynamicResource Semantic.Error}" />
-                                                                </DataTrigger>
-                                                            </Style.Triggers>
-                                                        </Style>
-                                                    </TextBlock.Style>
-                                                </TextBlock>
-                                            </DataTemplate>
-                                        </ListBox.ItemTemplate>
-                                    </ListBox>
+                                    <!-- A read-only RichTextBox rather than a list of TextBlocks: an
+                                         answer needs headings, code and lists to be readable, and
+                                         needs to be selectable so it can be copied out. It also
+                                         scrolls by content rather than by item, which a transcript
+                                         of wrapped variable-height paragraphs never did reliably. -->
+                                    <RichTextBox Grid.Row="1" x:Name="AssistantTranscript"
+                                                 IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                                                 IsDocumentEnabled="False"
+                                                 BorderThickness="0" Background="Transparent" Padding="6,4"
+                                                 VerticalScrollBarVisibility="Auto"
+                                                 HorizontalScrollBarVisibility="Disabled"
+                                                 Foreground="{DynamicResource Text.Primary}"
+                                                 AutomationProperties.Name="Assistant transcript" />
 
                                     <DockPanel Grid.Row="2" Margin="4">
                                         <Button DockPanel.Dock="Right" Content="Stop" Width="60" Margin="4,0,0,0"

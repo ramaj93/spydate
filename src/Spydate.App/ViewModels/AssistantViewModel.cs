@@ -19,13 +19,16 @@ namespace Spydate.App.ViewModels;
 /// </summary>
 public sealed partial class AssistantLine : ObservableObject
 {
-    public AssistantLine(string kind, string text)
+    public AssistantLine(string kind, string text, DateTimeOffset? at = null)
     {
         Kind = kind;
         _text = text;
+        At = at ?? DateTimeOffset.Now;
     }
 
     public string Kind { get; }
+
+    public DateTimeOffset At { get; }
 
     [ObservableProperty]
     private string _text;
@@ -66,7 +69,9 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
         // A different binary is a different conversation: the old one refers to addresses that mean
         // nothing now, and carrying it over would have the model reason about the wrong program.
-        workspace.CurrentChanged += (_, _) => StartOver();
+        // What was said about the new one last time is read back in, which is not the same thing —
+        // see Recall.
+        workspace.CurrentChanged += (_, _) => OnBinaryChanged();
         UpdateStatus();
     }
 
@@ -173,8 +178,11 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             IsBusy = false;
             _turn?.Dispose();
             _turn = null;
+            _answer = null;
             AskCommand.NotifyCanExecuteChanged();
             UpdateStatus();
+            TurnFinished?.Invoke(this, EventArgs.Empty);
+            Remember();
         }
     }
 
@@ -186,11 +194,74 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void StartOver()
     {
+        ResetAgent();
+        Transcript.Clear();
+        Remember();            // nothing left to remember, so the stored log goes too
+        UpdateStatus();
+    }
+
+    private void ResetAgent()
+    {
         _agent?.Dispose();
         _agent = null;
         _session = null;
+        _answer = null;
+    }
+
+    private void OnBinaryChanged()
+    {
+        ResetAgent();
         Transcript.Clear();
+        Recall();
         UpdateStatus();
+    }
+
+    /// <summary>Where this binary's conversation is kept, or null when nothing is open.</summary>
+    private string? LogPath => _workspace.Current is { } binary
+        ? ChatLog.PathFor(binary.Image.Path ?? binary.Image.FileName)
+        : null;
+
+    /// <summary>
+    /// Writes the conversation out. Called at the end of every turn rather than on exit, because the
+    /// run that most needs its notes kept is the one that ends by crashing.
+    /// </summary>
+    private void Remember()
+    {
+        if (LogPath is { } path)
+        {
+            ChatLog.Save(path, Transcript
+                .Where(line => line.Kind != "note")
+                .Select(line => new ChatEntry { Kind = line.Kind, Text = line.Text, At = line.At }));
+        }
+    }
+
+    /// <summary>
+    /// Reads back what was said about this binary before.
+    ///
+    /// The model is not given any of it: a restored conversation is a record to read, not a memory
+    /// it can reason from, and the note says so. Quietly reloading it into the history would be the
+    /// worse choice — it would double the cost of every turn and let a stale conclusion from weeks
+    /// ago steer a fresh one, without anyone being told that is what happened.
+    /// </summary>
+    private void Recall()
+    {
+        if (LogPath is not { } path)
+        {
+            return;
+        }
+
+        var entries = ChatLog.Load(path);
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var entry in entries)
+        {
+            Transcript.Add(new AssistantLine(entry.Kind, entry.Text, entry.At));
+        }
+
+        Add("note", $"— {entries.Count} lines from {entries[^1].At.LocalDateTime:g}. Kept for you to read; the assistant does not remember them. —");
     }
 
     /// <summary>
@@ -223,8 +294,12 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
             Settings = window.Result;
             Settings.Save();
-            StartOver();
-            Add("tool", $"Using {Settings.Provider} / {Settings.Model}.");
+
+            // The agent goes, because the new provider knows nothing of the old conversation. What
+            // is on screen stays: it is a record, and changing model is no reason to destroy it.
+            ResetAgent();
+            UpdateStatus();
+            Add("note", $"— now using {Settings.Provider} / {Settings.Model}, with a fresh conversation —");
         }
         finally
         {
@@ -271,14 +346,21 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         return _agent;
     }
 
-    /// <summary>Raised whenever the transcript gains text, so the view can keep the end in sight.</summary>
+    /// <summary>Raised whenever the line being written into grows, so the view can redraw it.</summary>
     public event EventHandler? Advancing;
 
+    /// <summary>Raised when a turn ends, so the view can render the finished answer properly.</summary>
+    public event EventHandler? TurnFinished;
+
+    /// <summary>
+    /// A whole new line. This does not raise <see cref="Advancing"/>: that means "the last line got
+    /// longer", and the collection changing is signal enough on its own. Raising both had the view
+    /// draw every added line twice, once for each.
+    /// </summary>
     private AssistantLine Add(string kind, string text)
     {
         var line = new AssistantLine(kind, text);
         Transcript.Add(line);
-        Advanced();
         return line;
     }
 
