@@ -2,6 +2,16 @@ using System.Text;
 
 namespace Spydate.Core.Project;
 
+/// <summary>Who decided an annotation. Not a permission — a record, so a set of them can be reviewed.</summary>
+public enum AnnotationSource
+{
+    /// <summary>A person typed it. The default, including for files written before this existed.</summary>
+    User,
+
+    /// <summary>Something automated set it — today, an agent driving the MCP server.</summary>
+    Agent,
+}
+
 /// <summary>What the user has said about one address: what to call it, and what to note about it.</summary>
 public sealed record Annotation
 {
@@ -16,6 +26,15 @@ public sealed record Annotation
     /// They belong to the function rather than to an address of their own, which is also how they read.
     /// </summary>
     public IReadOnlyDictionary<string, string>? Locals { get; init; }
+
+    /// <summary>
+    /// Who set this. An agent naming forty callers after one misread function is a set worth being
+    /// able to list and undo, and that is only possible if the answer was recorded when it happened.
+    /// </summary>
+    public AnnotationSource Source { get; init; } = AnnotationSource.User;
+
+    /// <summary>When it was last set, UTC. Null for entries written before this was recorded.</summary>
+    public DateTimeOffset? Modified { get; init; }
 
     public bool IsEmpty => string.IsNullOrEmpty(Name) && string.IsNullOrEmpty(Comment) && Locals is not { Count: > 0 };
 }
@@ -37,7 +56,30 @@ public sealed class AnnotationStore
     public const int MaxNameLength = 255;
 
     private readonly SortedDictionary<ulong, Annotation> _byVa = new();
+    private readonly HashSet<ulong> _changed = new();
     private readonly Lock _lock = new();
+
+    /// <summary>
+    /// Stamped on everything this store writes. Set it once, before use: the window leaves it at
+    /// <see cref="AnnotationSource.User"/>, and the MCP server sets <see cref="AnnotationSource.Agent"/>.
+    /// </summary>
+    public AnnotationSource Source { get; set; } = AnnotationSource.User;
+
+    /// <summary>
+    /// Addresses this store has changed since it was last loaded or saved. It is what makes saving a
+    /// merge rather than an overwrite: everything else in the file on disk belongs to somebody else
+    /// and must survive.
+    /// </summary>
+    public IReadOnlyCollection<ulong> ChangedAddresses
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _changed.ToList();
+            }
+        }
+    }
 
     /// <summary>Raised after any change, including one that cleared an annotation.</summary>
     public event EventHandler<AnnotationChange>? Changed;
@@ -110,16 +152,30 @@ public sealed class AnnotationStore
     /// <summary>Sets or clears the comment at an address.</summary>
     public string? SetComment(ulong va, string? comment) => Update(va, a => a with { Comment = CleanComment(comment) })?.Comment;
 
+    /// <summary>
+    /// Replaces everything known about an address, provenance included. This is the shape loading a
+    /// project file wants — it is restoring what someone else recorded, not deciding it — so unlike
+    /// the setters above it does not stamp the store's own source over what it is given.
+    /// </summary>
     public void Set(ulong va, Annotation annotation)
     {
         ArgumentNullException.ThrowIfNull(annotation);
-        Update(va, _ => new Annotation
-        {
-            Name = CleanName(annotation.Name),
-            Comment = CleanComment(annotation.Comment),
-            Locals = CleanLocals(annotation.Locals),
-        });
+        Update(
+            va,
+            _ => new Annotation
+            {
+                Name = CleanName(annotation.Name),
+                Comment = CleanComment(annotation.Comment),
+                Locals = CleanLocals(annotation.Locals),
+                Source = annotation.Source,
+                Modified = annotation.Modified,
+            },
+            stamp: false);
     }
+
+    /// <summary>Every annotation a given source is responsible for, in address order.</summary>
+    public IReadOnlyList<KeyValuePair<ulong, Annotation>> SnapshotOf(AnnotationSource source)
+        => Snapshot().Where(e => e.Value.Source == source).ToList();
 
     /// <summary>Every annotation, in address order.</summary>
     public IReadOnlyList<KeyValuePair<ulong, Annotation>> Snapshot()
@@ -130,19 +186,42 @@ public sealed class AnnotationStore
         }
     }
 
+    /// <summary>
+    /// Forgets everything, announcing each removal. The announcement is the point: names reach the
+    /// symbol table through <see cref="Changed"/>, so clearing silently would leave every one of them
+    /// still showing in listings with nothing behind it.
+    /// </summary>
     public void Clear()
+    {
+        List<KeyValuePair<ulong, Annotation>> removed;
+        lock (_lock)
+        {
+            removed = _byVa.ToList();
+            _byVa.Clear();
+            _changed.Clear();
+            IsDirty = false;
+        }
+
+        foreach (var (va, before) in removed)
+        {
+            Changed?.Invoke(this, new AnnotationChange(va, before, null));
+        }
+    }
+
+    /// <summary>
+    /// Called after a successful save or load. Forgetting what changed is what makes the next save
+    /// merge against a file this store now agrees with.
+    /// </summary>
+    public void MarkSaved()
     {
         lock (_lock)
         {
-            _byVa.Clear();
+            _changed.Clear();
             IsDirty = false;
         }
     }
 
-    /// <summary>Called after a successful save.</summary>
-    public void MarkSaved() => IsDirty = false;
-
-    private Annotation? Update(ulong va, Func<Annotation, Annotation> change)
+    private Annotation? Update(ulong va, Func<Annotation, Annotation> change, bool stamp = true)
     {
         Annotation? before;
         Annotation? after;
@@ -150,6 +229,11 @@ public sealed class AnnotationStore
         {
             before = _byVa.TryGetValue(va, out var existing) ? existing : null;
             after = change(before ?? new Annotation());
+            if (stamp && !after.IsEmpty)
+            {
+                after = after with { Source = Source, Modified = DateTimeOffset.UtcNow };
+            }
+
             if (after.IsEmpty)
             {
                 after = null;
@@ -165,6 +249,7 @@ public sealed class AnnotationStore
                 return after;
             }
 
+            _changed.Add(va);
             IsDirty = true;
         }
 
@@ -200,7 +285,10 @@ public sealed class AnnotationStore
             return true;
         }
 
-        if (a is null || b is null || a.Name != b.Name || a.Comment != b.Comment)
+        // Source counts: a name a person retypes over an agent's is the same text but no longer the
+        // agent's, and a revert-what-the-agent-did should not take it back. Modified does not, or
+        // every no-op write would look like a change.
+        if (a is null || b is null || a.Name != b.Name || a.Comment != b.Comment || a.Source != b.Source)
         {
             return false;
         }
