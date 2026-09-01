@@ -14,9 +14,14 @@
 ## 2. Projects and layering
 
 ```
-┌──────────────────────────────┐  ┌───────────────────────────┐
-│ Spydate.App (net10.0-windows)│  │ Spydate.Mcp (net10.0, exe)│
-│  Views · ViewModels · Services│  │  MCP tools over stdio     │
+┌──────────────────────────────┐
+│ Spydate.App (net10.0-windows)│   Views · ViewModels · Services
+└───────────────▲──────────────┘
+                │
+┌───────────────┴──────────────┐  ┌───────────────────────────┐
+│ Spydate.Agent (net10.0)      │  │ Spydate.Mcp (net10.0, exe)│
+│  IChatClient · tool loop     │─▶│  the tools, over stdio     │
+│  secrets · provider settings │  │                           │
 └───────────────▲──────────────┘  └────────────▲──────────────┘
                 │                              │
                 └──────────────┬───────────────┘
@@ -45,6 +50,23 @@
 Rules: strictly downward references. Core knows nothing about Iced/ILSpy/WPF. `Spydate.Mcp` sits
 beside the app rather than under it: neither references the other, and they share a binary only
 through the `.spydate` project file.
+
+### `Spydate.Agent` — the assistant in the window
+
+The panel's engine: a provider, the tools, and the loop between them.
+
+It does not define tools of its own. `AnalysisAgent.ToolsFor` reflects over the
+same `[McpServerTool]` methods `Spydate.Mcp` publishes and wraps them as
+`AIFunction`s, so both hosts offer an identical surface. The difference is the
+session: this one wraps the analysis the window already has open, so a name the
+assistant gives appears in the documents at once instead of after a reload.
+
+Four providers behind one `IChatClient`. Three speak the OpenAI API and differ only
+by base URL; Anthropic's own SDK supplies the fourth. Keys are encrypted per
+account by `DpapiSecretStore` and kept in a different file from the settings.
+
+Everything here is a plain library on purpose — see DECISIONS.md. The WPF panel is
+a list, a text box and three buttons.
 
 ### `Spydate.Mcp` — the engine as agent tools
 

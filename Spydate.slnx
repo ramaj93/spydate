@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Spydate.Agent/Spydate.Agent.csproj" />
     <Project Path="src/Spydate.App/Spydate.App.csproj" />
     <Project Path="src/Spydate.Core/Spydate.Core.csproj" />
     <Project Path="src/Spydate.Decompiler/Spydate.Decompiler.csproj" />

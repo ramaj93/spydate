@@ -22,6 +22,15 @@ Drop in an `.exe`, `.dll` or `.sys` and Spydate will:
 
 ## Letting an agent help
 
+Two ways, sharing one set of tools.
+
+**In the window.** The Assistant panel, beside Output and Xrefs: choose a provider, paste a key, and
+ask. It works on the binary you already have open, so a name it gives appears in your documents at
+once. Bring your own key — OpenAI, OpenRouter, DeepSeek or Anthropic — and it is encrypted to your
+Windows account, kept in a different file from the settings so it cannot travel with them.
+
+**From your own agent**, over MCP:
+
 ```bash
 claude mcp add spydate -- dotnet run --project src/Spydate.Mcp
 ```

@@ -22,6 +22,7 @@
     <ProjectReference Include="..\Spydate.Core\Spydate.Core.csproj" />
     <ProjectReference Include="..\Spydate.Disassembly\Spydate.Disassembly.csproj" />
     <ProjectReference Include="..\Spydate.Decompiler\Spydate.Decompiler.csproj" />
+    <ProjectReference Include="..\Spydate.Agent\Spydate.Agent.csproj" />
   </ItemGroup>
 
   <ItemGroup>

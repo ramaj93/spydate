@@ -27,11 +27,12 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly WorkspaceService _workspace;
     private CancellationTokenSource? _analysisCts;
 
-    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace)
+    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant)
     {
         _dialogs = dialogs;
         workspace.ProjectChangedOnDisk += OnProjectChangedOnDisk;
         _workspace = workspace;
+        Assistant = assistant;
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
     }
@@ -39,6 +40,12 @@ public sealed partial class MainViewModel : ObservableObject
     // ------------------------------------------------------------------
     // State
     // ------------------------------------------------------------------
+
+    /// <summary>
+    /// The assistant panel. It works on the same analysis the documents do, so a name it gives
+    /// appears in them at once rather than after a reload.
+    /// </summary>
+    public AssistantViewModel Assistant { get; }
 
     public ObservableCollection<ExplorerNodeViewModel> Explorer { get; } = new();
 

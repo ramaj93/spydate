@@ -36,6 +36,21 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
   </ItemGroup>
 
+  <ItemGroup Label="Assistant">
+    <!--
+      One IChatClient abstraction over every provider, plus FunctionInvokingChatClient, which is the
+      tool-calling loop. Writing that loop by hand is where an assistant goes subtly wrong.
+    -->
+    <PackageVersion Include="Microsoft.Extensions.AI" Version="10.9.0" />
+    <!-- OpenAI-compatible endpoints: OpenAI itself, OpenRouter and DeepSeek differ only by base URL. -->
+    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.9.0" />
+    <PackageVersion Include="OpenAI" Version="2.12.0" />
+    <!-- Anthropic's own SDK, which ships an IChatClient of its own, so no hand-rolled HTTP. -->
+    <PackageVersion Include="Anthropic" Version="12.44.0" />
+    <!-- DPAPI, so an API key is encrypted to the Windows account rather than sitting in a file. -->
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
+  </ItemGroup>
+
   <ItemGroup Label="Testing">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />

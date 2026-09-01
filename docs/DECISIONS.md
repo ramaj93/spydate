@@ -238,3 +238,41 @@ rewrite is single-digit milliseconds.
 The trigger to revisit: **the day the project file holds a second kind of
 content** — types, structures, bookmarks, per-instruction comments, undo history.
 At that point the rows earn their keep and JSON stops being the right shape.
+
+## The assistant brings your key, and reuses the MCP tools rather than its own
+
+The panel in the window and the MCP server offer an agent exactly the same thirteen
+tools, discovered by the same reflection over the same attributes. A second copy
+would drift, and the half that drifted would be the one nobody was testing.
+
+What differs is what they act on. The server opens its own copy of a binary and
+shares state through the project file; the panel wraps the analysis the window
+already has, so a name it gives appears in the open documents at once, by the same
+path a name typed by hand takes.
+
+**Bring your own key.** Four providers, no default and none bundled. Three of them
+— OpenAI, OpenRouter, DeepSeek — speak the same API and differ only by base URL, so
+they share one client and the difference is a string. Anthropic ships an
+`IChatClient` in its own SDK. That leaves no hand-written HTTP anywhere in the
+assistant, which matters more than it sounds: a request framed slightly wrong fails
+in ways that read as the model being stupid, and would be debugged as such.
+
+The tool-calling loop is `Microsoft.Extensions.AI`'s `FunctionInvokingChatClient`
+for the same reason. Writing it by hand is where an assistant goes subtly wrong —
+a dropped result, a turn ending mid-thought — and none of those failures look like
+a bug in the loop when you meet them.
+
+**Keys are encrypted to the Windows account (DPAPI), one file each, under
+`%LOCALAPPDATA%\Spydate\secrets`.** Not a passphrase: the key is already only as
+safe as the account, and asking for one on every launch pushes people towards a
+plain text file instead. Copying the file to another machine or account yields
+nothing, which is the property worth having. Settings live in a separate plain
+JSON file with no key in it, so the thing someone might paste into a bug report
+cannot carry one. A key that fails to decrypt — written by another account, or
+damaged — reads as "no key configured" rather than throwing, because that is the
+truth from here and a crash at startup is not.
+
+**The panel is thin on purpose.** Everything worth testing — the loop, the
+providers, the secret store, the settings — is in `Spydate.Agent`, a plain library.
+Nothing in the WPF project is reachable from a test, and an assistant whose
+behaviour lived there would be verified by looking at it.

@@ -320,6 +320,72 @@
                                     </ListBox.ItemTemplate>
                                 </ListBox>
                             </TabItem>
+                            <TabItem Header="Assistant">
+                                <Grid DataContext="{Binding Assistant}">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+                                        <DockPanel>
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Configure"
+                                                    Command="{Binding ConfigureCommand}"
+                                                    ToolTip="Choose a provider and add an API key"
+                                                    AutomationProperties.Name="Configure assistant" />
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Clear"
+                                                    Command="{Binding StartOverCommand}"
+                                                    ToolTip="Forget this conversation"
+                                                    AutomationProperties.Name="Clear assistant" />
+                                            <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="4,0,0,0"
+                                                       Foreground="{DynamicResource Text.Secondary}" />
+                                        </DockPanel>
+                                    </Border>
+
+                                    <ListBox Grid.Row="1" x:Name="AssistantTranscript" ItemsSource="{Binding Transcript}"
+                                             HorizontalContentAlignment="Stretch"
+                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                        <ListBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Text}" TextWrapping="Wrap" Margin="0,1">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsYou}" Value="True">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Accent.Hover}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding IsTool}" Value="True">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
+                                                                    <Setter Property="FontFamily" Value="{DynamicResource Mono.FontFamily}" />
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding IsProblem}" Value="True">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Semantic.Error}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </DataTemplate>
+                                        </ListBox.ItemTemplate>
+                                    </ListBox>
+
+                                    <DockPanel Grid.Row="2" Margin="4">
+                                        <Button DockPanel.Dock="Right" Content="Stop" Width="60" Margin="4,0,0,0"
+                                                Command="{Binding StopCommand}"
+                                                Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}"
+                                                AutomationProperties.Name="Stop the assistant" />
+                                        <Button DockPanel.Dock="Right" Content="Ask" Width="60" Margin="4,0,0,0"
+                                                Command="{Binding AskCommand}" IsDefault="True"
+                                                AutomationProperties.Name="Ask the assistant" />
+                                        <TextBox x:Name="AssistantQuestion" Tag="Ask about the binary, or tell it what to name"
+                                                 Text="{Binding Question, UpdateSourceTrigger=PropertyChanged}"
+                                                 KeyDown="OnAssistantKeyDown"
+                                                 AutomationProperties.Name="Assistant question" />
+                                    </DockPanel>
+                                </Grid>
+                            </TabItem>
                         </TabControl>
                     </Grid>
                 </Border>

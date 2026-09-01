@@ -96,6 +96,26 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    /// <summary>
+    /// Enter asks; Shift+Enter starts a new line, for a question worth more than one. IsDefault on
+    /// the Ask button would fire for any Enter anywhere in the window, which is not what a text box
+    /// wants.
+    /// </summary>
+    private void OnAssistantKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != System.Windows.Input.Key.Enter || Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
+        {
+            return;
+        }
+
+        if (DataContext is ViewModels.MainViewModel { Assistant: { } assistant } && assistant.AskCommand.CanExecute(null))
+        {
+            assistant.AskCommand.Execute(null);
+        }
+
+        e.Handled = true;
+    }
+
     private void OnXrefDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (XrefGrid.SelectedItem is XrefRow row)

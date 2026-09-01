@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Diagnostics;
 using System.Windows.Threading;
 using Microsoft.Extensions.DependencyInjection;
+using Spydate.Agent.Secrets;
 using Spydate.App.Services;
 using Spydate.App.ViewModels;
 using Spydate.App.Views;
@@ -26,6 +27,10 @@ public partial class App : Application
         sc.AddSingleton<IFileDialogService, FileDialogService>();
         sc.AddSingleton<HighlightingService>();
         sc.AddSingleton<WorkspaceService>();
+        // DPAPI, so an assistant API key is encrypted to this Windows account rather than sitting in
+        // a file anyone with the disk can read.
+        sc.AddSingleton<ISecretStore>(_ => new DpapiSecretStore());
+        sc.AddSingleton<AssistantViewModel>();
         sc.AddSingleton<MainViewModel>();
         sc.AddSingleton<MainWindow>();
         _services = sc.BuildServiceProvider();
