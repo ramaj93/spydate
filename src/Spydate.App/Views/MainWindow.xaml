@@ -382,8 +382,11 @@
                                         <Button DockPanel.Dock="Right" Content="Ask" Width="60" Margin="4,0,0,0"
                                                 Command="{Binding AskCommand}" IsDefault="True"
                                                 AutomationProperties.Name="Ask the assistant" />
+                                        <!-- Off while a turn runs, so it is visible that the question
+                                             went somewhere and a second one is not wanted yet. -->
                                         <TextBox x:Name="AssistantQuestion" Tag="Ask about the binary, or tell it what to name"
                                                  Text="{Binding Question, UpdateSourceTrigger=PropertyChanged}"
+                                                 IsEnabled="{Binding IsIdle}"
                                                  KeyDown="OnAssistantKeyDown"
                                                  AutomationProperties.Name="Assistant question" />
                                     </DockPanel>

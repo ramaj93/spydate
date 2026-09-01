@@ -59,7 +59,11 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private string _question = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsIdle))]
     private bool _isBusy;
+
+    /// <summary>The other way round, for anything that should be off while a turn is running.</summary>
+    public bool IsIdle => !IsBusy;
 
     [ObservableProperty]
     private string _status = string.Empty;
@@ -70,6 +74,15 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanAsk))]
     private async Task AskAsync()
     {
+        // Both ways in already check CanExecute, and the command refuses to run concurrently on its
+        // own. This is here anyway because the cost of being wrong is not a wasted click: a second
+        // turn would append to the same history while the first is mid-flight, and the provider
+        // would be sent a conversation with two questions and no answer between them.
+        if (IsBusy)
+        {
+            return;
+        }
+
         string question = Question.Trim();
         if (question.Length == 0)
         {
@@ -83,6 +96,11 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         {
             IsBusy = true;
             AskCommand.NotifyCanExecuteChanged();
+
+            // A turn can be a long silence — a slow provider, or several tool calls before it says
+            // anything. Without this the panel looks broken rather than busy, and the reasonable
+            // thing to do about a broken-looking panel is to send the question again.
+            Status = "Working…";
 
             var agent = Agent();
             _turn = new CancellationTokenSource();
@@ -116,6 +134,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             _turn?.Dispose();
             _turn = null;
             AskCommand.NotifyCanExecuteChanged();
+            UpdateStatus();
         }
     }
 
