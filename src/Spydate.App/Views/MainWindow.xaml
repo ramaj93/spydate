@@ -60,6 +60,28 @@
             <Menu>
                 <MenuItem Header="_File">
                     <MenuItem Header="_Open…" InputGestureText="Ctrl+O" Command="{Binding OpenFileCommand}" />
+
+                    <!-- Each row carries its own command, so nothing here has to reach back up the
+                         tree: a submenu lives in its own popup, where RelativeSource to the window
+                         is not dependable. -->
+                    <MenuItem Header="Open _recent" ItemsSource="{Binding Recent}"
+                              IsEnabled="{Binding HasRecent}" AutomationProperties.Name="Open recent">
+                        <MenuItem.ItemContainerStyle>
+                            <Style TargetType="MenuItem">
+                                <Setter Property="Header" Value="{Binding Name}" />
+                                <!-- The folder sits where a shortcut usually would: dimmed, right
+                                     aligned, and the thing that tells two setup.exe files apart. -->
+                                <Setter Property="InputGestureText" Value="{Binding Folder}" />
+                                <Setter Property="ToolTip" Value="{Binding Path}" />
+                                <Setter Property="Command" Value="{Binding Command}" />
+                                <Setter Property="CommandParameter" Value="{Binding Path}" />
+                            </Style>
+                        </MenuItem.ItemContainerStyle>
+                    </MenuItem>
+
+                    <MenuItem Header="C_lear recent" Command="{Binding ClearRecentCommand}"
+                              IsEnabled="{Binding HasRecent}" />
+
                     <MenuItem Header="_Save project" InputGestureText="Ctrl+S" Command="{Binding SaveProjectCommand}" />
                     <MenuItem Header="_Close file" Command="{Binding CloseFileCommand}" />
                     <Separator />

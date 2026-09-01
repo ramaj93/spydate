@@ -8,11 +8,18 @@ using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
 using Spydate.Core.PE;
+using Spydate.Core.Project;
 using Spydate.Core.Text;
 using Spydate.Disassembly;
 using SymbolRegular = Wpf.Ui.Controls.SymbolRegular;
 
 namespace Spydate.App.ViewModels;
+
+/// <summary>
+/// One entry in the recent-files menu. It carries the command rather than looking it up, because a
+/// submenu is rendered in its own popup where binding back to the window is not dependable.
+/// </summary>
+public sealed record RecentEntry(string Path, string Name, string Folder, System.Windows.Input.ICommand Command);
 
 /// <summary>One row in the Xrefs panel: a site that refers to the current address.</summary>
 public sealed record XrefRow(string From, string Function, string Kind, string Instruction, ulong FromVa, ulong? FunctionEntryVa);
@@ -34,6 +41,7 @@ public sealed partial class MainViewModel : ObservableObject
         _workspace = workspace;
         Assistant = assistant;
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
+        RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
     }
 
@@ -196,6 +204,50 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>Binaries opened lately, newest first. Empty until something has been opened.</summary>
+    public ObservableCollection<RecentEntry> Recent { get; } = new();
+
+    public bool HasRecent => Recent.Count > 0;
+
+    [RelayCommand]
+    private async Task OpenRecentAsync(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        // A recent list outlives the files in it. Saying so and taking the entry out is better than
+        // a parse error about a file the user did not choose so much as remember.
+        if (!File.Exists(path))
+        {
+            StatusText = $"{Path.GetFileName(path)} is no longer there.";
+            Log($"Not found, and removed from recent files: {path}");
+            RefreshRecent(RecentFiles.Remove(path));
+            return;
+        }
+
+        await OpenPathAsync(path).ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private void ClearRecent()
+    {
+        RecentFiles.Clear();
+        RefreshRecent([]);
+    }
+
+    private void RefreshRecent(IReadOnlyList<RecentFile> entries)
+    {
+        Recent.Clear();
+        foreach (var entry in entries)
+        {
+            Recent.Add(new RecentEntry(entry.Path, entry.Name, entry.Folder, OpenRecentCommand));
+        }
+
+        OnPropertyChanged(nameof(HasRecent));
+    }
+
     public async Task OpenPathAsync(string path)
     {
         SaveAnnotationsIfDirty();
@@ -261,6 +313,10 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             OpenTarget(new OverviewTarget());
+
+            // Recorded only once it has opened, so a file that turns out not to be a PE does not
+            // land in the menu as something worth trying again.
+            RefreshRecent(RecentFiles.Add(path));
 
             if (opened.Analysis is { } analysis)
             {
