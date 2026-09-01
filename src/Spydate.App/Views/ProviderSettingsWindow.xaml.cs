@@ -26,8 +26,10 @@ public partial class ProviderSettingsWindow : Window
             Model = settings.Model,
             Endpoint = settings.Endpoint,
             MaxToolCalls = settings.MaxToolCalls,
+            Stream = settings.Stream,
         };
 
+        StreamBox.IsChecked = settings.Stream;
         ProviderBox.ItemsSource = Enum.GetValues<ProviderKind>();
         ProviderBox.SelectedItem = settings.Provider;
         ModelBox.Text = settings.Model.Length > 0 ? settings.Model : ProviderSettings.SuggestedModel(settings.Provider);
@@ -155,6 +157,7 @@ public partial class ProviderSettingsWindow : Window
             Model = ModelBox.Text.Trim(),
             Endpoint = EndpointBox.Text.Trim() is { Length: > 0 } endpoint ? endpoint : null,
             MaxToolCalls = Result.MaxToolCalls,
+            Stream = StreamBox.IsChecked == true,
         };
 
         DialogResult = true;

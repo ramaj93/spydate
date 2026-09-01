@@ -17,6 +17,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
@@ -50,6 +51,11 @@
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="Leave the endpoint empty unless you are going through a proxy or a compatible server." />
 
+        <CheckBox x:Name="StreamBox" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10"
+                  Content="Show the answer as it is written"
+                  ToolTip="Turn this off if the assistant prints its own tool-call markup as text instead of running the tools."
+                  AutomationProperties.Name="Stream the answer" />
+
         <!-- Across both columns, and not in the label column. That one is Auto-width, which measures
              at infinite width, so TextWrapping there does nothing: a provider's error would lay out
              on one line, widen the column past the whole dialog, squeeze the star column to nothing
@@ -65,11 +71,11 @@
                        Foreground="{DynamicResource Text.Tertiary}" />
         </ScrollViewer>
 
-        <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
+        <TextBlock Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="The key is encrypted to your Windows account and kept apart from these settings, so it is not in any file you might share. It is sent only to the provider above. Everything the assistant reads comes from the binary you have open — treat what it reports the way you would treat the binary itself." />
 
-        <StackPanel Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Forget key" Width="92" Margin="0,0,8,0" Click="OnForgetClick" />
             <Button Content="Cancel" Width="80" Margin="0,0,8,0" IsCancel="True" />
             <Button Content="Save" Width="80" IsDefault="True" Click="OnSaveClick" />

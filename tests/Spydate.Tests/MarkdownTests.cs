@@ -101,6 +101,30 @@ public sealed class MarkdownTests
         Assert.Equal("`unclosed backtick", Flatten(Assert.IsType<ParagraphBlock>(Markdown.Parse("`unclosed backtick")[0]).Spans));
     }
 
+    [Theory]
+    [InlineData("sub_401000")]
+    [InlineData("call find_strings then find_symbol")]
+    [InlineData("__imp_CreateFileW")]
+    [InlineData("a_b_c_d_e")]
+    [InlineData("<||DSML||tool_calls> find_strings sub_1800D2F00 <||DSML||tool_calls>")]
+    public void UnderscoresInsideNamesAreLeftAlone(string input)
+    {
+        // Every underscore must survive. Two names in one line used to pair their underscores into
+        // an italic, which both deleted them and swallowed everything in between — and identifiers
+        // are the single most common thing written about a binary.
+        string rendered = Flatten(Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse(input))).Spans);
+
+        Assert.Equal(input, rendered);
+        Assert.Equal(input.Count(c => c == '_'), rendered.Count(c => c == '_'));
+    }
+
+    [Fact]
+    public void EmphasisWithUnderscoresStillWorksBetweenWords()
+    {
+        var spans = Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse("this is _really_ important"))).Spans;
+        Assert.Contains(spans, s => s is EmphasisSpan { Text: "really" });
+    }
+
     [Fact]
     public void SingleNewlinesInsideAParagraphAreKept()
     {

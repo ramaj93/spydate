@@ -41,6 +41,7 @@ public sealed class AnalysisAgent : IDisposable
     private readonly List<ChatMessage> _history = new();
     private readonly ChatOptions _options;
     private readonly AnnotationStore? _annotations;
+    private readonly bool _stream;
 
     public AnalysisAgent(IChatClient client, SessionStore store, McpOptions options, ProviderSettings settings)
     {
@@ -61,6 +62,7 @@ public sealed class AnalysisAgent : IDisposable
             .Build();
 
         _annotations = store.Current?.Analysis?.Annotations;
+        _stream = settings.Stream;
         _options = new ChatOptions { Tools = ToolsFor(store, options).Cast<AITool>().ToList() };
         _history.Add(new ChatMessage(ChatRole.System, SystemPrompt));
     }
@@ -91,25 +93,12 @@ public sealed class AnalysisAgent : IDisposable
         // Streamed, not awaited whole. A turn that reads six functions before it says anything can
         // take minutes, and the previous version reported every tool call at the end, all at once,
         // after the silence rather than during it — which is the same as not reporting them.
-        var updates = new List<ChatResponseUpdate>();
+        ChatResponse response;
         try
         {
-            await foreach (var update in _client
-                               .GetStreamingResponseAsync(_history, _options, cancellationToken)
-                               .ConfigureAwait(false))
-            {
-                updates.Add(update);
-
-                foreach (var call in update.Contents.OfType<FunctionCallContent>())
-                {
-                    progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
-                }
-
-                if (update.Text is { Length: > 0 } delta)
-                {
-                    progress?.Report(AgentStep.Delta(delta));
-                }
-            }
+            response = _stream
+                ? await StreamAsync(progress, cancellationToken).ConfigureAwait(false)
+                : await _client.GetResponseAsync(_history, _options, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -119,14 +108,50 @@ public sealed class AnalysisAgent : IDisposable
             }
         }
 
-        // The updates are folded back into whole messages so the history is the same shape it would
-        // have been un-streamed: the next turn must see finished messages, not fragments.
-        var response = updates.ToChatResponse();
         _history.AddRange(response.Messages);
+
+        if (!_stream)
+        {
+            // Nothing could be reported while it ran, so at least say what it did before answering.
+            foreach (var call in response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>())
+            {
+                progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
+            }
+        }
 
         string answer = response.Text;
         progress?.Report(AgentStep.Said(answer));
         return answer;
+    }
+
+    /// <summary>
+    /// The turn, taken as it is generated. Tool calls are reported when they are asked for and the
+    /// answer in the pieces it arrives in; the updates are then folded back into whole messages, so
+    /// the history is the same shape it would have been un-streamed and the next turn sees finished
+    /// messages rather than fragments.
+    /// </summary>
+    private async Task<ChatResponse> StreamAsync(IProgress<AgentStep>? progress, CancellationToken cancellationToken)
+    {
+        var updates = new List<ChatResponseUpdate>();
+
+        await foreach (var update in _client
+                           .GetStreamingResponseAsync(_history, _options, cancellationToken)
+                           .ConfigureAwait(false))
+        {
+            updates.Add(update);
+
+            foreach (var call in update.Contents.OfType<FunctionCallContent>())
+            {
+                progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
+            }
+
+            if (update.Text is { Length: > 0 } delta)
+            {
+                progress?.Report(AgentStep.Delta(delta));
+            }
+        }
+
+        return updates.ToChatResponse();
     }
 
     /// <summary>Forgets the conversation but not the tools, for starting again on the same binary.</summary>

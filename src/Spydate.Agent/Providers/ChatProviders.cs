@@ -40,6 +40,14 @@ public sealed record ProviderSettings
     /// </summary>
     public int MaxToolCalls { get; init; } = 24;
 
+    /// <summary>
+    /// Whether to take the answer as it is generated. On by default, because the alternative is
+    /// minutes of nothing — but a provider that parses tool calls correctly when it answers in one
+    /// piece may not when it answers in pieces, and the symptom is its raw chat template arriving
+    /// as text with no tool having run. Turning this off is the way back from that.
+    /// </summary>
+    public bool Stream { get; init; } = true;
+
     /// <summary>The name this provider's key is stored under.</summary>
     public string KeyName => Kind.ToString();
 

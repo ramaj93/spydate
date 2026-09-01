@@ -214,7 +214,13 @@ public static class Markdown
                 bool doubled = i + 1 < text.Length && text[i + 1] == c;
                 string marker = doubled ? new string(c, 2) : c.ToString();
                 int from = i + marker.Length;
-                int end = from < text.Length ? text.IndexOf(marker, from, StringComparison.Ordinal) : -1;
+
+                // An underscore touching a word is part of that word. This is CommonMark's rule and
+                // it matters more here than anywhere: snake_case is most of what gets written about
+                // a binary, and pairing the underscores in find_strings and sub_401000 turns both
+                // names into one italic and deletes the underscores from the text entirely.
+                bool opens = c != '_' || i == 0 || !char.IsLetterOrDigit(text[i - 1]);
+                int end = opens && from < text.Length ? Closing(text, marker, from, c) : -1;
 
                 // Non-empty, and not opening on a space: "a * b" is arithmetic, not emphasis.
                 if (end > from && !char.IsWhiteSpace(text[from]))
@@ -232,5 +238,32 @@ public static class Markdown
 
         Flush();
         return spans;
+    }
+
+    /// <summary>
+    /// The next place this emphasis could close. For an underscore that means one not followed by a
+    /// word character, so <c>a_b_c</c> never closes anywhere and stays the name it is.
+    /// </summary>
+    private static int Closing(string text, string marker, int from, char opener)
+    {
+        int at = from;
+        while (at >= 0 && at < text.Length)
+        {
+            at = text.IndexOf(marker, at, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                return -1;
+            }
+
+            int after = at + marker.Length;
+            if (opener != '_' || after >= text.Length || !char.IsLetterOrDigit(text[after]))
+            {
+                return at;
+            }
+
+            at = after;
+        }
+
+        return -1;
     }
 }

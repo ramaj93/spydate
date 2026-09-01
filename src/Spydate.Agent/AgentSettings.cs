@@ -26,12 +26,18 @@ public sealed class AgentSettings
     [JsonPropertyName("maxToolCalls")]
     public int MaxToolCalls { get; set; } = 24;
 
+    /// <summary>Take the answer as it is generated. Off is the fallback for a provider that only
+    /// parses its own tool calls correctly when it answers in one piece.</summary>
+    [JsonPropertyName("stream")]
+    public bool Stream { get; set; } = true;
+
     public ProviderSettings ToProviderSettings() => new()
     {
         Kind = Provider,
         Model = Model,
         Endpoint = Endpoint,
         MaxToolCalls = MaxToolCalls,
+        Stream = Stream,
     };
 
     public static string DefaultPath => Path.Combine(

@@ -69,18 +69,32 @@ public sealed class AgentOverHttpTests : IDisposable
                 return;
             }
 
+            string body;
             using (var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8))
             {
-                _requests.Add(await reader.ReadToEndAsync().ConfigureAwait(false));
+                body = await reader.ReadToEndAsync().ConfigureAwait(false);
+                _requests.Add(body);
             }
 
-            // Server-sent events, because that is what the agent asks for now. Answering a streaming
-            // request with a single completion object parses as nothing at all, which is worth a
-            // test of its own rather than a surprise in the panel.
+            int turn = Interlocked.Increment(ref _turn);
+
+            // Answered the way it was asked. A streaming request gets server-sent events and a plain
+            // one gets a completion object; answering either in the other's shape parses as nothing
+            // at all, which is worth a test rather than a surprise in the panel.
+            if (!body.Contains("\"stream\":true", StringComparison.Ordinal))
+            {
+                byte[] whole = Encoding.UTF8.GetBytes(turn == 1 ? ToolCall : FinalAnswer);
+                context.Response.ContentType = "application/json";
+                context.Response.ContentLength64 = whole.Length;
+                await context.Response.OutputStream.WriteAsync(whole).ConfigureAwait(false);
+                context.Response.Close();
+                continue;
+            }
+
             context.Response.ContentType = "text/event-stream";
             context.Response.SendChunked = true;
 
-            foreach (string chunk in Interlocked.Increment(ref _turn) == 1 ? ToolCallChunks : AnswerChunks)
+            foreach (string chunk in turn == 1 ? ToolCallChunks : AnswerChunks)
             {
                 byte[] bytes = Encoding.UTF8.GetBytes($"data: {chunk}\n\n");
                 await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
@@ -91,6 +105,18 @@ public sealed class AgentOverHttpTests : IDisposable
             context.Response.Close();
         }
     }
+
+    private const string ToolCall = """
+        {"id":"1","object":"chat.completion","created":1,"model":"fake",
+         "choices":[{"index":0,"message":{"role":"assistant","content":null,
+           "tool_calls":[{"id":"c1","type":"function","function":{"name":"list_functions","arguments":"{\"limit\":3}"}}]},
+          "finish_reason":"tool_calls"}]}
+        """;
+
+    private const string FinalAnswer = """
+        {"id":"2","object":"chat.completion","created":2,"model":"fake",
+         "choices":[{"index":0,"message":{"role":"assistant","content":"there are three of them"},"finish_reason":"stop"}]}
+        """;
 
     private static readonly string[] ToolCallChunks =
     [
@@ -171,6 +197,33 @@ public sealed class AgentOverHttpTests : IDisposable
         Assert.True(deltas.Count >= 2, $"the answer arrived in {deltas.Count} piece(s), so nothing streamed");
         Assert.Equal("there are three of them", string.Concat(deltas));
         Assert.Equal("there are three of them", answer);
+    }
+
+    [Fact]
+    public async Task TurningStreamingOffStillRunsToolsAndAnswers()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        var store = new SessionStore();
+        store.Set(new BinarySession(Corpus.NotepadX64, Corpus.Image(Corpus.NotepadX64), analysis, null, new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero)));
+
+        // The way back for a provider that mishandles tool calls when it streams them.
+        var settings = new ProviderSettings { Kind = ProviderKind.DeepSeek, Model = "fake", Endpoint = _prefix, Stream = false };
+        using var agent = new AnalysisAgent(ChatProviders.Create(settings, "sk-not-a-real-key"), store, McpOptions.Default, settings);
+
+        var recorder = new Recorder();
+        string answer = await agent.AskAsync("how many functions are there?", recorder);
+
+        Assert.Equal("there are three of them", answer);
+        Assert.DoesNotContain(_requests, r => r.Contains("\"stream\":true", StringComparison.Ordinal));
+
+        // Reported after the fact rather than during, which is the trade, but still reported.
+        Assert.Contains(recorder.Steps, s => s.Kind == "tool");
+        Assert.DoesNotContain(recorder.Steps, s => s.Kind == "delta");
     }
 
     [Fact]
