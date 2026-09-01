@@ -49,16 +49,22 @@ public sealed record ProviderSettings
     public bool Stream { get; init; } = true;
 
     /// <summary>
-    /// Roughly how much conversation to carry, in characters — a stand-in for tokens, near enough
-    /// at about four characters each and with no tokeniser to be wrong about.
+    /// How much conversation to carry, in tokens. Set it from the model's own context window, less
+    /// room for the answer — these differ by more than an order of magnitude between providers, so
+    /// there is no default that is not wrong for somebody.
     ///
-    /// Something has to bound this. A turn may make two dozen tool calls, and their results are
-    /// function listings and disassembly rather than sentences, so a few turns of real work will
-    /// otherwise fill any context window there is. What happens then is not a clean error: models
-    /// degrade first, and one way they degrade is writing their own tool-call template into the
-    /// answer as text instead of calling anything.
+    /// The default is deliberately modest rather than optimistic: a window too large for the model
+    /// does not fail cleanly. Models degrade before they refuse, and one way they degrade is writing
+    /// their own tool-call template into the answer as text instead of calling anything.
     /// </summary>
-    public int MaxHistoryChars { get; init; } = 200_000;
+    public int MaxContextTokens { get; init; } = 48_000;
+
+    /// <summary>
+    /// The budget as it is actually measured. Characters, because there is no tokeniser here to be
+    /// wrong with, and four per token is the usual rule of thumb — an under-estimate for
+    /// disassembly and hex, which is the direction to be wrong in.
+    /// </summary>
+    public int MaxHistoryChars => MaxContextTokens * 4;
 
     /// <summary>The name this provider's key is stored under.</summary>
     public string KeyName => Kind.ToString();

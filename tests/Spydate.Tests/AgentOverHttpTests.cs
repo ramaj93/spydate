@@ -240,7 +240,7 @@ public sealed class AgentOverHttpTests : IDisposable
         store.Set(new BinarySession(Corpus.NotepadX64, Corpus.Image(Corpus.NotepadX64), analysis, null, new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero)));
 
         // Small enough that a couple of turns of tool output overruns it.
-        var settings = new ProviderSettings { Kind = ProviderKind.DeepSeek, Model = "fake", Endpoint = _prefix, MaxHistoryChars = 800 };
+        var settings = new ProviderSettings { Kind = ProviderKind.DeepSeek, Model = "fake", Endpoint = _prefix, MaxContextTokens = 200 };
         using var agent = new AnalysisAgent(ChatProviders.Create(settings, "sk-not-a-real-key"), store, McpOptions.Default, settings);
 
         var recorder = new Recorder();

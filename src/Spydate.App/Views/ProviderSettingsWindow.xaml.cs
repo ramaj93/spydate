@@ -27,9 +27,11 @@ public partial class ProviderSettingsWindow : Window
             Endpoint = settings.Endpoint,
             MaxToolCalls = settings.MaxToolCalls,
             Stream = settings.Stream,
+            MaxContextTokens = settings.MaxContextTokens,
         };
 
         StreamBox.IsChecked = settings.Stream;
+        ContextBox.Text = (settings.MaxContextTokens / 1000).ToString(System.Globalization.CultureInfo.CurrentCulture);
         ProviderBox.ItemsSource = Enum.GetValues<ProviderKind>();
         ProviderBox.SelectedItem = settings.Provider;
         ModelBox.Text = settings.Model.Length > 0 ? settings.Model : ProviderSettings.SuggestedModel(settings.Provider);
@@ -141,6 +143,17 @@ public partial class ProviderSettingsWindow : Window
             return;
         }
 
+        // Rejected rather than silently rounded: someone who types 1000000 means a million tokens,
+        // and quietly reading that as a thousand would give them a fifth of the window they asked
+        // for with nothing to say why the assistant kept forgetting things.
+        if (!int.TryParse(ContextBox.Text.Trim(), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.CurrentCulture, out int thousands)
+            || thousands is < 1 or > 2_000)
+        {
+            MessageBox.Show(this, "Give the context as a whole number of thousands of tokens, between 1 and 2000.", "Assistant provider");
+            return;
+        }
+
         if (KeyBox.Password.Length > 0)
         {
             _secrets.Set(kind.ToString(), KeyBox.Password);
@@ -158,6 +171,7 @@ public partial class ProviderSettingsWindow : Window
             Endpoint = EndpointBox.Text.Trim() is { Length: > 0 } endpoint ? endpoint : null,
             MaxToolCalls = Result.MaxToolCalls,
             Stream = StreamBox.IsChecked == true,
+            MaxContextTokens = thousands * 1000,
         };
 
         DialogResult = true;

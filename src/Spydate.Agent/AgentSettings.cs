@@ -31,6 +31,13 @@ public sealed class AgentSettings
     [JsonPropertyName("stream")]
     public bool Stream { get; set; } = true;
 
+    /// <summary>
+    /// How much conversation to carry, in tokens. Context windows run from tens of thousands to a
+    /// million depending on the model, so this belongs next to the model rather than in a constant.
+    /// </summary>
+    [JsonPropertyName("maxContextTokens")]
+    public int MaxContextTokens { get; set; } = 48_000;
+
     public ProviderSettings ToProviderSettings() => new()
     {
         Kind = Provider,
@@ -38,6 +45,7 @@ public sealed class AgentSettings
         Endpoint = Endpoint,
         MaxToolCalls = MaxToolCalls,
         Stream = Stream,
+        MaxContextTokens = MaxContextTokens,
     };
 
     public static string DefaultPath => Path.Combine(

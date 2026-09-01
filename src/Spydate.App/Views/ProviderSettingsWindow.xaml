@@ -18,6 +18,8 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
@@ -51,7 +53,21 @@
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="Leave the endpoint empty unless you are going through a proxy or a compatible server." />
 
-        <CheckBox x:Name="StreamBox" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10"
+        <TextBlock Grid.Row="6" Grid.Column="0" Text="Context" VerticalAlignment="Center" Margin="0,0,10,4" />
+        <DockPanel Grid.Row="6" Grid.Column="1" Margin="0,0,0,4">
+            <TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0,0,0"
+                       Foreground="{DynamicResource Text.Tertiary}"
+                       Text="thousand tokens" />
+            <TextBox x:Name="ContextBox" Width="70" HorizontalAlignment="Left"
+                     ToolTip="The model's context window, less room for its answer. Older exchanges are dropped to stay inside it."
+                     AutomationProperties.Name="Context size" />
+        </DockPanel>
+
+        <TextBlock Grid.Row="7" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
+                   Foreground="{DynamicResource Text.Tertiary}"
+                   Text="Windows vary by more than ten times between models — 64 for most DeepSeek models, 200 for Claude, 1000 for Gemini. Too high does not fail cleanly, so leave headroom." />
+
+        <CheckBox x:Name="StreamBox" Grid.Row="8" Grid.Column="1" Margin="0,0,0,10"
                   Content="Show the answer as it is written"
                   ToolTip="Turn this off if the assistant prints its own tool-call markup as text instead of running the tools."
                   AutomationProperties.Name="Stream the answer" />
@@ -71,11 +87,11 @@
                        Foreground="{DynamicResource Text.Tertiary}" />
         </ScrollViewer>
 
-        <TextBlock Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
+        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="The key is encrypted to your Windows account and kept apart from these settings, so it is not in any file you might share. It is sent only to the provider above. Everything the assistant reads comes from the binary you have open — treat what it reports the way you would treat the binary itself." />
 
-        <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Forget key" Width="92" Margin="0,0,8,0" Click="OnForgetClick" />
             <Button Content="Cancel" Width="80" Margin="0,0,8,0" IsCancel="True" />
             <Button Content="Save" Width="80" IsDefault="True" Click="OnSaveClick" />
