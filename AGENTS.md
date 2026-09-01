@@ -100,6 +100,18 @@ dotnet run --project src/Spydate.App
 - Native PE tests use real system binaries under `%SystemRoot%\System32`
   (`kernel32.dll`, `notepad.exe`) guarded by `File.Exists` — skip gracefully if
   missing. Managed tests use the test assembly itself (`typeof(...).Assembly.Location`).
+- **Get them from `Corpus`, not from `PeImage.Load`.** `Corpus.Image(path)` parses
+  once for the whole run and `Corpus.Analysed(path)` hands back an analysis with
+  whole-image discovery already done. Analysing notepad takes a second or two, and a
+  dozen classes each doing it again was most of the suite's runtime — sharing took it
+  from 28s to 12s without dropping a single assertion.
+
+  Two rules. The shared analysis is for **readers**: a test that renames something,
+  writes an annotation, loads PDB symbols, or wants different `DiscoveryOptions` must
+  build its own, because the mutation is the point and everyone else would see it.
+  And sharing only pays when a binary has more than one user — a lone test with a
+  `maxFunctions` cap is *slower* against a fully swept image than against its own
+  capped discovery (`RealBinaryTests` says so in a comment, and means it).
 - Disassembler / lifter tests use inline byte arrays with the expected text.
 - Never commit third‑party binaries to the repo. Put local samples in
   `samples/local/` (git‑ignored).

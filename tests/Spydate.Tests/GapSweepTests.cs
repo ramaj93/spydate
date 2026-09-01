@@ -56,15 +56,16 @@ public class GapSweepTests
         var pe = PeImage.Load(path);
         Skip.IfNot(pe.Machine == MachineType.I386, $"{pe.Machine} is not x86");
 
+        // Only the seeded half is analysed here: the swept half is the shared corpus analysis, which is
+        // this same image under the same default options.
         var withoutSweep = new BinaryAnalysis(pe, options: new DiscoveryOptions { SweepGapsForFunctions = false });
-        var withSweep = new BinaryAnalysis(pe);
+        var withSweep = Corpus.Analysed(Corpus.NotepadX86);
 
         var sw = Stopwatch.StartNew();
         int seeded = withoutSweep.DiscoverAll(maxFunctions: 20_000).Count;
         long seededMs = sw.ElapsedMilliseconds;
-        sw.Restart();
-        int swept = withSweep.DiscoverAll(maxFunctions: 20_000).Count;
-        _output.WriteLine($"{pe.FileName} x86: {seeded} functions from seeds ({seededMs} ms), {swept} with the gap sweep ({sw.ElapsedMilliseconds} ms)");
+        int swept = withSweep.Functions.Count;
+        _output.WriteLine($"{pe.FileName} x86: {seeded} functions from seeds ({seededMs} ms), {swept} with the gap sweep");
 
         Assert.True(swept > seeded, $"the sweep added nothing ({seeded} -> {swept})");
 
@@ -87,11 +88,11 @@ public class GapSweepTests
         string path = Path.Combine(System32, "kernel32.dll");
         Skip.IfNot(File.Exists(path), "kernel32.dll not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.IsX86Family, $"{pe.Machine} is not x86/x64");
 
-        var analysis = new BinaryAnalysis(pe);
-        var functions = analysis.DiscoverAll(maxFunctions: 5000);
+        var analysis = Corpus.Analysed(path);
+        var functions = analysis.Functions;
         _output.WriteLine($"{pe.FileName}: {functions.Count} functions");
 
         Assert.All(functions, f => Assert.True(

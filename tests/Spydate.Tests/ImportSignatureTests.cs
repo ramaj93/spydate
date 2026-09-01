@@ -186,12 +186,12 @@ public class ImportSignatureTests
     [Fact]
     public void EveryX86CountAgreesWithTheBytesItRemoves()
     {
-        if (!File.Exists(@"C:\Windows\SysWOW64\notepad.exe"))
+        if (!Corpus.Has(Corpus.NotepadX86))
         {
             return;
         }
 
-        var image = PeImage.Load(@"C:\Windows\SysWOW64\notepad.exe");
+        var image = Corpus.Image(Corpus.NotepadX86);
         var signatures = ImportSignatures.For(image);
 
         int resolved = 0, total = 0;
@@ -295,7 +295,7 @@ public class ImportSignatureTests
     [Fact]
     public void NoCallIsGivenMoreArgumentsThanTheCalleeTakes()
     {
-        if (!File.Exists(@"C:\Windows\SysWOW64\notepad.exe"))
+        if (!Corpus.Has(Corpus.NotepadX86))
         {
             return;
         }
@@ -306,8 +306,7 @@ public class ImportSignatureTests
         //
         // Only imports are checked. A call to a function inside the image can also carry ecx and edx,
         // which `ret N` says nothing about, so there the two counts are not comparable.
-        var analysis = new BinaryAnalysis(PeImage.Load(@"C:\Windows\SysWOW64\notepad.exe"));
-        analysis.DiscoverAll();
+        var analysis = Corpus.Analysed(Corpus.NotepadX86);
         var decompiler = new NativeDecompiler(analysis);
 
         int checkedCalls = 0, described = 0;

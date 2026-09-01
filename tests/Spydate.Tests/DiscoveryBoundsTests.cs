@@ -141,11 +141,11 @@ public class DiscoveryBoundsTests
         string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "kernel32.dll");
         Skip.IfNot(File.Exists(path), "kernel32.dll not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.Machine == MachineType.Amd64, $"{pe.Machine} has no x64 unwind table");
 
-        var analysis = new BinaryAnalysis(pe);
-        var functions = analysis.DiscoverAll(maxFunctions: 500);
+        var analysis = Corpus.Analysed(path);
+        var functions = analysis.Functions;
 
         var bounded = functions.Where(f => f.BoundsEnd is not null).ToList();
         Assert.NotEmpty(bounded);
@@ -183,11 +183,11 @@ public class DiscoveryBoundsTests
         string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "kernel32.dll");
         Skip.IfNot(File.Exists(path), "kernel32.dll not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.Machine == MachineType.Amd64, $"{pe.Machine} has no x64 unwind table");
 
-        var analysis = new BinaryAnalysis(pe);
-        var functions = analysis.DiscoverAll(maxFunctions: 2000);
+        var analysis = Corpus.Analysed(path);
+        var functions = analysis.Functions;
 
         int swept = functions.Count(f => f.Notes.Any(n => n.StartsWith("Recovered", StringComparison.Ordinal)));
         int stopped = functions.Count(f => f.Notes.Any(n => n.Contains("does not return", StringComparison.Ordinal)));

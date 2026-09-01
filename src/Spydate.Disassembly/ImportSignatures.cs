@@ -52,9 +52,6 @@ public sealed class ImportSignatures
     private readonly ConcurrentDictionary<string, Module> _modules = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<(string Module, string Export), CalleeSignature> _cache = new();
 
-    /// <summary>One discovery at a time: a <see cref="FunctionDiscovery"/> holds state while it walks.</summary>
-    private readonly Lock _discoveryGate = new();
-
     private readonly Lock _schemaGate = new();
     private ApiSetSchema? _schema;
     private readonly int _bitness;
@@ -224,11 +221,9 @@ public sealed class ImportSignatures
 
         try
         {
-            Function function;
-            lock (_discoveryGate)
-            {
-                function = loaded.Discovery!.Discover(loaded.Image.RvaToVa(entry.Rva), export);
-            }
+            // Discovery is re-entrant: it keeps its whole state in locals, and the disassembler makes a
+            // decoder per call. Two threads resolving different imports of the same DLL need not queue.
+            var function = loaded.Discovery!.Discover(loaded.Image.RvaToVa(entry.Rva), export);
 
             // Most of the Win32 API is exported as a one-instruction jump through the exporting DLL's
             // own import table: kernel32!CloseHandle is `jmp [api-ms-win-core-handle-l1-1-0!CloseHandle]`.

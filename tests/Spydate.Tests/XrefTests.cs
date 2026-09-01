@@ -143,11 +143,11 @@ public class XrefTests
         string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "kernel32.dll");
         Skip.IfNot(File.Exists(path), "kernel32.dll not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.IsX86Family, $"{pe.Machine} is not x86/x64");
 
-        var analysis = new BinaryAnalysis(pe);
-        var functions = analysis.DiscoverAll(maxFunctions: 300);
+        var analysis = Corpus.Analysed(path);
+        var functions = analysis.Functions;
 
         Assert.True(analysis.Xrefs.Count > functions.Count, "expected more references than functions");
 

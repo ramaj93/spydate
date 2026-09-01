@@ -215,19 +215,17 @@ public class StructuringTests
     /// is emitted exactly once, and every goto has somewhere to land.
     /// </summary>
     [Theory]
-    [InlineData(@"C:\Windows\System32\notepad.exe")]
-    [InlineData(@"C:\Windows\SysWOW64\notepad.exe")]
+    [InlineData(Corpus.NotepadX64)]
+    [InlineData(Corpus.NotepadX86)]
     public void EveryBlockIsEmittedExactlyOnce(string path)
     {
-        if (!File.Exists(path))
+        if (!Corpus.Has(path))
         {
             return;
         }
 
-        var image = PeImage.Load(path);
-        var analysis = new BinaryAnalysis(image);
-        analysis.DiscoverAll();
-        var lifter = new X86Lifter(image.Bitness, analysis.Symbols);
+        var analysis = Corpus.Analysed(path);
+        var lifter = new X86Lifter(analysis.Image.Bitness, analysis.Symbols);
 
         foreach (var function in analysis.Functions.OrderBy(f => f.EntryVa))
         {

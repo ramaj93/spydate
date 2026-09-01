@@ -12,18 +12,16 @@ namespace Spydate.Tests;
 public class SplitViewTests
 {
     [Theory]
-    [InlineData(@"C:\Windows\System32\notepad.exe")]
-    [InlineData(@"C:\Windows\SysWOW64\notepad.exe")]
+    [InlineData(Corpus.NotepadX64)]
+    [InlineData(Corpus.NotepadX86)]
     public void EveryAddressInThePseudoCIsARealInstruction(string path)
     {
-        if (!File.Exists(path))
+        if (!Corpus.Has(path))
         {
             return;
         }
 
-        var image = PeImage.Load(path);
-        var analysis = new BinaryAnalysis(image);
-        analysis.DiscoverAll();
+        var analysis = Corpus.Analysed(path);
         var decompiler = new NativeDecompiler(analysis);
 
         int checkedLines = 0;

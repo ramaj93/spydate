@@ -144,11 +144,10 @@ public class StringReferencesTests
         string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "notepad.exe");
         Skip.IfNot(File.Exists(path), "notepad.exe not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.IsX86Family, $"{pe.Machine} is not x86/x64");
 
-        var analysis = new BinaryAnalysis(pe);
-        analysis.DiscoverAll(maxFunctions: 2000);
+        var analysis = Corpus.Analysed(path);
         var strings = StringScanner.Scan(pe);
 
         var resolved = StringReferences.Resolve(strings, analysis.Xrefs);

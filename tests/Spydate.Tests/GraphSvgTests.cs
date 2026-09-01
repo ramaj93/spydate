@@ -109,14 +109,12 @@ public class GraphSvgTests
     [Fact]
     public void EveryFunctionOfARealBinaryExportsAsValidXml()
     {
-        const string path = @"C:\Windows\System32\notepad.exe";
-        if (!File.Exists(path))
+        if (!Corpus.Has(Corpus.NotepadX64))
         {
             return;
         }
 
-        var analysis = new BinaryAnalysis(PeImage.Load(path));
-        analysis.DiscoverAll();
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
 
         int exported = 0;
         foreach (var function in analysis.Functions.OrderBy(f => f.EntryVa).Where(f => f.Blocks.Count is > 1 and < 60).Take(120))

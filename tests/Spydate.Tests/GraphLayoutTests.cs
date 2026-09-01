@@ -183,17 +183,16 @@ public class GraphLayoutTests
     // ------------------------------------------------------------------
 
     [Theory]
-    [InlineData(@"C:\Windows\System32\notepad.exe")]
-    [InlineData(@"C:\Windows\SysWOW64\notepad.exe")]
+    [InlineData(Corpus.NotepadX64)]
+    [InlineData(Corpus.NotepadX86)]
     public void EveryFunctionOfARealBinaryDrawsCorrectly(string path)
     {
-        if (!File.Exists(path))
+        if (!Corpus.Has(path))
         {
             return;
         }
 
-        var analysis = new BinaryAnalysis(PeImage.Load(path));
-        analysis.DiscoverAll();
+        var analysis = Corpus.Analysed(path);
 
         int drawn = 0, boxes = 0;
         // Bounded by block count, not just by how many functions: checking that no line crosses a box

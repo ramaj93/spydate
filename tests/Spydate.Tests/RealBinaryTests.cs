@@ -25,7 +25,10 @@ public class RealBinaryTests
         string path = Path.GetFullPath(Path.Combine(System32, fileName));
         Skip.IfNot(File.Exists(path), $"{fileName} not found");
 
-        var pe = PeImage.Load(path);
+        // Deliberately not the shared corpus analysis. This is the smoke test for discovery itself, so
+        // it should run discovery rather than inherit someone else's; and 32-bit kernel32 has no unwind
+        // table, which makes a full sweep of it cost more than the cap this needs.
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.IsX86Family, $"{fileName} is {pe.Machine}, not x86/x64");
 
         var sw = Stopwatch.StartNew();

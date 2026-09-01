@@ -76,11 +76,10 @@ public class CrtHelperTests
         string path = Path.Combine(System32, "kernel32.dll");
         Skip.IfNot(File.Exists(path), "kernel32.dll not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.IsX86Family, $"{pe.Machine} is not x86/x64");
 
-        var analysis = new BinaryAnalysis(pe);
-        var functions = analysis.DiscoverAll(maxFunctions: 5000);
+        var functions = Corpus.Analysed(path).Functions;
 
         var helpers = functions
             .Where(f => f.Name.StartsWith("__", StringComparison.Ordinal) || f.Name.StartsWith("_guard", StringComparison.Ordinal))
@@ -100,12 +99,11 @@ public class CrtHelperTests
         string path = Path.Combine(System32, "kernel32.dll");
         Skip.IfNot(File.Exists(path), "kernel32.dll not found");
 
-        var pe = PeImage.Load(path);
+        var pe = Corpus.Image(path);
         Skip.IfNot(pe.IsX86Family, $"{pe.Machine} is not x86/x64");
         var exports = pe.Exports!;
 
-        var analysis = new BinaryAnalysis(pe);
-        analysis.DiscoverAll(maxFunctions: 3000);
+        var analysis = Corpus.Analysed(path);
 
         // Several exports can share an address (aliases), so any of the names at that address is
         // acceptable - what matters is that a helper guess never replaced one.
