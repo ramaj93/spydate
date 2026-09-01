@@ -27,6 +27,10 @@ public partial class MainWindow : FluentWindow
         });
         InitializeComponent();
         _viewModel.Output.CollectionChanged += (_, _) => ScrollOutputToEnd();
+
+        // Not CollectionChanged: an answer streams into a line that is already in the list, so the
+        // transcript grows without the collection changing at all.
+        _viewModel.Assistant.Advancing += (_, _) => ScrollAssistantToEnd();
     }
 
     /// <summary>Ctrl+G: focus the go-to box.</summary>
@@ -133,6 +137,14 @@ public partial class MainWindow : FluentWindow
         if (OutputList.Items.Count > 0)
         {
             OutputList.ScrollIntoView(OutputList.Items[^1]);
+        }
+    }
+
+    private void ScrollAssistantToEnd()
+    {
+        if (AssistantTranscript.Items.Count > 0)
+        {
+            AssistantTranscript.ScrollIntoView(AssistantTranscript.Items[^1]);
         }
     }
 

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 using Spydate.Agent;
 using Spydate.Agent.Providers;
@@ -295,8 +296,32 @@ public class AgentTests
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, _final)));
         }
 
-        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException("the panel does not stream yet");
+        /// <summary>
+        /// The same script, in pieces. The answer is deliberately split so the agent has to put it
+        /// back together — a version that yielded it whole would pass without testing anything.
+        /// </summary>
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            foreach (var result in messages.SelectMany(m => m.Contents).OfType<FunctionResultContent>())
+            {
+                ToolResults.Add(result.Result?.ToString() ?? string.Empty);
+            }
+
+            if (_turn++ == 0 && _call is not null)
+            {
+                yield return new ChatResponseUpdate(ChatRole.Assistant, new List<AIContent> { _call });
+                yield break;
+            }
+
+            int half = _final.Length / 2;
+            yield return new ChatResponseUpdate(ChatRole.Assistant, _final[..half]);
+            yield return new ChatResponseUpdate(ChatRole.Assistant, _final[half..]);
+
+            await Task.CompletedTask.ConfigureAwait(false);
+        }
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
 

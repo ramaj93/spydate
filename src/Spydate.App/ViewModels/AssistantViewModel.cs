@@ -11,14 +11,32 @@ using Spydate.Mcp.Session;
 
 namespace Spydate.App.ViewModels;
 
-/// <summary>One line in the transcript. Kind drives how it is coloured, nothing more.</summary>
-public sealed record AssistantLine(string Kind, string Text)
+/// <summary>
+/// One line in the transcript. Kind drives how it is coloured, nothing more.
+///
+/// The text is observable rather than fixed because an answer arrives in pieces: the line is added
+/// as soon as the first token lands and grows from there, instead of appearing whole at the end.
+/// </summary>
+public sealed partial class AssistantLine : ObservableObject
 {
+    public AssistantLine(string kind, string text)
+    {
+        Kind = kind;
+        _text = text;
+    }
+
+    public string Kind { get; }
+
+    [ObservableProperty]
+    private string _text;
+
     public bool IsYou => Kind == "you";
 
     public bool IsTool => Kind == "tool";
 
     public bool IsProblem => Kind == "problem";
+
+    public void Append(string more) => Text += more;
 }
 
 /// <summary>
@@ -34,6 +52,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private readonly ISecretStore _secrets;
     private readonly IFileDialogService _dialogs;
     private Views.ProviderSettingsWindow? _providerDialog;
+    private AssistantLine? _answer;
     private AnalysisAgent? _agent;
     private SessionStore? _session;
     private CancellationTokenSource? _turn;
@@ -105,18 +124,39 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             var agent = Agent();
             _turn = new CancellationTokenSource();
 
-            // Progress marshals to the UI thread because it was created here; the tool calls it
-            // reports arrive from wherever the loop happens to be running.
+            // Progress marshals to the UI thread because it was created here; the steps it reports
+            // arrive from wherever the loop happens to be running.
+            _answer = null;
             var progress = new Progress<AgentStep>(step =>
             {
-                if (step.Kind == "tool")
+                switch (step.Kind)
                 {
-                    Add("tool", step.Text);
+                    case "tool":
+                        // A tool call ends the paragraph: whatever it says next is about what the
+                        // tool returned, so it belongs in a line of its own.
+                        _answer = null;
+                        Add("tool", step.Text);
+                        break;
+
+                    case "delta" when _answer is not null:
+                        _answer.Append(step.Text);
+                        Advanced();
+                        break;
+
+                    case "delta":
+                        _answer = Add("assistant", step.Text);
+                        break;
                 }
             });
 
             string answer = await agent.AskAsync(question, progress, _turn.Token).ConfigureAwait(true);
-            Add("assistant", answer.Length == 0 ? "(it said nothing)" : answer);
+
+            // Only when nothing streamed — a provider that does not stream, or a turn that ended on
+            // a tool call. Otherwise the text is already on screen and adding it would double it.
+            if (_answer is null)
+            {
+                Add("assistant", answer.Length == 0 ? "(it said nothing)" : answer);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -231,7 +271,18 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         return _agent;
     }
 
-    private void Add(string kind, string text) => Transcript.Add(new AssistantLine(kind, text));
+    /// <summary>Raised whenever the transcript gains text, so the view can keep the end in sight.</summary>
+    public event EventHandler? Advancing;
+
+    private AssistantLine Add(string kind, string text)
+    {
+        var line = new AssistantLine(kind, text);
+        Transcript.Add(line);
+        Advanced();
+        return line;
+    }
+
+    private void Advanced() => Advancing?.Invoke(this, EventArgs.Empty);
 
     private void UpdateStatus()
     {

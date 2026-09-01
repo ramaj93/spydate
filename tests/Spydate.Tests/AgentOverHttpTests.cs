@@ -74,26 +74,37 @@ public sealed class AgentOverHttpTests : IDisposable
                 _requests.Add(await reader.ReadToEndAsync().ConfigureAwait(false));
             }
 
-            string body = Interlocked.Increment(ref _turn) == 1 ? ToolCall : FinalAnswer;
-            byte[] bytes = Encoding.UTF8.GetBytes(body);
-            context.Response.ContentType = "application/json";
-            context.Response.ContentLength64 = bytes.Length;
-            await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+            // Server-sent events, because that is what the agent asks for now. Answering a streaming
+            // request with a single completion object parses as nothing at all, which is worth a
+            // test of its own rather than a surprise in the panel.
+            context.Response.ContentType = "text/event-stream";
+            context.Response.SendChunked = true;
+
+            foreach (string chunk in Interlocked.Increment(ref _turn) == 1 ? ToolCallChunks : AnswerChunks)
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes($"data: {chunk}\n\n");
+                await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+                await context.Response.OutputStream.FlushAsync().ConfigureAwait(false);
+            }
+
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("data: [DONE]\n\n")).ConfigureAwait(false);
             context.Response.Close();
         }
     }
 
-    private const string ToolCall = """
-        {"id":"1","object":"chat.completion","created":1,"model":"fake",
-         "choices":[{"index":0,"message":{"role":"assistant","content":null,
-           "tool_calls":[{"id":"c1","type":"function","function":{"name":"list_functions","arguments":"{\"limit\":3}"}}]},
-          "finish_reason":"tool_calls"}]}
-        """;
+    private static readonly string[] ToolCallChunks =
+    [
+        """{"id":"1","object":"chat.completion.chunk","created":1,"model":"fake","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"list_functions","arguments":"{\"limit\":3}"}}]},"finish_reason":null}]}""",
+        """{"id":"1","object":"chat.completion.chunk","created":1,"model":"fake","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}""",
+    ];
 
-    private const string FinalAnswer = """
-        {"id":"2","object":"chat.completion","created":2,"model":"fake",
-         "choices":[{"index":0,"message":{"role":"assistant","content":"there are three of them"},"finish_reason":"stop"}]}
-        """;
+    /// <summary>Split, so the test fails if the pieces are not put back together in order.</summary>
+    private static readonly string[] AnswerChunks =
+    [
+        """{"id":"2","object":"chat.completion.chunk","created":2,"model":"fake","choices":[{"index":0,"delta":{"role":"assistant","content":"there are "},"finish_reason":null}]}""",
+        """{"id":"2","object":"chat.completion.chunk","created":2,"model":"fake","choices":[{"index":0,"delta":{"content":"three of them"},"finish_reason":null}]}""",
+        """{"id":"2","object":"chat.completion.chunk","created":2,"model":"fake","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}""",
+    ];
 
     [Fact]
     public async Task TheWholeChainWorksAgainstARealProviderSdk()
@@ -118,6 +129,48 @@ public sealed class AgentOverHttpTests : IDisposable
         // The tool ran here and its output went back over the wire, which is the join the scripted
         // tests cannot reach.
         Assert.Contains("blocks", _requests[1], StringComparison.Ordinal);
+    }
+
+    /// <summary>Records synchronously. <see cref="Progress{T}"/> would post to the thread pool here,
+    /// and the order of arrival is the whole point of this test.</summary>
+    private sealed class Recorder : IProgress<AgentStep>
+    {
+        public List<AgentStep> Steps { get; } = new();
+
+        public void Report(AgentStep value) => Steps.Add(value);
+    }
+
+    [Fact]
+    public async Task WorkIsReportedWhileItHappensRatherThanAllAtTheEnd()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        var store = new SessionStore();
+        store.Set(new BinarySession(Corpus.NotepadX64, Corpus.Image(Corpus.NotepadX64), analysis, null, new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero)));
+
+        // DeepSeek specifically, since that is where this was noticed, though the path is shared.
+        var settings = new ProviderSettings { Kind = ProviderKind.DeepSeek, Model = "fake", Endpoint = _prefix };
+        using var agent = new AnalysisAgent(ChatProviders.Create(settings, "sk-not-a-real-key"), store, McpOptions.Default, settings);
+
+        var recorder = new Recorder();
+        string answer = await agent.AskAsync("how many functions are there?", recorder);
+
+        var kinds = recorder.Steps.Select(s => s.Kind).ToList();
+        int tool = kinds.IndexOf("tool");
+        int firstDelta = kinds.IndexOf("delta");
+
+        Assert.True(tool >= 0, "the tool call was never reported");
+        Assert.True(firstDelta > tool, "the answer was reported before the tool call that produced it");
+
+        // More than one piece, or nothing was streamed and this passed by accident.
+        var deltas = recorder.Steps.Where(s => s.Kind == "delta").Select(s => s.Text).ToList();
+        Assert.True(deltas.Count >= 2, $"the answer arrived in {deltas.Count} piece(s), so nothing streamed");
+        Assert.Equal("there are three of them", string.Concat(deltas));
+        Assert.Equal("there are three of them", answer);
     }
 
     [Fact]

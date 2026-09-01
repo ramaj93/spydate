@@ -15,6 +15,9 @@ public sealed record AgentStep(string Kind, string Text)
 {
     public static AgentStep Tool(string name, string arguments) => new("tool", $"{name}({arguments})");
 
+    /// <summary>A piece of the answer, as it is generated. Appended to whatever came before it.</summary>
+    public static AgentStep Delta(string text) => new("delta", text);
+
     public static AgentStep Said(string text) => new("said", text);
 
     public static AgentStep Problem(string text) => new("problem", text);
@@ -85,10 +88,28 @@ public sealed class AnalysisAgent : IDisposable
             store.Source = AnnotationSource.Agent;
         }
 
-        ChatResponse response;
+        // Streamed, not awaited whole. A turn that reads six functions before it says anything can
+        // take minutes, and the previous version reported every tool call at the end, all at once,
+        // after the silence rather than during it — which is the same as not reporting them.
+        var updates = new List<ChatResponseUpdate>();
         try
         {
-            response = await _client.GetResponseAsync(_history, _options, cancellationToken).ConfigureAwait(false);
+            await foreach (var update in _client
+                               .GetStreamingResponseAsync(_history, _options, cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                updates.Add(update);
+
+                foreach (var call in update.Contents.OfType<FunctionCallContent>())
+                {
+                    progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
+                }
+
+                if (update.Text is { Length: > 0 } delta)
+                {
+                    progress?.Report(AgentStep.Delta(delta));
+                }
+            }
         }
         finally
         {
@@ -98,14 +119,10 @@ public sealed class AnalysisAgent : IDisposable
             }
         }
 
-        foreach (var message in response.Messages)
-        {
-            _history.Add(message);
-            foreach (var call in message.Contents.OfType<FunctionCallContent>())
-            {
-                progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
-            }
-        }
+        // The updates are folded back into whole messages so the history is the same shape it would
+        // have been un-streamed: the next turn must see finished messages, not fragments.
+        var response = updates.ToChatResponse();
+        _history.AddRange(response.Messages);
 
         string answer = response.Text;
         progress?.Report(AgentStep.Said(answer));
