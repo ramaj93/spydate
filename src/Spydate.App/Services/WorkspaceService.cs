@@ -50,26 +50,78 @@ public sealed class OpenedBinary : IDisposable
 }
 
 /// <summary>Loads files and owns the current <see cref="OpenedBinary"/>.</summary>
-public sealed class WorkspaceService
+public sealed class WorkspaceService : IDisposable
 {
+    private ProjectFileWatcher? _watcher;
+
     public OpenedBinary? Current { get; private set; }
 
     public event EventHandler? CurrentChanged;
+
+    /// <summary>
+    /// Raised, off the UI thread, when this image's project file was rewritten by something else —
+    /// an agent driving the MCP server, or another copy of Spydate.
+    /// </summary>
+    public event EventHandler? ProjectChangedOnDisk;
 
     public async Task<OpenedBinary> OpenAsync(string path, CancellationToken cancellationToken = default)
     {
         var opened = await Task.Run(() => Load(path), cancellationToken).ConfigureAwait(true);
         Current?.Dispose();
         Current = opened;
+        Watch(opened);
         CurrentChanged?.Invoke(this, EventArgs.Empty);
         return opened;
     }
 
     public void Close()
     {
+        StopWatching();
         Current?.Dispose();
         Current = null;
         CurrentChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Re-reads the project file over the top of what is in memory. Replaces rather than merges: the
+    /// file is already the merged truth, so anything no longer in it was removed on purpose and has
+    /// to go from here too. Clearing announces each removal, which is how the names leave the symbol
+    /// table as well as the store.
+    /// </summary>
+    public ProjectLoadResult? ReloadProject()
+    {
+        if (Current is not { Analysis: { } analysis } binary)
+        {
+            return null;
+        }
+
+        analysis.Annotations.Clear();
+        return SpydateProject.LoadFor(binary.Image, analysis.Annotations);
+    }
+
+    private void Watch(OpenedBinary opened)
+    {
+        StopWatching();
+        if (opened.Analysis is null)
+        {
+            return;   // nothing to annotate, so nothing to notice
+        }
+
+        _watcher = new ProjectFileWatcher(opened.Image);
+        _watcher.Changed += (_, _) => ProjectChangedOnDisk?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void StopWatching()
+    {
+        _watcher?.Dispose();
+        _watcher = null;
+    }
+
+    public void Dispose()
+    {
+        StopWatching();
+        Current?.Dispose();
+        Current = null;
     }
 
     /// <summary>Saves the open file's annotations if any have changed. Returns where they went.</summary>

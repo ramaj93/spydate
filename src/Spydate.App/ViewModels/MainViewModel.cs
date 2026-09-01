@@ -30,6 +30,7 @@ public sealed partial class MainViewModel : ObservableObject
     public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace)
     {
         _dialogs = dialogs;
+        workspace.ProjectChangedOnDisk += OnProjectChangedOnDisk;
         _workspace = workspace;
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
@@ -636,6 +637,41 @@ public sealed partial class MainViewModel : ObservableObject
             Log($"Could not save the project: {ex.Message}");
             StatusText = "Project not saved";
         }
+    }
+
+    /// <summary>
+    /// Something else rewrote this binary's project file — an agent driving the MCP server, or a
+    /// second copy of Spydate. The file is already the merged result of everyone's changes, so the
+    /// window catches up with it rather than arguing.
+    ///
+    /// Except when there is unsaved work here. Then reloading would throw it away, and the two are
+    /// merged the next time this side saves, so it is left alone and only mentioned. The watcher
+    /// fires on a thread-pool thread, and everything below this line is UI-thread only.
+    /// </summary>
+    private void OnProjectChangedOnDisk(object? sender, EventArgs e)
+    {
+        Application.Current?.Dispatcher.InvokeAsync(async () =>
+        {
+            if (Binary?.Analysis is not { } analysis)
+            {
+                return;
+            }
+
+            if (analysis.Annotations.IsDirty)
+            {
+                Log("The project file changed on disk, but there are unsaved changes here, so it was not reloaded. Saving (Ctrl+S) merges both.");
+                return;
+            }
+
+            int before = analysis.Annotations.Count;
+            if (_workspace.ReloadProject() is not { Loaded: true } result)
+            {
+                return;
+            }
+
+            Log($"The project file changed on disk; reloaded {result.Applied} annotations (was {before}).");
+            await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+        });
     }
 
     /// <summary>
