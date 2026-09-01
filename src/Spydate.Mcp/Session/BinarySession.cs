@@ -46,7 +46,9 @@ public sealed class BinarySession : IDisposable
         DiscoveryState discovery,
         Func<PeImage, AnnotationStore, string?>? save = null)
     {
-        Save = save ?? SpydateProject.Save;
+        // A lambda rather than the method group: SpydateProject.Save takes an optional patch store
+        // now, and a group with a defaulted parameter no longer converts on its own.
+        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations));
         Path = path;
         Image = image;
         Analysis = analysis;

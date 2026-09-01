@@ -43,6 +43,12 @@ public sealed record ProjectLoadResult
     /// <summary>Why nothing was loaded: no file, a different build, unreadable JSON.</summary>
     public string? Reason { get; init; }
 
+    /// <summary>Patches read back from the file.</summary>
+    public int PatchesApplied { get; init; }
+
+    /// <summary>Patches in the file that could not be used — bad hex, or a length that does not match.</summary>
+    public int PatchesSkipped { get; init; }
+
     public override string ToString() => Loaded
         ? $"{Applied} annotation(s) from {Path}"
         : Reason ?? "no project file";
@@ -96,7 +102,7 @@ public static class SpydateProject
     /// Writes the annotations to the first path that accepts them. Returns where they went, or null when
     /// there was nothing to write and no file to update.
     /// </summary>
-    public static string? Save(PeImage image, AnnotationStore annotations)
+    public static string? Save(PeImage image, AnnotationStore annotations, PatchStore? patches = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(annotations);
@@ -104,7 +110,7 @@ public static class SpydateProject
         var candidates = CandidatePaths(image);
         // Keep updating a file that already exists rather than starting a second one elsewhere.
         string? existing = candidates.FirstOrDefault(File.Exists);
-        if (existing is null && annotations.Count == 0)
+        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0)
         {
             return null;
         }
@@ -115,7 +121,7 @@ public static class SpydateProject
         {
             try
             {
-                SaveTo(path, image, annotations);
+                SaveTo(path, image, annotations, patches);
                 annotations.MarkSaved();
                 return path;
             }
@@ -139,7 +145,7 @@ public static class SpydateProject
     /// (a cleared one being removed). Entries collide only when both sides edited the same address,
     /// which is rare and resolves in favour of the writer, since that is the more recent decision.
     /// </summary>
-    public static void SaveTo(string path, PeImage image, AnnotationStore annotations)
+    public static void SaveTo(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -201,6 +207,7 @@ public static class SpydateProject
                 ImageBase = Hex(image.ImageBase),
             },
             Annotations = entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList(),
+            Patches = MergePatches(path, identity, patches),
         };
 
         // Write beside the target and move into place, so a failure cannot truncate the previous
@@ -214,6 +221,77 @@ public static class SpydateProject
         // address changed once would be re-applied by every later save, undoing anybody who removed
         // it in between.
         annotations.MarkSaved();
+        patches?.MarkSaved();
+    }
+
+    /// <summary>
+    /// Patches for the file being written, merged the way annotations are: only what this session
+    /// touched is overlaid, so a second writer's patches survive. Null when there is nothing to say,
+    /// which keeps the member out of the file entirely for projects that have never had a patch.
+    /// </summary>
+    private static List<PatchDto>? MergePatches(string path, ProjectIdentity identity, PatchStore? patches)
+    {
+        var existing = ExistingPatches(path, identity);
+
+        if (patches is null)
+        {
+            // Not that there are none — that this caller does not know about them. Anything already
+            // in the file stays, rather than being dropped by a save that never considered it.
+            return existing?.Values.OrderBy(e => ParseHex32(e.Rva)).ToList();
+        }
+
+        var mine = patches.Snapshot().ToDictionary(p => p.Rva, p => p);
+        var entries = existing ?? new Dictionary<string, PatchDto>(StringComparer.OrdinalIgnoreCase);
+        var overlay = existing is null ? mine.Keys : patches.ChangedAddresses;
+
+        foreach (uint rva in overlay)
+        {
+            string key = Hex(rva);
+            if (mine.TryGetValue(rva, out var patch))
+            {
+                entries[key] = new PatchDto
+                {
+                    Rva = key,
+                    Bytes = patch.Hex,
+                    Original = patch.OriginalHex,
+                    Comment = patch.Comment,
+                    Enabled = patch.Enabled ? null : false,
+                    Source = patch.Source,
+                    Modified = patch.Modified,
+                };
+            }
+            else
+            {
+                entries.Remove(key);
+            }
+        }
+
+        return entries.Count == 0 ? null : entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList();
+    }
+
+    private static Dictionary<string, PatchDto>? ExistingPatches(string path, ProjectIdentity identity)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var file = JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Options);
+            if (file is null || file.Format > FormatVersion || !IdentityOf(file).Matches(identity))
+            {
+                return null;
+            }
+
+            return (file.Patches ?? [])
+                .Where(p => p.Rva is { Length: > 0 })
+                .ToDictionary(p => p.Rva!, p => p, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -255,7 +333,7 @@ public static class SpydateProject
     }
 
     /// <summary>Finds the project belonging to <paramref name="image"/> and applies it.</summary>
-    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations)
+    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations, PatchStore? patches = null)
     {
         ArgumentNullException.ThrowIfNull(image);
 
@@ -267,7 +345,7 @@ public static class SpydateProject
                 continue;
             }
 
-            var result = Load(path, image, annotations);
+            var result = Load(path, image, annotations, patches);
             if (result.Loaded)
             {
                 return result;
@@ -280,7 +358,7 @@ public static class SpydateProject
     }
 
     /// <summary>Applies one project file, rejecting it if it was made for a different build.</summary>
-    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations)
+    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -340,8 +418,78 @@ public static class SpydateProject
             applied++;
         }
 
+        int patchesApplied = 0;
+        int patchesSkipped = 0;
+        if (patches is not null)
+        {
+            foreach (var entry in file.Patches ?? [])
+            {
+                if (ReadPatch(entry) is not { } patch)
+                {
+                    patchesSkipped++;
+                    continue;
+                }
+
+                try
+                {
+                    patches.Set(patch.Rva, patch);
+                    patchesApplied++;
+                }
+                catch (ArgumentException)
+                {
+                    // Hand-edited into an overlap or a length mismatch. One bad entry is not a reason
+                    // to refuse the project, and the store's rules are not negotiable.
+                    patchesSkipped++;
+                }
+            }
+
+            patches.MarkSaved();
+        }
+
         annotations.MarkSaved();
-        return new ProjectLoadResult { Loaded = true, Path = path, Applied = applied, Skipped = skipped };
+        return new ProjectLoadResult
+        {
+            Loaded = true,
+            Path = path,
+            Applied = applied,
+            Skipped = skipped,
+            PatchesApplied = patchesApplied,
+            PatchesSkipped = patchesSkipped,
+        };
+    }
+
+    /// <summary>One stored patch, or null when it does not describe a usable one.</summary>
+    private static Patch? ReadPatch(PatchDto entry)
+    {
+        if (entry.Rva is not { Length: > 0 } rvaText || entry.Bytes is not { Length: > 0 } bytesText)
+        {
+            return null;
+        }
+
+        try
+        {
+            byte[] bytes = Convert.FromHexString(bytesText);
+            byte[] original = entry.Original is { Length: > 0 } originalText
+                ? Convert.FromHexString(originalText)
+                : [];
+
+            return bytes.Length == 0 || bytes.Length != original.Length
+                ? null
+                : new Patch
+                {
+                    Rva = ParseHex32(rvaText),
+                    Bytes = bytes,
+                    Original = original,
+                    Comment = entry.Comment,
+                    Enabled = entry.Enabled ?? true,
+                    Source = entry.Source ?? AnnotationSource.User,
+                    Modified = entry.Modified,
+                };
+        }
+        catch (FormatException)
+        {
+            return null;   // not hex
+        }
     }
 
     /// <summary>The build a parsed project file says it belongs to.</summary>
@@ -390,6 +538,14 @@ public static class SpydateProject
         [JsonPropertyName("format")] public int Format { get; set; }
         [JsonPropertyName("image")] public ImageDto? Image { get; set; }
         [JsonPropertyName("annotations")] public List<AnnotationDto>? Annotations { get; set; }
+
+        /// <summary>
+        /// Still format 1. A reader that predates patches ignores a member it does not know, and this
+        /// one treats an absent list as no patches — so a project written by either version opens in
+        /// the other, losing nothing it understood. Bumping the version would have refused the file
+        /// outright, over a member that costs nothing to skip.
+        /// </summary>
+        [JsonPropertyName("patches")] public List<PatchDto>? Patches { get; set; }
     }
 
     private sealed class ImageDto
@@ -411,6 +567,23 @@ public static class SpydateProject
         /// <summary>Absent in files written before provenance existed, which means a person wrote it.</summary>
         [JsonPropertyName("source")] public AnnotationSource? Source { get; set; }
 
+        [JsonPropertyName("modified")] public DateTimeOffset? Modified { get; set; }
+    }
+
+    private sealed class PatchDto
+    {
+        [JsonPropertyName("rva")] public string? Rva { get; set; }
+
+        /// <summary>Hex, so the file stays readable and a patch can be checked by eye.</summary>
+        [JsonPropertyName("bytes")] public string? Bytes { get; set; }
+
+        [JsonPropertyName("original")] public string? Original { get; set; }
+        [JsonPropertyName("comment")] public string? Comment { get; set; }
+
+        /// <summary>Absent means on, so a hand-written entry does not need it.</summary>
+        [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
+
+        [JsonPropertyName("source")] public AnnotationSource? Source { get; set; }
         [JsonPropertyName("modified")] public DateTimeOffset? Modified { get; set; }
     }
 }

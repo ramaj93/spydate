@@ -83,6 +83,9 @@
                               IsEnabled="{Binding HasRecent}" />
 
                     <MenuItem Header="_Save project" InputGestureText="Ctrl+S" Command="{Binding SaveProjectCommand}" />
+                    <MenuItem Header="Save _patched copy…" Command="{Binding SavePatchedCommand}"
+                              IsEnabled="{Binding HasPatches}"
+                              ToolTip="Writes a new file with the patches applied. The original is never modified." />
                     <MenuItem Header="_Close file" Command="{Binding CloseFileCommand}" />
                     <Separator />
                     <MenuItem Header="E_xit" InputGestureText="Alt+F4" Click="OnExitClick" />
@@ -119,6 +122,13 @@
                     <MenuItem Header="_Go to address…" InputGestureText="Ctrl+G"
                               Command="{Binding FocusGotoCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
                     <MenuItem Header="Go to _entry point" Command="{Binding OpenEntryPointCommand}" />
+                    <Separator />
+                    <!-- Patches act on the address the active document is showing. Nothing is written
+                         to disk until File ▸ Save patched copy. -->
+                    <MenuItem Header="_NOP out this instruction" Command="{Binding NopOutCommand}"
+                              ToolTip="Replaces the instruction here with NOPs of exactly the same length" />
+                    <MenuItem Header="_Invert this branch" Command="{Binding InvertBranchCommand}"
+                              ToolTip="Makes a conditional jump take the other way, keeping its length" />
                     <Separator />
                     <MenuItem Header="_Re-analyze" InputGestureText="F5" Command="{Binding ReanalyzeCommand}" />
                 </MenuItem>
@@ -344,6 +354,32 @@
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
+                            </TabItem>
+                            <TabItem Header="{Binding PatchesCaption}">
+                                <DataGrid ItemsSource="{Binding Patches}" AutoGenerateColumns="False"
+                                          IsReadOnly="True" HeadersVisibility="Column"
+                                          GridLinesVisibility="None" SelectionMode="Single"
+                                          AutomationProperties.Name="Patches">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="RVA" Binding="{Binding Rva, StringFormat=0x{0:X}}" />
+                                        <DataGridTextColumn Header="Was" Binding="{Binding OriginalHex}"
+                                                            FontFamily="{DynamicResource Mono.FontFamily}" />
+                                        <DataGridTextColumn Header="Now" Binding="{Binding Hex}"
+                                                            FontFamily="{DynamicResource Mono.FontFamily}" />
+                                        <DataGridTextColumn Header="On" Binding="{Binding Enabled}" />
+                                        <DataGridTextColumn Header="Why" Binding="{Binding Comment}" Width="*" />
+                                    </DataGrid.Columns>
+                                    <DataGrid.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Switch on or off"
+                                                      Command="{Binding PlacementTarget.DataContext.TogglePatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                            <MenuItem Header="Revert"
+                                                      Command="{Binding PlacementTarget.DataContext.RevertPatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                        </ContextMenu>
+                                    </DataGrid.ContextMenu>
+                                </DataGrid>
                             </TabItem>
                             <TabItem Header="Assistant">
                                 <Grid DataContext="{Binding Assistant}">

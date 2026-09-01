@@ -204,6 +204,156 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    // ------------------------------------------------------------------
+    // Patching
+    //
+    // Patches are recorded against the open image and written only to a copy. Nothing here ever
+    // touches the file that was opened — see PatchWriter for why that is a rule rather than a habit.
+    // ------------------------------------------------------------------
+
+    /// <summary>Every recorded patch for the open binary, in address order.</summary>
+    public ObservableCollection<Patch> Patches { get; } = new();
+
+    public bool HasPatches => Patches.Count > 0;
+
+    public string PatchesCaption => Patches.Count == 0 ? "Patches" : $"Patches ({Patches.Count})";
+
+    /// <summary>The address the active document is on, which is what a patch command acts upon.</summary>
+    private ulong? PatchTarget => ActiveDocument?.Address;
+
+    [RelayCommand]
+    private void NopOut() => Propose(analysis => InstructionPatches.NopOut(analysis, PatchTarget!.Value));
+
+    [RelayCommand]
+    private void InvertBranch() => Propose(analysis => InstructionPatches.InvertBranch(analysis, PatchTarget!.Value));
+
+    private void Propose(Func<BinaryAnalysis, PatchProposal> build)
+    {
+        if (Binary is not { Analysis: { } analysis } binary || PatchTarget is null)
+        {
+            StatusText = "Open a function first — a patch needs an address.";
+            return;
+        }
+
+        var proposal = build(analysis);
+        if (!proposal.Ok)
+        {
+            StatusText = proposal.Problem ?? "That cannot be patched.";
+            Log($"Not patched: {proposal.Problem}");
+            return;
+        }
+
+        var patch = proposal.Patch!;
+        try
+        {
+            binary.Patches.Set(patch.Rva, patch);
+        }
+        catch (ArgumentException ex)
+        {
+            StatusText = ex.Message;
+            Log($"Not patched: {ex.Message}");
+            return;
+        }
+
+        RefreshPatches();
+        Log($"Patched 0x{binary.Image.RvaToVa(patch.Rva):X}: {patch.OriginalHex} → {patch.Hex} ({patch.Comment})");
+        StatusText = $"Patched 0x{binary.Image.RvaToVa(patch.Rva):X}. Nothing is written until you save a patched copy.";
+    }
+
+    [RelayCommand]
+    private void RevertPatch(Patch? patch)
+    {
+        if (patch is null || Binary is not { } binary)
+        {
+            return;
+        }
+
+        binary.Patches.Remove(patch.Rva);
+        RefreshPatches();
+        Log($"Reverted the patch at 0x{binary.Image.RvaToVa(patch.Rva):X}.");
+    }
+
+    [RelayCommand]
+    private void TogglePatch(Patch? patch)
+    {
+        if (patch is null || Binary is not { } binary)
+        {
+            return;
+        }
+
+        binary.Patches.SetEnabled(patch.Rva, !patch.Enabled);
+        RefreshPatches();
+    }
+
+    /// <summary>
+    /// Writes a patched copy. Always Save As, never over the original — the binary under analysis is
+    /// the only record of what it did before, and it is not this program's to overwrite.
+    /// </summary>
+    [RelayCommand]
+    private void SavePatched()
+    {
+        if (Binary is not { } binary)
+        {
+            return;
+        }
+
+        if (binary.Patches.EnabledCount == 0)
+        {
+            StatusText = "No patches are switched on, so a copy would be identical.";
+            return;
+        }
+
+        string suggested = Path.GetFileNameWithoutExtension(binary.Image.FileName)
+                           + ".patched"
+                           + Path.GetExtension(binary.Image.FileName);
+
+        if (_dialogs.SaveFile("Save patched copy", "PE files (*.exe;*.dll;*.sys)|*.exe;*.dll;*.sys|All files (*.*)|*.*", suggested) is not { } path)
+        {
+            return;
+        }
+
+        try
+        {
+            var result = PatchWriter.Write(binary.Image, binary.Patches, path);
+            if (!result.Ok)
+            {
+                foreach (string problem in result.Problems)
+                {
+                    Warnings.Add(problem);
+                    Log($"Patch not applied: {problem}");
+                }
+
+                StatusText = $"Nothing was written: {result.Problems.Count} patch(es) did not fit the file.";
+                MessageBox.Show(
+                    string.Join(Environment.NewLine, result.Problems),
+                    "Patched copy not written",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            StatusText = $"Wrote {result.Applied} patch(es) to {Path.GetFileName(path)}.";
+            Log($"Wrote a patched copy to {path}: {result.Applied} applied, {result.Skipped} switched off.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            StatusText = $"Could not write the patched copy: {ex.Message}";
+            Log($"ERROR: {ex.Message}");
+        }
+    }
+
+    private void RefreshPatches()
+    {
+        Patches.Clear();
+        foreach (var patch in Binary?.Patches.Snapshot() ?? [])
+        {
+            Patches.Add(patch);
+        }
+
+        OnPropertyChanged(nameof(HasPatches));
+        OnPropertyChanged(nameof(PatchesCaption));
+    }
+
     /// <summary>Binaries opened lately, newest first. Empty until something has been opened.</summary>
     public ObservableCollection<RecentEntry> Recent { get; } = new();
 
@@ -313,6 +463,8 @@ public sealed partial class MainViewModel : ObservableObject
             }
 
             OpenTarget(new OverviewTarget());
+
+            RefreshPatches();
 
             // Recorded only once it has opened, so a file that turns out not to be a PE does not
             // land in the menu as something worth trying again.
