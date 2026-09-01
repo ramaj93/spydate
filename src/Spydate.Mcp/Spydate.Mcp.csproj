@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>spydate-mcp</AssemblyName>
+    <RootNamespace>Spydate.Mcp</RootNamespace>
+    <!-- Addresses and counts are formatted invariantly; nothing here is localised. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Spydate.Core\Spydate.Core.csproj" />
+    <ProjectReference Include="..\Spydate.Disassembly\Spydate.Disassembly.csproj" />
+    <ProjectReference Include="..\Spydate.Decompiler\Spydate.Decompiler.csproj" />
+  </ItemGroup>
+
+</Project>

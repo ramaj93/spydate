@@ -29,6 +29,13 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
   </ItemGroup>
 
+  <ItemGroup Label="Agent interface">
+    <!-- The official C# MCP SDK: the framing and handshake, so only the tools are ours to write. -->
+    <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
+    <!-- Host.CreateApplicationBuilder, which the SDK's DI and stdio transport are built around. -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+  </ItemGroup>
+
   <ItemGroup Label="Testing">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
