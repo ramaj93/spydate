@@ -234,12 +234,16 @@ public sealed partial class MainViewModel : ObservableObject
 
 
     /// <summary>
-    /// Where a patch would land: the line the caret is on, falling back to what the document is
-    /// about. Distinct from <see cref="CurrentTarget"/>, which resolves a name under the caret — a
-    /// patch is always about the instruction being looked at, not the symbol it mentions.
+    /// Where a patch would land: the line the caret is on, and nothing else.
+    ///
+    /// No falling back to the document's own address. In a listing that fallback means every blank
+    /// line, header and comment offers to patch the function's first instruction, which is both
+    /// enabled when it should not be and wrong when it is used. A document with no caret at all is
+    /// a different case, and that one does fall back.
     /// </summary>
-    private ulong? PatchTarget =>
-        (ActiveDocument as ICaretContext)?.CaretAddress ?? ActiveDocument?.Address;
+    private ulong? PatchTarget => ActiveDocument is ICaretContext caret
+        ? caret.CaretAddress
+        : ActiveDocument?.Address;
 
     /// <summary>True when there is an instruction here to change.</summary>
     private bool CanPatchHere()
@@ -407,6 +411,13 @@ public sealed partial class MainViewModel : ObservableObject
 
         OnPropertyChanged(nameof(HasPatches));
         OnPropertyChanged(nameof(PatchesCaption));
+
+        // The listings mark patched lines, so they are now out of date. Only what is open is redrawn;
+        // anything opened later is built from the store as it stands.
+        foreach (var document in Documents)
+        {
+            _ = document.ReloadAsync();
+        }
     }
 
     /// <summary>Binaries opened lately, newest first. Empty until something has been opened.</summary>
@@ -752,10 +763,13 @@ public sealed partial class MainViewModel : ObservableObject
         var code = ActiveDocument as ICaretContext;
         ulong? functionVa = code?.OwningFunctionVa;
 
+        // A document with a caret answers for the caret alone. Passing its own address as a fallback
+        // would make every line of a listing resolve to the function's first instruction, so Rename
+        // and Comment would be offered everywhere and would act on the wrong place when taken up.
         return CaretTargets.Resolve(
             code?.CaretWord,
             code?.CaretAddress,
-            ActiveDocument?.Address,
+            code is null ? ActiveDocument?.Address : null,
             slotForName: word => functionVa is { } fn ? SlotNamed(analysis, fn, word) : null,
             addressForSymbol: word => analysis.Symbols.GetByName(word)?.Va);
     }
@@ -782,11 +796,7 @@ public sealed partial class MainViewModel : ObservableObject
         => Binary?.Analysis is not null && CurrentTarget().Kind is CaretTargetKind.Address or CaretTargetKind.StackSlot;
 
     /// <summary>A comment belongs to an address, which a stack slot still sits on.</summary>
-    private bool CanEditComment()
-        => Binary?.Analysis is not null
-           && (CurrentTarget().Kind == CaretTargetKind.Address
-               || (ActiveDocument as ICaretContext)?.CaretAddress is not null
-               || ActiveDocument?.Address is not null);
+    private bool CanEditComment() => Binary?.Analysis is not null && CurrentTarget().Kind != CaretTargetKind.None;
 
 
     [RelayCommand(CanExecute = nameof(CanRenameSymbol))]
@@ -1028,8 +1038,8 @@ public sealed partial class MainViewModel : ObservableObject
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
-            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph),
-            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title),
+            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
+            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
             ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
             ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member),
@@ -1120,7 +1130,7 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         var doc = Find($"split:{f.EntryVa:X}")
-                  ?? SplitCodeDocumentViewModel.For(a, d, f, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f);
+                  ?? SplitCodeDocumentViewModel.For(a, d, f, () => a.TryGetFunction(f.EntryVa, out var latest) ? latest : f, Binary.Patches);
         Show(doc);
         Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
     }
@@ -1130,7 +1140,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Binary?.Analysis is { } a)
         {
             var doc = Find($"disasm:{f.EntryVa:X}")
-                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph);
+                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, Binary.Patches);
             Show(doc);
             Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
         }

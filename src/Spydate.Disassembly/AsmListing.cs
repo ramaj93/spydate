@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Spydate.Core.Project;
 using Spydate.Core.Strings;
 
 namespace Spydate.Disassembly;
@@ -27,7 +28,7 @@ public static class AsmListing
     /// A function's listing: a header saying what analysis knows about it, then its blocks, with a
     /// label on every block something branches to.
     /// </summary>
-    public static string ForFunction(BinaryAnalysis analysis, Function function)
+    public static string ForFunction(BinaryAnalysis analysis, Function function, PatchStore? patches = null)
     {
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(function);
@@ -55,7 +56,7 @@ public static class AsmListing
 
             foreach (var ins in block.Instructions)
             {
-                AppendInstruction(sb, ins, analysis);
+                AppendInstruction(sb, ins, analysis, patches);
             }
         }
 
@@ -67,7 +68,7 @@ public static class AsmListing
     /// Linear disassembly of a byte range, for bytes no function claims. No blocks and no labels:
     /// nothing here knows where control enters.
     /// </summary>
-    public static string ForRange(BinaryAnalysis analysis, ulong va, int byteCount)
+    public static string ForRange(BinaryAnalysis analysis, ulong va, int byteCount, PatchStore? patches = null)
     {
         ArgumentNullException.ThrowIfNull(analysis);
 
@@ -77,7 +78,7 @@ public static class AsmListing
 
         foreach (var ins in analysis.DisassembleRange(va, byteCount))
         {
-            AppendInstruction(sb, ins, analysis);
+            AppendInstruction(sb, ins, analysis, patches);
         }
 
         return sb.ToString();
@@ -118,10 +119,17 @@ public static class AsmListing
         }
     }
 
-    private static void AppendInstruction(StringBuilder sb, DecodedInstruction ins, BinaryAnalysis analysis)
+    private static void AppendInstruction(StringBuilder sb, DecodedInstruction ins, BinaryAnalysis analysis, PatchStore? patches)
     {
         int addrWidth = analysis.Image.Bitness == 64 ? 16 : 8;
         sb.Append(ins.Va.ToString($"X{addrWidth}", CultureInfo.InvariantCulture)).Append("  ");
+
+        // A patch changes what these bytes will be, but not until a patched copy is written — so the
+        // listing goes on showing what the file says, and marks the line rather than rewriting it.
+        // Showing the patched instruction in place would be a listing of a program that does not
+        // exist anywhere yet, which is a bad thing to read an address off.
+        var patch = PatchAt(ins, analysis, patches);
+
         string bytes = ins.BytesText;
         sb.Append(bytes);
         sb.Append(' ', Math.Max(1, BytesColumn - bytes.Length));
@@ -158,10 +166,66 @@ public static class AsmListing
         if (analysis.CommentFor(ins.Va) is { } note)
         {
             sb.Append(comment is null ? "    ; " : "   ; ").Append(note);
+            comment = note;
+        }
+
+        if (patch is not null)
+        {
+            sb.Append(comment is null ? "    ; " : "   ; ")
+              .Append(patch.Enabled ? "PATCHED → " : "patch (off) → ")
+              .Append(Spaced(patch.Bytes));
+
+            if (Decode(patch, analysis, ins.Va) is { Length: > 0 } becomes)
+            {
+                sb.Append("  ").Append(becomes);
+            }
         }
 
         sb.AppendLine();
     }
+
+    /// <summary>The patch covering this instruction, if one does.</summary>
+    private static Core.Project.Patch? PatchAt(DecodedInstruction ins, BinaryAnalysis analysis, PatchStore? patches)
+        => patches is null || analysis.Image.VaToRva(ins.Va) is not { } rva ? null : patches.Covering(rva);
+
+    /// <summary>
+    /// What the patched bytes say, read as instructions. Only the part of the patch that begins at
+    /// this instruction — a patch spanning several is annotated on the first, where it starts.
+    /// </summary>
+    private static string Decode(Core.Project.Patch patch, BinaryAnalysis analysis, ulong va)
+    {
+        if (analysis.Image.VaToRva(va) is not { } rva || rva != patch.Rva)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var reader = new Iced.Intel.ByteArrayCodeReader(patch.Bytes.ToArray());
+            var decoder = Iced.Intel.Decoder.Create(analysis.Image.Bitness, reader, va);
+            var texts = new List<string>();
+
+            while (decoder.IP < va + (ulong)patch.Bytes.Count && texts.Count < 4)
+            {
+                var decoded = decoder.Decode();
+                if (decoded.IsInvalid)
+                {
+                    break;
+                }
+
+                texts.Add(decoded.ToString());
+            }
+
+            return string.Join("; ", texts);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string Spaced(IReadOnlyList<byte> bytes)
+        => string.Join(' ', bytes.Select(b => b.ToString("X2", CultureInfo.InvariantCulture)));
 
     /// <summary>
     /// <c>"text"</c> when the instruction's data reference points into a string literal.

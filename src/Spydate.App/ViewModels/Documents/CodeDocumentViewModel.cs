@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.Decompiler.Native;
+using Spydate.Core.Project;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
 
@@ -86,7 +87,8 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
         Function function,
         Action<Function>? openPseudoC,
         Action<Function>? openSplit = null,
-        Action<Function>? openGraph = null)
+        Action<Function>? openGraph = null,
+        PatchStore? patches = null)
     {
         var actions = new List<CodeAction>();
         if (openPseudoC is not null)
@@ -112,7 +114,7 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
             _ =>
             {
                 var current = analysis.TryGetFunction(function.EntryVa, out var latest) ? latest : function;
-                return new CodeContent(AsmListing.ForFunction(analysis, current), current.Notes);
+                return new CodeContent(AsmListing.ForFunction(analysis, current, patches), current.Notes);
             },
             actions.ToArray())
         {
@@ -124,14 +126,14 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
     public static CodeDocumentViewModel ForText(string key, string title, SymbolRegular icon, string highlighting, string text)
         => new(key, title, icon, highlighting, _ => new CodeContent(text, Array.Empty<string>()));
 
-    public static CodeDocumentViewModel ForRangeDisassembly(BinaryAnalysis analysis, ulong va, int byteCount, string title)
+    public static CodeDocumentViewModel ForRangeDisassembly(BinaryAnalysis analysis, ulong va, int byteCount, string title, PatchStore? patches = null)
     {
         return new CodeDocumentViewModel(
             $"disasm-range:{va:X}",
             title,
             SymbolRegular.Code24,
             HighlightingService.Asm,
-            _ => new CodeContent(AsmListing.ForRange(analysis, va, byteCount), Array.Empty<string>()))
+            _ => new CodeContent(AsmListing.ForRange(analysis, va, byteCount, patches), Array.Empty<string>()))
         {
             Address = va,
         };

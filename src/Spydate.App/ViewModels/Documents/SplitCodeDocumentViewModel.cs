@@ -3,6 +3,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using Spydate.App.Services;
 using Spydate.Core.Text;
 using Spydate.Decompiler.Native;
+using Spydate.Core.Project;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
 
@@ -31,7 +32,7 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
         Address = entryVa;
     }
 
-    public static SplitCodeDocumentViewModel For(BinaryAnalysis analysis, NativeDecompiler decompiler, Function function, Func<Function> current)
+    public static SplitCodeDocumentViewModel For(BinaryAnalysis analysis, NativeDecompiler decompiler, Function function, Func<Function> current, PatchStore? patches = null)
     {
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(decompiler);
@@ -42,7 +43,7 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
         {
             var latest = current();
             var decompiled = decompiler.Decompile(latest);
-            return (AsmListing.ForFunction(analysis, latest), decompiled.Text, decompiled.Warnings);
+            return (AsmListing.ForFunction(analysis, latest, patches), decompiled.Text, decompiled.Warnings);
         });
     }
 
@@ -80,8 +81,26 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
     /// <summary>The function both panes are showing; the caret moves inside it.</summary>
     public ulong? OwningFunctionVa => _entryVa;
 
-    /// <summary>Where the caret is, whichever pane it was last moved in.</summary>
-    public ulong? CaretAddress { get; private set; }
+    private ulong? _caretAddress;
+
+    /// <summary>
+    /// Where the caret is, whichever pane it was last moved in.
+    ///
+    /// It raises a change like any other property: the commands that act on the caret ask whether
+    /// they apply, and they can only be re-asked if this says when it moves.
+    /// </summary>
+    public ulong? CaretAddress
+    {
+        get => _caretAddress;
+        private set
+        {
+            if (_caretAddress != value)
+            {
+                _caretAddress = value;
+                OnPropertyChanged();
+            }
+        }
+    }
 
     public ObservableCollection<string> Notes { get; } = new();
 
@@ -122,7 +141,18 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
     /// <summary>Moves the other pane to the address the caret is on.</summary>
     private void Follow(ulong? address, bool toPseudoC)
     {
-        if (_syncing || address is not { } va)
+        if (_syncing)
+        {
+            return;
+        }
+
+        // Where the caret is, first and unconditionally. Both of the early returns below are about
+        // whether the *other* pane can follow, which is a different question — and answering it
+        // first left the caret reading as its previous address on every line that has none, so
+        // Rename and Patch stayed lit over blank lines and acted on whatever was last clicked.
+        CaretAddress = address;
+
+        if (address is not { } va)
         {
             return;
         }
@@ -145,7 +175,6 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
                 DisassemblyLine = line;
             }
 
-            CaretAddress = va;
             Address = va;   // the Xrefs panel follows the line the caret is on
         }
         finally

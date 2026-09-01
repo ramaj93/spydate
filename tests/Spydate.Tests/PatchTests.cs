@@ -608,3 +608,90 @@ public sealed class AssemblePatchTests
         Assert.NotNull(proposal.Problem);
     }
 }
+
+/// <summary>Patched lines, as the listing shows them.</summary>
+public sealed class PatchedListingTests
+{
+    [Fact]
+    public void APatchedInstructionIsMarkedAndSaysWhatItBecomes()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        Assert.True(analysis.TryGetFunction(va, out var function));
+
+        var proposal = InstructionPatches.Assemble(analysis, va, "xor eax, eax; ret");
+        Assert.True(proposal.Ok, proposal.Problem);
+
+        var patches = new PatchStore();
+        patches.Set(proposal.Patch!.Rva, proposal.Patch);
+
+        string plain = AsmListing.ForFunction(analysis, function!);
+        string marked = AsmListing.ForFunction(analysis, function!, patches);
+
+        Assert.DoesNotContain("PATCHED", plain, StringComparison.Ordinal);
+        Assert.Contains("PATCHED", marked, StringComparison.Ordinal);
+
+        // The new bytes, and what they will do — read off the patch rather than restated by hand.
+        Assert.Contains("31 C0", marked, StringComparison.Ordinal);
+        Assert.Contains("xor", marked, StringComparison.OrdinalIgnoreCase);
+
+        // The original line is still the original. A listing that showed the patched instruction in
+        // place would describe a program that does not exist in any file yet.
+        Assert.Contains(analysis.DisassembleRange(va, 16, 1)[0].BytesText, marked, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASwitchedOffPatchSaysSoRatherThanLookingApplied()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        Assert.True(analysis.TryGetFunction(va, out var function));
+
+        var proposal = InstructionPatches.NopOut(analysis, va);
+        var patches = new PatchStore();
+        patches.Set(proposal.Patch!.Rva, proposal.Patch);
+        patches.SetEnabled(proposal.Patch.Rva, false);
+
+        string marked = AsmListing.ForFunction(analysis, function!, patches);
+
+        Assert.Contains("patch (off)", marked, StringComparison.Ordinal);
+        Assert.DoesNotContain("PATCHED", marked, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OnlyTheLineAPatchStartsOnIsAnnotated()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        Assert.True(analysis.TryGetFunction(va, out var function));
+
+        // Wide enough to cover more than one instruction.
+        var proposal = InstructionPatches.Assemble(analysis, va, "mov rax, 0x1122334455667788");
+        Assert.True(proposal.Ok, proposal.Problem);
+
+        var patches = new PatchStore();
+        patches.Set(proposal.Patch!.Rva, proposal.Patch);
+
+        string marked = AsmListing.ForFunction(analysis, function!, patches);
+
+        // Every covered line is marked as patched, but only the first says what it becomes: the
+        // others are the middle of one instruction and have nothing of their own to say.
+        int becomes = marked.Split('\n').Count(l => l.Contains("mov", StringComparison.OrdinalIgnoreCase) && l.Contains("PATCHED", StringComparison.Ordinal));
+        Assert.Equal(1, becomes);
+    }
+}
