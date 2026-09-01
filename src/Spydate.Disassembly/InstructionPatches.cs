@@ -109,6 +109,60 @@ public static class InstructionPatches
         return Build(analysis.Image, va, writer.Bytes.ToArray(), original, $"invert {instruction.Code.ToString().Split('_')[0].ToLowerInvariant()}");
     }
 
+    /// <summary>
+    /// Assembles what was typed and fits it over the instructions at <paramref name="va"/>.
+    ///
+    /// The replacement rarely lands on exactly the length it replaces, so the region grows to whole
+    /// instructions until the new bytes fit and the remainder is padded with NOPs. Growing is not a
+    /// courtesy: an instruction left half-overwritten decodes as whatever its tail happens to spell,
+    /// and the analyst is told how many instructions went so it is a decision rather than a surprise.
+    /// </summary>
+    public static PatchProposal Assemble(BinaryAnalysis analysis, ulong va, string? text)
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+
+        var encoded = X86Assembler.Encode(text, analysis.Image.Is64Bit, va);
+        if (!encoded.Ok)
+        {
+            return PatchProposal.Failed(encoded.Problem!);
+        }
+
+        // Enough instructions to cover what was assembled, never part of one.
+        var decoded = analysis.DisassembleRange(va, Math.Max(64, encoded.Bytes.Length + 32));
+        int covered = 0;
+        int taken = 0;
+        foreach (var instruction in decoded)
+        {
+            covered += instruction.Length;
+            taken++;
+            if (covered >= encoded.Bytes.Length)
+            {
+                break;
+            }
+        }
+
+        if (covered < encoded.Bytes.Length)
+        {
+            return PatchProposal.Failed(
+                $"{encoded.Bytes.Length} bytes will not fit: only {covered} bytes of whole instructions could be read at 0x{va:X}");
+        }
+
+        if (Original(analysis.Image, va, covered) is not { } original)
+        {
+            return PatchProposal.Failed($"0x{va:X} is not in any section of the file");
+        }
+
+        byte[] bytes = new byte[covered];
+        Array.Fill(bytes, (byte)0x90);
+        encoded.Bytes.CopyTo(bytes, 0);
+
+        int padding = covered - encoded.Bytes.Length;
+        string what = taken == 1 ? "1 instruction" : $"{taken} instructions";
+        string note = padding == 0 ? what : $"{what}, {padding} byte(s) padded";
+
+        return Build(analysis.Image, va, bytes, original, $"{text?.Trim()} ({note})");
+    }
+
     /// <summary>The bytes as they are now, or null when the address is not in the file.</summary>
     private static byte[]? Original(PeImage image, ulong va, int length)
     {

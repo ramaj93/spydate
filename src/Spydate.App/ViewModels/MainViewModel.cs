@@ -123,6 +123,20 @@ public sealed partial class MainViewModel : ObservableObject
         {
             RefreshXrefs(doc.Address, doc.AddressLength);
         }
+
+        // Whatever moved, the caret may now be on something different, and the menu items that act on
+        // it have to say so. A Rename that is enabled over a blank line and then does nothing is
+        // worse than one that is greyed out: the first teaches that the command is unreliable.
+        NotifyCaretCommands();
+    }
+
+    private void NotifyCaretCommands()
+    {
+        RenameSymbolCommand.NotifyCanExecuteChanged();
+        EditCommentCommand.NotifyCanExecuteChanged();
+        NopOutCommand.NotifyCanExecuteChanged();
+        InvertBranchCommand.NotifyCanExecuteChanged();
+        PatchCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>
@@ -218,14 +232,55 @@ public sealed partial class MainViewModel : ObservableObject
 
     public string PatchesCaption => Patches.Count == 0 ? "Patches" : $"Patches ({Patches.Count})";
 
-    /// <summary>The address the active document is on, which is what a patch command acts upon.</summary>
-    private ulong? PatchTarget => ActiveDocument?.Address;
 
-    [RelayCommand]
+    /// <summary>
+    /// Where a patch would land: the line the caret is on, falling back to what the document is
+    /// about. Distinct from <see cref="CurrentTarget"/>, which resolves a name under the caret — a
+    /// patch is always about the instruction being looked at, not the symbol it mentions.
+    /// </summary>
+    private ulong? PatchTarget =>
+        (ActiveDocument as ICaretContext)?.CaretAddress ?? ActiveDocument?.Address;
+
+    /// <summary>True when there is an instruction here to change.</summary>
+    private bool CanPatchHere()
+        => Binary?.Analysis is { } analysis
+           && PatchTarget is { } va
+           && analysis.Image.VaToOffset(va) is not null
+           && analysis.DisassembleRange(va, 16, 1).Count > 0;
+
+    [RelayCommand(CanExecute = nameof(CanPatchHere))]
     private void NopOut() => Propose(analysis => InstructionPatches.NopOut(analysis, PatchTarget!.Value));
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanPatchHere))]
     private void InvertBranch() => Propose(analysis => InstructionPatches.InvertBranch(analysis, PatchTarget!.Value));
+
+    /// <summary>
+    /// Type an instruction, the way Ghidra's patch dialog works. What is typed is assembled at this
+    /// address and fitted over whole instructions — see <see cref="InstructionPatches.Assemble"/>.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanPatchHere))]
+    private void Patch()
+    {
+        if (Binary?.Analysis is not { } analysis || PatchTarget is not { } va)
+        {
+            return;
+        }
+
+        string current = analysis.DisassembleRange(va, 16, 1) is [{ } instruction] ? instruction.Text : string.Empty;
+
+        string? typed = _dialogs.AskForText(
+            "Patch instruction",
+            $"Instruction at 0x{va:X}",
+            "Several may be separated by semicolons. Use bytes: <hex> to write raw bytes. Shorter is padded with NOPs; longer takes in the instructions it needs.",
+            current);
+
+        if (string.IsNullOrWhiteSpace(typed))
+        {
+            return;
+        }
+
+        Propose(_ => InstructionPatches.Assemble(analysis, va, typed));
+    }
 
     private void Propose(Func<BinaryAnalysis, PatchProposal> build)
     {
@@ -718,8 +773,23 @@ public sealed partial class MainViewModel : ObservableObject
 
         return null;
     }
+    /// <summary>
+    /// Only where there is something a name would belong to: an address, or a stack slot. Offering
+    /// Rename over a blank line and then doing nothing teaches that the command is unreliable, which
+    /// is a worse outcome than it being greyed out.
+    /// </summary>
+    private bool CanRenameSymbol()
+        => Binary?.Analysis is not null && CurrentTarget().Kind is CaretTargetKind.Address or CaretTargetKind.StackSlot;
 
-    [RelayCommand]
+    /// <summary>A comment belongs to an address, which a stack slot still sits on.</summary>
+    private bool CanEditComment()
+        => Binary?.Analysis is not null
+           && (CurrentTarget().Kind == CaretTargetKind.Address
+               || (ActiveDocument as ICaretContext)?.CaretAddress is not null
+               || ActiveDocument?.Address is not null);
+
+
+    [RelayCommand(CanExecute = nameof(CanRenameSymbol))]
     private async Task RenameSymbolAsync()
     {
         if (Binary?.Analysis is not { } analysis)
@@ -777,7 +847,7 @@ public sealed partial class MainViewModel : ObservableObject
         await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanEditComment))]
     private async Task EditCommentAsync()
     {
         if (Binary?.Analysis is not { } analysis)

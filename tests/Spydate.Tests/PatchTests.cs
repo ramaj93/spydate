@@ -459,3 +459,152 @@ public sealed class PatchProjectTests
         }
     }
 }
+
+/// <summary>Typed instructions, turned into bytes.</summary>
+public sealed class X86AssemblerTests
+{
+    private static string Hex(string text, ulong rip = 0x140001000)
+    {
+        var result = X86Assembler.Encode(text, is64Bit: true, rip);
+        Assert.True(result.Ok, result.Problem);
+        return Convert.ToHexString(result.Bytes);
+    }
+
+    [Theory]
+    [InlineData("nop", "90")]
+    [InlineData("int3", "CC")]
+    [InlineData("ret", "C3")]
+    [InlineData("leave", "C9")]
+    [InlineData("xor eax, eax", "31C0")]
+    [InlineData("mov eax, 1", "B801000000")]
+    [InlineData("push rbp", "55")]
+    [InlineData("pop rbp", "5D")]
+    [InlineData("inc rax", "48FFC0")]
+    public void OrdinaryInstructionsEncodeAsTheyShould(string text, string expected)
+        => Assert.Equal(expected, Hex(text));
+
+    [Fact]
+    public void SeveralInstructionsCanBeGivenAtOnce()
+    {
+        // The whole point of a patch dialog: replace one call with a return value and a return.
+        Assert.Equal("31C0C3", Hex("xor eax, eax; ret"));
+    }
+
+    [Fact]
+    public void AJumpIsEncodedRelativeToWhereItWillSit()
+    {
+        // Two bytes at the same target from different addresses must differ, or the offset is wrong.
+        string near = Hex("jmp 0x140001010", 0x140001000);
+        string far = Hex("jmp 0x140001010", 0x140000000);
+
+        Assert.NotEqual(near, far);
+        Assert.StartsWith("EB", near, StringComparison.Ordinal);   // short jump, +0x0E
+    }
+
+    [Fact]
+    public void RawBytesGoThroughUntouched()
+    {
+        Assert.Equal("4883EC28", Hex("bytes: 48 83 EC 28"));
+        Assert.Equal("9090", Hex("bytes:9090"));
+    }
+
+    [Fact]
+    public void AMnemonicItDoesNotKnowIsRefusedByNameRatherThanGuessed()
+    {
+        var result = X86Assembler.Encode("vpshufb xmm0, xmm1, xmm2", is64Bit: true, 0x140001000);
+
+        Assert.False(result.Ok);
+        Assert.Contains("bytes:", result.Problem!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("mov rax, rbx, rcx")]
+    [InlineData("mov eax, rbx")]
+    [InlineData("mov nonsense, 1")]
+    [InlineData("jmp somewhere")]
+    [InlineData("bytes: ZZ")]
+    [InlineData("bytes: 909")]
+    [InlineData("")]
+    public void NonsenseIsReportedRatherThanEncoded(string text)
+    {
+        var result = X86Assembler.Encode(text, is64Bit: true, 0x140001000);
+
+        Assert.False(result.Ok);
+        Assert.False(string.IsNullOrWhiteSpace(result.Problem));
+    }
+}
+
+/// <summary>Fitting assembled bytes over real instructions.</summary>
+public sealed class AssemblePatchTests
+{
+    [Fact]
+    public void AShorterReplacementIsPaddedToWholeInstructions()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        int first = analysis.DisassembleRange(va, 16, 1)[0].Length;
+
+        var proposal = InstructionPatches.Assemble(analysis, va, "nop");
+
+        Assert.True(proposal.Ok, proposal.Problem);
+
+        // One byte of nop, then padding out to the instruction it replaced — never part of one.
+        Assert.Equal(first, proposal.Patch!.Length);
+        Assert.All(proposal.Patch.Bytes, b => Assert.Equal(0x90, b));
+    }
+
+    [Fact]
+    public void ALongerReplacementTakesInAsManyInstructionsAsItNeeds()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        int first = analysis.DisassembleRange(va, 16, 1)[0].Length;
+
+        // Ten bytes, which will not fit in one short instruction.
+        var proposal = InstructionPatches.Assemble(analysis, va, "mov rax, 0x1122334455667788");
+
+        Assert.True(proposal.Ok, proposal.Problem);
+        Assert.True(proposal.Patch!.Length >= 10, $"only {proposal.Patch.Length} bytes covered");
+
+        // Still a whole number of instructions, so nothing is left half-overwritten.
+        int covered = 0;
+        foreach (var instruction in analysis.DisassembleRange(va, proposal.Patch.Length + 16))
+        {
+            covered += instruction.Length;
+            if (covered >= proposal.Patch.Length)
+            {
+                break;
+            }
+        }
+
+        Assert.Equal(proposal.Patch.Length, covered);
+        Assert.True(proposal.Patch.Length > first || first >= 10);
+    }
+
+    [Fact]
+    public void WhatCannotBeAssembledIsReportedNotPatched()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+
+        var proposal = InstructionPatches.Assemble(analysis, va, "frobnicate rax");
+
+        Assert.False(proposal.Ok);
+        Assert.NotNull(proposal.Problem);
+    }
+}

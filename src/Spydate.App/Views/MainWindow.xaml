@@ -29,6 +29,7 @@
         <KeyBinding Key="F5" Command="{Binding ReanalyzeCommand}" />
         <KeyBinding Key="F2" Command="{Binding RenameSymbolCommand}" />
         <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding EditCommentCommand}" />
+        <KeyBinding Key="P" Modifiers="Control" Command="{Binding PatchCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
         <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding NavigateForwardCommand}" />
@@ -127,6 +128,8 @@
                          to disk until File ▸ Save patched copy. -->
                     <MenuItem Header="_NOP out this instruction" Command="{Binding NopOutCommand}"
                               ToolTip="Replaces the instruction here with NOPs of exactly the same length" />
+                    <MenuItem Header="_Patch instruction…" InputGestureText="Ctrl+P" Command="{Binding PatchCommand}"
+                              ToolTip="Type an instruction to put at the caret" />
                     <MenuItem Header="_Invert this branch" Command="{Binding InvertBranchCommand}"
                               ToolTip="Makes a conditional jump take the other way, keeping its length" />
                     <Separator />
