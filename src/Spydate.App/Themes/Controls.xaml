@@ -421,6 +421,27 @@
         </Setter>
     </Style>
 
+    <!-- The text box an editable ComboBox types into. It cannot use the implicit TextBox style: that
+         one draws its own border and background, which inside a combo reads as a box within a box. -->
+    <Style x:Key="ComboEditableText" TargetType="{x:Type TextBox}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+        <Setter Property="CaretBrush" Value="{DynamicResource Text.Primary}" />
+        <Setter Property="SelectionBrush" Value="{DynamicResource Selection.Background}" />
+        <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
+        <Setter Property="FontSize" Value="{DynamicResource App.FontSize}" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type TextBox}">
+                    <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style TargetType="{x:Type ComboBox}">
         <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
         <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
@@ -433,9 +454,17 @@
                     <Grid>
                         <ToggleButton Style="{StaticResource ComboToggle}" Focusable="False" ClickMode="Press"
                                       IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
-                        <ContentPresenter Content="{TemplateBinding SelectionBoxItem}"
+                        <ContentPresenter x:Name="ContentSite" Content="{TemplateBinding SelectionBoxItem}"
                                           ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
                                           Margin="5,0,18,0" VerticalAlignment="Center" IsHitTestVisible="False" />
+                        <!-- WPF draws an editable ComboBox's text through this exact part name, and
+                             through nothing else: without it, IsEditable="True" leaves the control
+                             permanently blank, whatever is typed or picked from the list. It sits
+                             above the toggle button so a click in the text lands the caret, while the
+                             right-hand strip left by the margin still opens the drop-down. -->
+                        <TextBox x:Name="PART_EditableTextBox" Style="{StaticResource ComboEditableText}"
+                                 Margin="5,0,18,0" VerticalAlignment="Center" Visibility="Collapsed"
+                                 IsReadOnly="{TemplateBinding IsReadOnly}" />
                         <Popup x:Name="PART_Popup" Placement="Bottom" Focusable="False" AllowsTransparency="True"
                                IsOpen="{TemplateBinding IsDropDownOpen}" PopupAnimation="None">
                             <Border Background="{DynamicResource Menu.Popup.Background}"
@@ -448,6 +477,10 @@
                         </Popup>
                     </Grid>
                     <ControlTemplate.Triggers>
+                        <Trigger Property="IsEditable" Value="True">
+                            <Setter TargetName="ContentSite" Property="Visibility" Value="Collapsed" />
+                            <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible" />
+                        </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Foreground" Value="{DynamicResource Text.Disabled}" />
                         </Trigger>
