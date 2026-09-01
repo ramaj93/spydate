@@ -32,7 +32,7 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
         Address = entryVa;
     }
 
-    public static SplitCodeDocumentViewModel For(BinaryAnalysis analysis, NativeDecompiler decompiler, Function function, Func<Function> current, PatchStore? patches = null)
+    public static SplitCodeDocumentViewModel For(BinaryAnalysis analysis, NativeDecompiler decompiler, Function function, Func<Function> current, PatchStore? patches = null, IReadOnlySet<ulong>? breakpoints = null)
     {
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(decompiler);
@@ -43,7 +43,7 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
         {
             var latest = current();
             var decompiled = decompiler.Decompile(latest);
-            return (AsmListing.ForFunction(analysis, latest, patches), decompiled.Text, decompiled.Warnings);
+            return (AsmListing.ForFunction(analysis, latest, patches, breakpoints), decompiled.Text, decompiled.Warnings);
         });
     }
 

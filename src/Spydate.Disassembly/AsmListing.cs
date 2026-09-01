@@ -28,7 +28,7 @@ public static class AsmListing
     /// A function's listing: a header saying what analysis knows about it, then its blocks, with a
     /// label on every block something branches to.
     /// </summary>
-    public static string ForFunction(BinaryAnalysis analysis, Function function, PatchStore? patches = null)
+    public static string ForFunction(BinaryAnalysis analysis, Function function, PatchStore? patches = null, IReadOnlySet<ulong>? breakpoints = null)
     {
         ArgumentNullException.ThrowIfNull(analysis);
         ArgumentNullException.ThrowIfNull(function);
@@ -56,7 +56,7 @@ public static class AsmListing
 
             foreach (var ins in block.Instructions)
             {
-                AppendInstruction(sb, ins, analysis, patches);
+                AppendInstruction(sb, ins, analysis, patches, breakpoints);
             }
         }
 
@@ -68,7 +68,7 @@ public static class AsmListing
     /// Linear disassembly of a byte range, for bytes no function claims. No blocks and no labels:
     /// nothing here knows where control enters.
     /// </summary>
-    public static string ForRange(BinaryAnalysis analysis, ulong va, int byteCount, PatchStore? patches = null)
+    public static string ForRange(BinaryAnalysis analysis, ulong va, int byteCount, PatchStore? patches = null, IReadOnlySet<ulong>? breakpoints = null)
     {
         ArgumentNullException.ThrowIfNull(analysis);
 
@@ -78,7 +78,7 @@ public static class AsmListing
 
         foreach (var ins in analysis.DisassembleRange(va, byteCount))
         {
-            AppendInstruction(sb, ins, analysis, patches);
+            AppendInstruction(sb, ins, analysis, patches, breakpoints);
         }
 
         return sb.ToString();
@@ -119,8 +119,19 @@ public static class AsmListing
         }
     }
 
-    private static void AppendInstruction(StringBuilder sb, DecodedInstruction ins, BinaryAnalysis analysis, PatchStore? patches)
+    private static void AppendInstruction(StringBuilder sb, DecodedInstruction ins, BinaryAnalysis analysis, PatchStore? patches, IReadOnlySet<ulong>? breakpoints)
     {
+        // In the gutter, before the address, so the eye finds every breakpoint down one column
+        // instead of reading to the end of each line for it.
+        //
+        // The column only exists when there are breakpoints to put in it. Indenting every listing by
+        // two spaces for a debugger nobody has started would change the shape of everything that
+        // reads one — including the MCP tools, where it is two characters a line of pure cost.
+        if (breakpoints is { Count: > 0 })
+        {
+            sb.Append(breakpoints.Contains(ins.Va) ? "* " : "  ");
+        }
+
         int addrWidth = analysis.Image.Bitness == 64 ? 16 : 8;
         sb.Append(ins.Va.ToString($"X{addrWidth}", CultureInfo.InvariantCulture)).Append("  ");
 

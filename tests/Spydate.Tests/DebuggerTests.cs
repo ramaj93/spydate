@@ -1,4 +1,5 @@
 using System.Runtime.Versioning;
+using Spydate.Disassembly;
 using Spydate.Debugger;
 
 namespace Spydate.Tests;
@@ -50,7 +51,7 @@ public sealed class DebuggerTests
             }
         };
 
-        session.Start(Trivial, imageBase: 0, arguments: "where.exe");
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
 
         // The loader break comes first, before any of the program's own code.
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
@@ -78,7 +79,7 @@ public sealed class DebuggerTests
         }
 
         using var session = new DebugSession();
-        session.Start(Trivial, imageBase: 0x140000000, arguments: "where.exe");
+        session.Start(Trivial, imageBase: 0x140000000, imageSize: 0x100000, arguments: "where.exe");
 
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -102,7 +103,7 @@ public sealed class DebuggerTests
         }
 
         using var session = new DebugSession();
-        session.Start(Trivial, imageBase: 0, arguments: "where.exe");
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
         var registers = session.Registers();
@@ -128,7 +129,7 @@ public sealed class DebuggerTests
         }
 
         using var session = new DebugSession();
-        session.Start(Trivial, imageBase: 0, arguments: "where.exe");
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
         ulong before = session.Registers()!.Single(r => r.Name == "rip").Value;
@@ -180,6 +181,32 @@ public sealed class DebuggerTests
         Assert.False(session.RemoveBreakpoint(0x140001000));
     }
 
+    [Fact]
+    public void AnAddressOutsideTheImageIsNotTranslated()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        session.Start(Trivial, imageBase: 0x140000000, imageSize: 0x10000, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
+
+        // Inside: translated both ways.
+        ulong inside = session.LoadedBase + 0x100;
+        Assert.True(session.InsideImage(inside));
+        Assert.Equal(0x140000100ul, session.ToStatic(inside));
+
+        // Outside: left alone. The loader break is in ntdll, and biasing that by this image's load
+        // offset produces a number that looks like an address here and belongs to nothing.
+        ulong elsewhere = session.LoadedBase + 0x40000000;
+        Assert.False(session.InsideImage(elsewhere));
+        Assert.Equal(elsewhere, session.ToStatic(elsewhere));
+
+        session.Stop();
+    }
+
     private static bool Wait(Func<bool> until, int seconds = 20)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
@@ -194,5 +221,61 @@ public sealed class DebuggerTests
         }
 
         return false;
+    }
+}
+
+/// <summary>Breakpoints as the listing shows them, and as the caret still reads them.</summary>
+public sealed class BreakpointListingTests
+{
+    [Fact]
+    public void ABreakpointIsMarkedInTheGutter()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        Assert.True(analysis.TryGetFunction(va, out var function));
+
+        string plain = AsmListing.ForFunction(analysis, function!);
+        string marked = AsmListing.ForFunction(analysis, function!, null, new HashSet<ulong> { va });
+
+        var line = marked.Split('\n').First(l => l.Contains($"{va:X16}", StringComparison.Ordinal));
+        Assert.StartsWith("*", line, StringComparison.Ordinal);
+
+        // Only that line. A gutter on every line would be a gutter that says nothing.
+        Assert.Equal(1, marked.Split('\n').Count(l => l.StartsWith("*", StringComparison.Ordinal)));
+        Assert.DoesNotContain(plain.Split('\n'), l => l.StartsWith("*", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void WithNoBreakpointsTheListingIsUnchanged()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        ulong va = analysis.Image.RvaToVa(analysis.Image.EntryPointRva);
+        Assert.True(analysis.TryGetFunction(va, out var function));
+
+        // No gutter column at all: everything that reads a listing, the MCP tools included, sees
+        // exactly what it saw before a debugger existed.
+        Assert.Equal(
+            AsmListing.ForFunction(analysis, function!),
+            AsmListing.ForFunction(analysis, function!, null, new HashSet<ulong>()));
+    }
+
+    [Fact]
+    public void TheCaretStillFindsTheAddressOnAMarkedLine()
+    {
+        // The marker is not whitespace, so it survives TrimStart. Left unhandled it would make every
+        // line with a breakpoint report no address — exactly the lines a debug session cares about,
+        // which would disable Rename, Comment and the patch commands precisely there.
+        Assert.Equal(0x140001A20ul, Spydate.Core.Text.AddressText.FromLine("* 0000000140001A20  4883EC28  sub rsp, 0x28"));
+        Assert.Equal(0x140001A20ul, Spydate.Core.Text.AddressText.FromLine("  0000000140001A20  4883EC28  sub rsp, 0x28"));
     }
 }

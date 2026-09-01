@@ -30,6 +30,10 @@
         <KeyBinding Key="F2" Command="{Binding RenameSymbolCommand}" />
         <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding EditCommentCommand}" />
         <KeyBinding Key="P" Modifiers="Control" Command="{Binding PatchCommand}" />
+        <KeyBinding Key="F9" Command="{Binding ToggleBreakpointCommand}" />
+        <KeyBinding Key="F8" Command="{Binding Debugger.ContinueCommand}" />
+        <KeyBinding Key="F11" Command="{Binding Debugger.StepInstructionCommand}" />
+        <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Debugger.StopDebuggingCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
         <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding NavigateForwardCommand}" />
@@ -134,6 +138,20 @@
                               ToolTip="Makes a conditional jump take the other way, keeping its length" />
                     <Separator />
                     <MenuItem Header="_Re-analyze" InputGestureText="F5" Command="{Binding ReanalyzeCommand}" />
+                </MenuItem>
+
+                <!-- F5 is already Re-analyze and has been since before there was a debugger, so
+                     these avoid it rather than quietly changing what a familiar key does. -->
+                <MenuItem Header="_Debug">
+                    <MenuItem Header="_Run under the debugger…" Command="{Binding Debugger.StartCommand}"
+                              ToolTip="Starts the open binary on this machine. It will do whatever it does." />
+                    <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
+                    <Separator />
+                    <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
+                    <MenuItem Header="Step one _instruction" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}" />
+                    <Separator />
+                    <MenuItem Header="Toggle _breakpoint" InputGestureText="F9" Command="{Binding ToggleBreakpointCommand}"
+                              ToolTip="Marks the line the caret is on. Works before anything is running." />
                 </MenuItem>
                 <MenuItem Header="_Help">
                     <MenuItem Header="_About Spydate" Click="OnAboutClick" />
@@ -358,6 +376,51 @@
                                     </ListBox.ItemTemplate>
                                 </ListBox>
                             </TabItem>
+                            <TabItem Header="Debug">
+                                <Grid DataContext="{Binding Debugger}">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+                                    <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+                                        <DockPanel>
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Stop"
+                                                    Command="{Binding StopDebuggingCommand}" AutomationProperties.Name="Stop debugging" />
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Step"
+                                                    Command="{Binding StepInstructionCommand}" AutomationProperties.Name="Step one instruction" />
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Continue"
+                                                    Command="{Binding ContinueCommand}" AutomationProperties.Name="Continue running" />
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Run"
+                                                    Command="{Binding StartCommand}" AutomationProperties.Name="Run under the debugger" />
+                                            <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="4,0,0,0"
+                                                       Foreground="{DynamicResource Text.Secondary}" />
+                                        </DockPanel>
+                                    </Border>
+                                    <Grid Grid.Row="1">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="260" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <DataGrid Grid.Column="0" ItemsSource="{Binding Registers}" AutoGenerateColumns="False"
+                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  AutomationProperties.Name="Registers">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="reg" Binding="{Binding Name}" />
+                                                <DataGridTextColumn Header="value" Binding="{Binding Value}"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+                                        <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                                                      Background="{DynamicResource Chrome.Border}" />
+                                        <ListBox Grid.Column="2" ItemsSource="{Binding Log}"
+                                                 FontFamily="{DynamicResource Mono.FontFamily}"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                                 AutomationProperties.Name="Debug log" />
+                                    </Grid>
+                                </Grid>
+                            </TabItem>
+
                             <TabItem Header="{Binding PatchesCaption}">
                                 <DataGrid ItemsSource="{Binding Patches}" AutoGenerateColumns="False"
                                           IsReadOnly="True" HeadersVisibility="Column"

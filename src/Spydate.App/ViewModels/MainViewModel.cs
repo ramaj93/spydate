@@ -34,12 +34,18 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly WorkspaceService _workspace;
     private CancellationTokenSource? _analysisCts;
 
-    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant)
+    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant, DebuggerViewModel debugger)
     {
         _dialogs = dialogs;
         workspace.ProjectChangedOnDisk += OnProjectChangedOnDisk;
         _workspace = workspace;
         Assistant = assistant;
+        Debugger = debugger;
+
+        // Breakpoints are drawn in the listings, so a toggle redraws them; a stop opens where it
+        // stopped, which is the whole reason for stopping there.
+        debugger.BreakpointsChanged += (_, _) => ReloadDocuments();
+        debugger.StoppedAt += (_, va) => OpenTarget(new DisassemblyTarget(va, NameOf(va)));
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
         RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
@@ -54,6 +60,9 @@ public sealed partial class MainViewModel : ObservableObject
     /// appears in them at once rather than after a reload.
     /// </summary>
     public AssistantViewModel Assistant { get; }
+
+    /// <summary>The debugger panel. Nothing it holds runs until somebody asks it to.</summary>
+    public DebuggerViewModel Debugger { get; }
 
     public ObservableCollection<ExplorerNodeViewModel> Explorer { get; } = new();
 
@@ -130,6 +139,28 @@ public sealed partial class MainViewModel : ObservableObject
         NotifyCaretCommands();
     }
 
+    /// <summary>Redraws every open listing, for a change that only alters how they are marked.</summary>
+    private void ReloadDocuments()
+    {
+        foreach (var document in Documents)
+        {
+            _ = document.ReloadAsync();
+        }
+    }
+
+    private string NameOf(ulong va) => Binary?.Analysis is { } a ? a.NameFor(va) : $"0x{va:X}";
+
+    /// <summary>Sets or clears a breakpoint where the caret is. Works before anything is running.</summary>
+    [RelayCommand(CanExecute = nameof(CanPatchHere))]
+    private void ToggleBreakpoint()
+    {
+        if (PatchTarget is { } va)
+        {
+            Debugger.ToggleBreakpoint(va);
+            StatusText = $"Breakpoint at 0x{va:X}.";
+        }
+    }
+
     private void NotifyCaretCommands()
     {
         RenameSymbolCommand.NotifyCanExecuteChanged();
@@ -137,6 +168,7 @@ public sealed partial class MainViewModel : ObservableObject
         NopOutCommand.NotifyCanExecuteChanged();
         InvertBranchCommand.NotifyCanExecuteChanged();
         PatchCommand.NotifyCanExecuteChanged();
+        ToggleBreakpointCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>
@@ -1041,8 +1073,8 @@ public sealed partial class MainViewModel : ObservableObject
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
-            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
-            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
+            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches, Debugger.BreakpointAddresses),
+            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches, Debugger.BreakpointAddresses),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
             ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
             ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member),
@@ -1143,7 +1175,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Binary?.Analysis is { } a)
         {
             var doc = Find($"disasm:{f.EntryVa:X}")
-                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, Binary.Patches);
+                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, Binary.Patches, Debugger.BreakpointAddresses);
             Show(doc);
             Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
         }

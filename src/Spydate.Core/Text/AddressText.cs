@@ -64,8 +64,15 @@ public static class AddressText
             return null;
         }
 
-        // A listing line begins with the address, padded to the image's pointer width.
+        // A listing line begins with the address, padded to the image's pointer width — behind a
+        // gutter that may carry a breakpoint marker. The marker is not whitespace, so it survives
+        // TrimStart, and leaving it here would make every line that has one report no address:
+        // precisely the lines a debugger session cares about most.
         string trimmed = line.TrimStart();
+        if (trimmed.StartsWith('*'))
+        {
+            trimmed = trimmed[1..].TrimStart();
+        }
         int end = 0;
         while (end < trimmed.Length && Uri.IsHexDigit(trimmed[end]))
         {

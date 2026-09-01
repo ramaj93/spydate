@@ -68,15 +68,37 @@ public sealed class DebugSession : IDisposable
     /// <summary>Where execution is, when it is stopped.</summary>
     public ulong CurrentAddress { get; private set; }
 
+    /// <summary>How big the image is, so the translation knows where it stops applying.</summary>
+    public uint ImageSize { get; private set; }
+
     /// <summary>
     /// A static address as it will be at run time. The two differ by the load bias whenever the image
     /// is relocated, which for anything built this decade is every run — a breakpoint set on the
     /// address in the listing lands nowhere without this.
     /// </summary>
-    public ulong ToRuntime(ulong staticVa) => LoadedBase == 0 || ImageBase == 0 ? staticVa : staticVa - ImageBase + LoadedBase;
+    public ulong ToRuntime(ulong staticVa)
+        => Translatable && staticVa >= ImageBase && staticVa < ImageBase + ImageSize
+            ? staticVa - ImageBase + LoadedBase
+            : staticVa;
 
-    /// <summary>The inverse, for reporting a stop at an address the listing will recognise.</summary>
-    public ulong ToStatic(ulong runtimeVa) => LoadedBase == 0 || ImageBase == 0 ? runtimeVa : runtimeVa - LoadedBase + ImageBase;
+    /// <summary>
+    /// The inverse, for reporting a stop at an address the listing will recognise.
+    ///
+    /// Only inside the image. Execution stops in ntdll and in every other module far more often than
+    /// it stops in the binary being read — at the loader break, in a system call, in an exception
+    /// handler — and applying the image's bias to one of those addresses does not fail, it produces
+    /// a number that looks like an address in this program and belongs to nothing at all.
+    /// </summary>
+    public ulong ToStatic(ulong runtimeVa)
+        => Translatable && runtimeVa >= LoadedBase && runtimeVa < LoadedBase + ImageSize
+            ? runtimeVa - LoadedBase + ImageBase
+            : runtimeVa;
+
+    /// <summary>Whether a stop is somewhere the listing can show.</summary>
+    public bool InsideImage(ulong runtimeVa)
+        => Translatable && runtimeVa >= LoadedBase && runtimeVa < LoadedBase + ImageSize;
+
+    private bool Translatable => LoadedBase != 0 && ImageBase != 0 && ImageSize != 0;
 
     public IReadOnlyList<Breakpoint> Breakpoints
     {
@@ -93,7 +115,7 @@ public sealed class DebugSession : IDisposable
     /// Starts <paramref name="path"/> under the debugger. Nothing runs until this is called, and it
     /// is only ever called because somebody asked for it.
     /// </summary>
-    public void Start(string path, ulong imageBase, string? arguments = null, string? workingDirectory = null)
+    public void Start(string path, ulong imageBase, uint imageSize, string? arguments = null, string? workingDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
@@ -103,6 +125,7 @@ public sealed class DebugSession : IDisposable
         }
 
         ImageBase = imageBase;
+        ImageSize = imageSize;
         var ready = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _loop = new Thread(() => Loop(path, arguments, workingDirectory, ready))
@@ -471,6 +494,12 @@ public sealed class DebugSession : IDisposable
         Report("stopped", $"breakpoint at 0x{ToStatic(address):X}", ToStatic(address));
         return true;
     }
+
+    /// <summary>
+    /// The address to hand a listing, or null when the stop is not in this image at all — in ntdll, in
+    /// a system call, in another module. A number there would be read as a place in this program.
+    /// </summary>
+    private ulong? Reportable(ulong runtimeVa) => InsideImage(runtimeVa) ? ToStatic(runtimeVa) : null;
 
     private void PlantAll()
     {

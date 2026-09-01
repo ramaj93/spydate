@@ -88,7 +88,8 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
         Action<Function>? openPseudoC,
         Action<Function>? openSplit = null,
         Action<Function>? openGraph = null,
-        PatchStore? patches = null)
+        PatchStore? patches = null,
+        IReadOnlySet<ulong>? breakpoints = null)
     {
         var actions = new List<CodeAction>();
         if (openPseudoC is not null)
@@ -114,7 +115,7 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
             _ =>
             {
                 var current = analysis.TryGetFunction(function.EntryVa, out var latest) ? latest : function;
-                return new CodeContent(AsmListing.ForFunction(analysis, current, patches), current.Notes);
+                return new CodeContent(AsmListing.ForFunction(analysis, current, patches, breakpoints), current.Notes);
             },
             actions.ToArray())
         {
@@ -126,14 +127,14 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
     public static CodeDocumentViewModel ForText(string key, string title, SymbolRegular icon, string highlighting, string text)
         => new(key, title, icon, highlighting, _ => new CodeContent(text, Array.Empty<string>()));
 
-    public static CodeDocumentViewModel ForRangeDisassembly(BinaryAnalysis analysis, ulong va, int byteCount, string title, PatchStore? patches = null)
+    public static CodeDocumentViewModel ForRangeDisassembly(BinaryAnalysis analysis, ulong va, int byteCount, string title, PatchStore? patches = null, IReadOnlySet<ulong>? breakpoints = null)
     {
         return new CodeDocumentViewModel(
             $"disasm-range:{va:X}",
             title,
             SymbolRegular.Code24,
             HighlightingService.Asm,
-            _ => new CodeContent(AsmListing.ForRange(analysis, va, byteCount, patches), Array.Empty<string>()))
+            _ => new CodeContent(AsmListing.ForRange(analysis, va, byteCount, patches, breakpoints), Array.Empty<string>()))
         {
             Address = va,
         };
