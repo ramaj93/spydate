@@ -130,8 +130,14 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Light theme (needs light-background XSHD syntax palettes)
 - ⬜ Dockable/floating tool windows; per-document context menus
 
-## Phase 4 — Ecosystem ⬜
-- ⬜ CLI (`spydate dump/disasm/decompile`) sharing the engine
+## Phase 4 — Ecosystem 🚧
+- ✅ MCP server (`spydate-mcp`): the engine as agent tools over stdio, so Claude Code or any MCP
+  client can run the naming loop — orient, find something worth reading, read it, name it, follow it.
+  Fourteen tools, answers as compact text with every truncation stated, and writes that merge into the
+  same `.spydate` file the window reads, so both can work on one binary at once. The window watches
+  the file and retitles its documents as the agent renames things. See `docs/MCP.md`
+- ⬜ CLI (`spydate dump/disasm/decompile`) sharing the engine — largely subsumed by the MCP server,
+  which is the same headless surface with a different front end
 - ⬜ Plugin API (IAnalyzer / IDocumentProvider)
 - ⬜ ARM64 decoding
 - ⬜ Signed release builds, installer

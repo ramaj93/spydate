@@ -27,6 +27,7 @@ Detailed design lives in `docs/`:
 - `docs/PE-FORMAT.md` — condensed PE reference used by the parser.
 - `docs/ROADMAP.md` — phased plan and current status.
 - `docs/DECISIONS.md` — architecture decision records (ADRs).
+- `docs/MCP.md` — the agent-facing tool surface, and how to connect a client.
 
 ## 2. Repository layout
 
@@ -39,6 +40,7 @@ src/
   Spydate.Disassembly/         Iced-based x86/x64 decoder, function discovery, CFG.
   Spydate.Decompiler/          Native IR + lifter + pseudo-C; managed C#/IL via ILSpy engine.
   Spydate.App/                 WPF application (Wpf.Ui, AvalonEdit, CommunityToolkit.Mvvm).
+  Spydate.Mcp/                 MCP server exposing the engine to agents (see docs/MCP.md).
 tests/
   Spydate.Tests/               xunit tests for Core / Disassembly / Decompiler.
 docs/                          design docs (see above)
@@ -48,7 +50,11 @@ Dependency direction is strictly one‑way:
 
 ```
 Spydate.App → Spydate.Decompiler → Spydate.Disassembly → Spydate.Core
+Spydate.Mcp ↗
 ```
+
+`Spydate.Mcp` sits beside the app, not under it. Neither references the other; they share a binary
+only through the `.spydate` project file, and saving merges so both can write at once.
 
 `Spydate.Core` must never reference Iced, ILSpy, or anything WPF. Analysis
 projects must never reference WPF. Never introduce a cycle.

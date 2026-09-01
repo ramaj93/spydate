@@ -13,9 +13,31 @@ Drop in an `.exe`, `.dll` or `.sys` and Spydate will:
 - for .NET assemblies, show IL and decompile to C# (powered by the
   [ILSpy](https://github.com/icsharpcode/ILSpy) engine);
 - browse everything in a tree + tabbed‑document UI with a hex viewer and
-  syntax‑highlighted code views.
+  syntax‑highlighted code views;
+- **be driven by an agent.** `spydate-mcp` exposes the whole engine as MCP tools, so Claude Code or
+  any MCP client can run the reverse‑engineering loop — find what is still unnamed and heavily used,
+  read it, name it, follow its callers — writing into the same project file the window reads.
 
 > Status: early development (0.1). See [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Letting an agent help
+
+```bash
+claude mcp add spydate -- dotnet run --project src/Spydate.Mcp
+```
+
+Then ask it to open a binary and start naming things. Both it and the window write the same
+`.spydate` file, and saving merges, so you can work on one binary at the same time — rename something
+from the agent and the open document retitles itself. Every annotation records who set it, so what an
+agent did can be reviewed and undone as a set.
+
+`--read-only` gives you its reasoning without its opinions landing in your project.
+
+**One caution worth reading before you point this at something hostile.** The binary being analysed
+is untrusted input, and its strings reach the agent's context — a sample can carry text shaped like
+an instruction. The server confines what a persuaded agent can do: it can annotate the project file,
+and nothing else. It cannot write bytes, patch the binary, or run anything.
+[docs/MCP.md](docs/MCP.md) has the full tool list and the rest of the caveats.
 
 ## Requirements
 

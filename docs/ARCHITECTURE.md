@@ -14,11 +14,13 @@
 ## 2. Projects and layering
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Spydate.App (WPF, net10.0-windows)                          │
-│  Views · ViewModels · Services (Workspace, dialogs)         │
-└───────────────▲─────────────────────────────────────────────┘
-                │
+┌──────────────────────────────┐  ┌───────────────────────────┐
+│ Spydate.App (net10.0-windows)│  │ Spydate.Mcp (net10.0, exe)│
+│  Views · ViewModels · Services│  │  MCP tools over stdio     │
+└───────────────▲──────────────┘  └────────────▲──────────────┘
+                │                              │
+                └──────────────┬───────────────┘
+                               │
 ┌───────────────┴─────────────────────────────────────────────┐
 │ Spydate.Decompiler (net10.0)                                │
 │  Native: IR · X86Lifter · passes · Structurer · PseudoC     │
@@ -40,7 +42,32 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Rules: strictly downward references. Core knows nothing about Iced/ILSpy/WPF.
+Rules: strictly downward references. Core knows nothing about Iced/ILSpy/WPF. `Spydate.Mcp` sits
+beside the app rather than under it: neither references the other, and they share a binary only
+through the `.spydate` project file.
+
+### `Spydate.Mcp` — the engine as agent tools
+
+A `net10.0` console exe speaking MCP over stdin and stdout, so an agent can run the naming loop
+against a binary. See `docs/MCP.md` for the tools and `DECISIONS.md` for why it is headless rather
+than hosted in the window.
+
+Three things about it are worth knowing before changing it:
+
+- **Answers are aligned text, never JSON.** JSON repeats every key on every row — fifty functions
+  with eight fields spends hundreds of tokens writing the word "name" — and nothing reads these but a
+  model. `Rendering/TextTable` and `Rendering/Budget` hold the shape and the limits, centrally, so no
+  tool can forget them. Every cut says what it dropped and names the call that gets the rest; an
+  agent that thinks it read a whole function reasons confidently from a third of one.
+- **`Session/Targets.ResolveFunction` is a guard, not a convenience.**
+  `BinaryAnalysis.GetOrDiscoverFunction` invents a function at whatever address it is handed and
+  caches a symbol for it. An agent constantly holds addresses that are not entries — call sites from
+  a reference list, search hits, an instruction it just read — so every tool resolves through
+  `FunctionContaining` first. The window is safe only because it opens functions it already found.
+- **One session, one lock.** `BinarySession` holds a `SemaphoreSlim` for the whole of every call.
+  Engine reads are safe concurrently, but discovery is not re-entrant and annotate-merge-save has to
+  be atomic — and the SDK does dispatch calls in parallel. It also caches the sorted function list,
+  because `BinaryAnalysis.Functions` re-sorts the whole set on every access.
 
 ## 3. Core: `Spydate.Core`
 
@@ -135,6 +162,18 @@ Two decisions are worth knowing:
 `GraphSvg` renders a layout to SVG. It backs "Export SVG", and it is also the only way
 to *look* at a layout at all: the numbers can be asserted, but only a picture shows
 whether the result reads well.
+
+### 3.4c Watching the project file
+
+`ProjectFileWatcher` reports when this image's `.spydate` file is rewritten by something else — an
+agent driving the MCP server, or a second copy of Spydate. It watches both candidate directories,
+because which one is in play changes when the first save creates the file, and it debounces: a save
+lands as several events (the temp file appears, then is renamed over the target), and reloading once
+per event would be a visible stutter.
+
+It is in Core rather than in the window on purpose. It began in the app, where nothing can be tested,
+and moving it down is what turned "the window did not seem to reload" into a diagnosis — UI
+Automation cannot see the output log, so the absence of a message there meant nothing.
 
 ### 3.5 API set schema
 
