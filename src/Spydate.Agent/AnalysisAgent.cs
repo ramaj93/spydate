@@ -18,6 +18,9 @@ public sealed record AgentStep(string Kind, string Text)
     /// <summary>A piece of the answer, as it is generated. Appended to whatever came before it.</summary>
     public static AgentStep Delta(string text) => new("delta", text);
 
+    /// <summary>Something the panel did, rather than something anyone said.</summary>
+    public static AgentStep Note(string text) => new("note", text);
+
     public static AgentStep Said(string text) => new("said", text);
 
     public static AgentStep Problem(string text) => new("problem", text);
@@ -42,6 +45,7 @@ public sealed class AnalysisAgent : IDisposable
     private readonly ChatOptions _options;
     private readonly AnnotationStore? _annotations;
     private readonly bool _stream;
+    private readonly int _maxHistoryChars;
 
     public AnalysisAgent(IChatClient client, SessionStore store, McpOptions options, ProviderSettings settings)
     {
@@ -63,6 +67,7 @@ public sealed class AnalysisAgent : IDisposable
 
         _annotations = store.Current?.Analysis?.Annotations;
         _stream = settings.Stream;
+        _maxHistoryChars = settings.MaxHistoryChars;
         _options = new ChatOptions { Tools = ToolsFor(store, options).Cast<AITool>().ToList() };
         _history.Add(new ChatMessage(ChatRole.System, SystemPrompt));
     }
@@ -78,6 +83,13 @@ public sealed class AnalysisAgent : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
         _history.Add(new ChatMessage(ChatRole.User, question));
+
+        if (Trim() is > 0 and var dropped)
+        {
+            progress?.Report(AgentStep.Note(
+                $"— the earliest {dropped} exchange{(dropped == 1 ? string.Empty : "s")} " +
+                "left the assistant's memory to keep this within the model's context; they are still above —"));
+        }
 
         // Anything named during this turn was named by the agent, and the project file should say so.
         // The store carries one source at a time, so it is flipped for the turn and put back: a
@@ -153,6 +165,57 @@ public sealed class AnalysisAgent : IDisposable
 
         return updates.ToChatResponse();
     }
+
+    /// <summary>
+    /// Drops whole exchanges from the oldest until the conversation fits, and says how many went.
+    ///
+    /// Whole exchanges, never part of one. A tool call and its result are a matched pair, and a
+    /// provider handed either without the other rejects the request outright — so the cut is only
+    /// ever made where one user message ends and the next begins. The newest exchange is never
+    /// dropped, however big it is: the alternative to sending it is not sending anything.
+    /// </summary>
+    private int Trim()
+    {
+        int dropped = 0;
+
+        while (Size() > _maxHistoryChars)
+        {
+            int start = NextUser(1);
+            int end = start < 0 ? -1 : NextUser(start + 1);
+            if (end < 0)
+            {
+                break;      // one exchange left, and it is the one being asked
+            }
+
+            _history.RemoveRange(start, end - start);
+            dropped++;
+        }
+
+        return dropped;
+    }
+
+    /// <summary>Where the next exchange begins, at or after <paramref name="from"/>.</summary>
+    private int NextUser(int from)
+    {
+        for (int i = from; i < _history.Count; i++)
+        {
+            if (_history[i].Role == ChatRole.User)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private int Size() => _history.Sum(message => message.Contents.Sum(content => content switch
+    {
+        TextContent text => text.Text.Length,
+        FunctionResultContent result => result.Result?.ToString()?.Length ?? 0,
+        FunctionCallContent call => call.Name.Length
+                                    + (call.Arguments?.Sum(a => a.Key.Length + (a.Value?.ToString()?.Length ?? 0)) ?? 0),
+        _ => 0,
+    }));
 
     /// <summary>Forgets the conversation but not the tools, for starting again on the same binary.</summary>
     public void Reset()

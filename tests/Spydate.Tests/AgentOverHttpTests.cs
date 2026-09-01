@@ -1,3 +1,4 @@
+using Microsoft.Extensions.AI;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -224,6 +225,52 @@ public sealed class AgentOverHttpTests : IDisposable
         // Reported after the fact rather than during, which is the trade, but still reported.
         Assert.Contains(recorder.Steps, s => s.Kind == "tool");
         Assert.DoesNotContain(recorder.Steps, s => s.Kind == "delta");
+    }
+
+    [Fact]
+    public async Task ALongConversationIsTrimmedToWholeExchanges()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        var store = new SessionStore();
+        store.Set(new BinarySession(Corpus.NotepadX64, Corpus.Image(Corpus.NotepadX64), analysis, null, new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero)));
+
+        // Small enough that a couple of turns of tool output overruns it.
+        var settings = new ProviderSettings { Kind = ProviderKind.DeepSeek, Model = "fake", Endpoint = _prefix, MaxHistoryChars = 800 };
+        using var agent = new AnalysisAgent(ChatProviders.Create(settings, "sk-not-a-real-key"), store, McpOptions.Default, settings);
+
+        var recorder = new Recorder();
+        for (int i = 0; i < 6; i++)
+        {
+            _turn = 0;      // each ask gets the same two-step script: a tool call, then an answer
+            await agent.AskAsync($"question {i}", recorder);
+        }
+
+        // The system prompt is what the whole thing is anchored on and must never be trimmed away.
+        Assert.Equal(ChatRole.System, agent.History[0].Role);
+        Assert.Contains("reverse-engineer", agent.History[0].Text, StringComparison.Ordinal);
+
+        // Every result still has the call it answers. Cutting anywhere else leaves a tool result
+        // with no tool call, which a provider rejects outright rather than ignoring.
+        var offered = agent.History
+            .SelectMany(m => m.Contents)
+            .OfType<FunctionCallContent>()
+            .Select(c => c.CallId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var result in agent.History.SelectMany(m => m.Contents).OfType<FunctionResultContent>())
+        {
+            Assert.Contains(result.CallId, offered);
+        }
+
+        // And it actually did trim, or this proves nothing.
+        Assert.Contains(recorder.Steps, s => s.Kind == "note");
+        Assert.DoesNotContain(agent.History, m => m.Role == ChatRole.User && m.Text == "question 0");
+        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "question 5");
     }
 
     [Fact]

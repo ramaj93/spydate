@@ -143,6 +143,11 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
                         Add("tool", step.Text);
                         break;
 
+                    case "note":
+                        _answer = null;
+                        Add("note", step.Text);
+                        break;
+
                     case "delta" when _answer is not null:
                         _answer.Append(step.Text);
                         Advanced();

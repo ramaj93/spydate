@@ -48,6 +48,18 @@ public sealed record ProviderSettings
     /// </summary>
     public bool Stream { get; init; } = true;
 
+    /// <summary>
+    /// Roughly how much conversation to carry, in characters — a stand-in for tokens, near enough
+    /// at about four characters each and with no tokeniser to be wrong about.
+    ///
+    /// Something has to bound this. A turn may make two dozen tool calls, and their results are
+    /// function listings and disassembly rather than sentences, so a few turns of real work will
+    /// otherwise fill any context window there is. What happens then is not a clean error: models
+    /// degrade first, and one way they degrade is writing their own tool-call template into the
+    /// answer as text instead of calling anything.
+    /// </summary>
+    public int MaxHistoryChars { get; init; } = 200_000;
+
     /// <summary>The name this provider's key is stored under.</summary>
     public string KeyName => Kind.ToString();
 
