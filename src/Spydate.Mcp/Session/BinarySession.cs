@@ -34,13 +34,19 @@ public sealed class BinarySession : IDisposable
     private int _functionsAt = -1;
     private bool _namesChanged;
 
+    /// <param name="save">
+    /// How annotations reach disk. Injectable so tests can watch a write without one landing in the
+    /// per-user store of whoever is running them.
+    /// </param>
     public BinarySession(
         string path,
         PeImage image,
         BinaryAnalysis? analysis,
         ProjectLoadResult? project,
-        DiscoveryState discovery)
+        DiscoveryState discovery,
+        Func<PeImage, AnnotationStore, string?>? save = null)
     {
+        Save = save ?? SpydateProject.Save;
         Path = path;
         Image = image;
         Analysis = analysis;
@@ -67,7 +73,10 @@ public sealed class BinarySession : IDisposable
 
     public ProjectLoadResult? Project { get; }
 
-    public DiscoveryState Discovery { get; private set; }
+    public DiscoveryState Discovery { get; }
+
+    /// <summary>Writes the annotations out, returning where they went.</summary>
+    public Func<PeImage, AnnotationStore, string?> Save { get; }
 
     /// <summary>
     /// The discovered functions in address order, cached. <see cref="BinaryAnalysis.Functions"/>
