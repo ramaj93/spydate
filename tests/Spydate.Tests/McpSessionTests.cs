@@ -158,9 +158,9 @@ public class McpSessionTests
         ulong inside = function.Instructions.Skip(2).First().Va;
 
         int before = session.Analysis!.FunctionCount;
-        var (target, resolved, redirected) = Targets.ResolveFunction(session, $"0x{inside:X}");
+        var (target, resolved, asked) = Targets.ResolveFunction(session, $"0x{inside:X}");
 
-        Assert.True(redirected);
+        Assert.Equal(inside, asked);            // the address asked about is not thrown away
         Assert.Equal(function.EntryVa, target.Va);
         Assert.Equal(function.EntryVa, resolved!.EntryVa);
         Assert.Equal(before, session.Analysis.FunctionCount);   // nothing was invented
@@ -242,7 +242,7 @@ public class McpSessionTests
         Assert.Equal(20, elided.Length);
         Assert.StartsWith("?Foo", elided, StringComparison.Ordinal);
         Assert.EndsWith("here", elided, StringComparison.Ordinal);
-        Assert.Contains('\u2026', elided);
+        Assert.Contains('~', elided);
     }
 
     [Fact]

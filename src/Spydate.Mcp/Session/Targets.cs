@@ -79,25 +79,27 @@ public static class Targets
     /// symbols into the analysis. The window never does this because it only ever opens functions it
     /// already found; this is the guard that replaces that.
     /// </summary>
-    public static (TargetResult Target, Function? Function, bool Redirected) ResolveFunction(BinarySession session, string? target)
+    public static (TargetResult Target, Function? Function, ulong? Inside) ResolveFunction(BinarySession session, string? target)
     {
         var result = Resolve(session, target);
         if (!result.Found || session.Analysis is not { } analysis)
         {
-            return (result, null, false);
+            return (result, null, null);
         }
 
         if (analysis.TryGetFunction(result.Va, out var exact))
         {
-            return (result, exact, false);
+            return (result, exact, null);
         }
 
         if (analysis.FunctionContaining(result.Va) is { } containing)
         {
-            return (TargetResult.Of(containing.EntryVa), containing, true);
+            // The address asked about is carried back, not discarded: saying "0x140001008 is inside
+            // this function" about 0x140001008 tells the agent nothing it did not just say.
+            return (TargetResult.Of(containing.EntryVa), containing, result.Va);
         }
 
-        return (TargetResult.Failed($"0x{result.Va:X} is not in any discovered function"), null, false);
+        return (TargetResult.Failed($"0x{result.Va:X} is not in any discovered function"), null, null);
     }
 
     /// <summary>Names close enough to the one that missed to be worth offering.</summary>

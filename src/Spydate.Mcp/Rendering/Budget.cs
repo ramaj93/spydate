@@ -19,6 +19,9 @@ public static class Budget
     /// </summary>
     public const int MaxChars = 12_000;
 
+    /// <summary>Space kept back for the sentence that says what was cut.</summary>
+    private const int NoticeReserve = 80;
+
     /// <summary>
     /// Trims to a whole number of lines and appends what was dropped. Cutting mid-line would leave
     /// half an instruction looking like a whole one.
@@ -31,6 +34,10 @@ public static class Budget
             return text;
         }
 
+        // The notice is part of the answer, so it has to fit inside the limit too. Without this the
+        // result overshoots by exactly the length of the sentence announcing that it did not.
+        int room = Math.Max(0, maxChars - NoticeReserve);
+
         var lines = text.Split('\n');
         var kept = new StringBuilder();
         int used = 0;
@@ -39,7 +46,7 @@ public static class Budget
         foreach (string line in lines)
         {
             int cost = line.Length + 1;
-            if (used + cost > maxChars && count > 0)
+            if (used + cost > room && count > 0)
             {
                 break;
             }
@@ -110,11 +117,11 @@ public static class Budget
 
         if (max <= 1)
         {
-            return "…";
+            return "~";
         }
 
         int head = (max - 1) / 2;
         int tail = max - 1 - head;
-        return string.Concat(text.AsSpan(0, head), "…", text.AsSpan(text.Length - tail));
+        return string.Concat(text.AsSpan(0, head), "~", text.AsSpan(text.Length - tail));
     }
 }

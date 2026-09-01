@@ -75,7 +75,7 @@ public readonly record struct CalleeSignature
             return "unknown";
         }
 
-        string args = HasArgumentCount ? $"{ArgumentCount} args" : "? args";
+        string args = HasArgumentCount ? $"{ArgumentCount} arg{(ArgumentCount == 1 ? string.Empty : "s")}" : "? args";
         string cleanup = HasStackCleanup ? $", cleans {StackCleanupBytes}" : string.Empty;
         string floats = FloatMask == 0 ? string.Empty : $", float mask 0x{FloatMask:X}";
         return $"{args}{cleanup}{floats}";
