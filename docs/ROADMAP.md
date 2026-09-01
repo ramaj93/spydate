@@ -139,7 +139,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Assistant panel with bring-your-own-key: OpenAI, OpenRouter, DeepSeek and Anthropic behind one
   `IChatClient`, running the same thirteen tools the MCP server publishes against the analysis the
   window already has open — so a name it gives shows up in the documents at once. Keys are encrypted
-  to the Windows account and kept apart from the settings file
+  to the Windows account and kept apart from the settings file, and the model is chosen from what the
+  provider says it has rather than typed from memory, with the box still editable for anything it
+  does not list
 - ⬜ CLI (`spydate dump/disasm/decompile`) sharing the engine — largely subsumed by the MCP server,
   which is the same headless surface with a different front end
 - ⬜ Plugin API (IAnalyzer / IDocumentProvider)

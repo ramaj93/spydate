@@ -27,7 +27,16 @@
                   SelectionChanged="OnProviderChanged" />
 
         <TextBlock Grid.Row="1" Grid.Column="0" Text="Model" VerticalAlignment="Center" Margin="0,0,10,8" />
-        <TextBox x:Name="ModelBox" Grid.Row="1" Grid.Column="1" Margin="0,0,0,8" />
+        <DockPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,8">
+            <Button x:Name="FetchButton" DockPanel.Dock="Right" Content="List models" Width="90" Margin="6,0,0,0"
+                    Click="OnFetchModelsClick"
+                    ToolTip="Ask the provider which models it has. You can still type one it does not list."
+                    AutomationProperties.Name="List models" />
+            <!-- Editable: discovery is a convenience, not a gate. A model released today usually
+                 works before it appears in a list, and a proxy may not implement the endpoint. -->
+            <ComboBox x:Name="ModelBox" IsEditable="True" IsTextSearchEnabled="True"
+                      AutomationProperties.Name="Model" />
+        </DockPanel>
 
         <TextBlock Grid.Row="2" Grid.Column="0" Text="API key" VerticalAlignment="Center" Margin="0,0,10,8" />
         <PasswordBox x:Name="KeyBox" Grid.Row="2" Grid.Column="1" Margin="0,0,0,8" />
@@ -38,6 +47,9 @@
         <TextBlock Grid.Row="4" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="Leave the endpoint empty unless you are going through a proxy or a compatible server." />
+
+        <TextBlock x:Name="ModelStatus" Grid.Row="4" Grid.Column="0" VerticalAlignment="Top" Margin="0,0,10,0"
+                   TextWrapping="Wrap" Foreground="{DynamicResource Text.Tertiary}" />
 
         <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
                    Foreground="{DynamicResource Text.Tertiary}"

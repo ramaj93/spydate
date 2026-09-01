@@ -272,6 +272,12 @@ cannot carry one. A key that fails to decrypt — written by another account, or
 damaged — reads as "no key configured" rather than throwing, because that is the
 truth from here and a crash at startup is not.
 
+**Models are discovered, not memorised.** Every provider answers a models endpoint, so the settings
+dialog asks rather than making someone type an id from memory — providers rename them, and a wrong
+one fails at the first question with an error that names nothing useful. The box stays editable
+regardless: a model released today usually works before it is listed, a proxy need not implement the
+endpoint at all, and a failed lookup writes a line of status rather than blocking the dialog.
+
 **The panel is thin on purpose.** Everything worth testing — the loop, the
 providers, the secret store, the settings — is in `Spydate.Agent`, a plain library.
 Nothing in the WPF project is reachable from a test, and an assistant whose

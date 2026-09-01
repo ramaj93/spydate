@@ -84,6 +84,9 @@
                     <MenuItem Header="Control-flow _graph" InputGestureText="F7" Command="{Binding OpenGraphCommand}"
                               ToolTip="Draw this function as basic blocks and the edges between them" />
                     <Separator />
+                    <MenuItem Header="Assistant _provider…" Command="{Binding Assistant.ConfigureCommand}"
+                              ToolTip="Choose a provider and model for the Assistant panel, and add an API key" />
+                    <Separator />
                     <MenuItem Header="Close _tab" InputGestureText="Ctrl+W" Command="{Binding CloseActiveDocumentCommand}" />
                     <MenuItem Header="Close all tabs" Command="{Binding CloseAllDocumentsCommand}" />
                 </MenuItem>

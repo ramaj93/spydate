@@ -50,10 +50,60 @@ public partial class ProviderSettingsWindow : Window
         }
 
         // Switching provider makes the old model id meaningless, so it is replaced with one that
-        // works rather than left to fail on the first question.
+        // works rather than left to fail on the first question. Any list fetched for the previous
+        // provider goes too, for the same reason.
+        ModelBox.ItemsSource = null;
         ModelBox.Text = ProviderSettings.SuggestedModel(kind);
         EndpointBox.Text = string.Empty;
+        ModelStatus.Text = string.Empty;
         UpdateKeyHint();
+    }
+
+    /// <summary>
+    /// Asks the provider what it can run. Typing a model id from memory is a coin toss — providers
+    /// rename them, and a wrong one fails at the first question with an error that says nothing
+    /// useful — so this turns it into a list. What was typed is kept if it is still on offer.
+    /// </summary>
+    private async void OnFetchModelsClick(object sender, RoutedEventArgs e)
+    {
+        if (ProviderBox.SelectedItem is not ProviderKind kind)
+        {
+            return;
+        }
+
+        string typed = ModelBox.Text.Trim();
+        var settings = new ProviderSettings
+        {
+            Kind = kind,
+            Model = typed.Length > 0 ? typed : "unused",
+            Endpoint = EndpointBox.Text.Trim() is { Length: > 0 } endpoint ? endpoint : null,
+        };
+
+        // The key just typed takes precedence over the stored one, so a new key can be checked
+        // before it is saved.
+        string? key = KeyBox.Password.Length > 0 ? KeyBox.Password : _secrets.Get(kind.ToString());
+
+        try
+        {
+            FetchButton.IsEnabled = false;
+            ModelStatus.Text = "Asking...";
+
+            var result = await ModelCatalog.ListAsync(settings, key).ConfigureAwait(true);
+            if (!result.Ok)
+            {
+                // Never a dialog: the list is a convenience, and the box below still works.
+                ModelStatus.Text = result.Problem;
+                return;
+            }
+
+            ModelBox.ItemsSource = result.Models;
+            ModelBox.Text = result.Models.Contains(typed, StringComparer.Ordinal) ? typed : result.Models[0];
+            ModelStatus.Text = $"{result.Models.Count} models";
+        }
+        finally
+        {
+            FetchButton.IsEnabled = true;
+        }
     }
 
     private void UpdateKeyHint()
