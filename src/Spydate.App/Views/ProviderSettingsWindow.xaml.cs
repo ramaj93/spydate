@@ -98,7 +98,7 @@ public partial class ProviderSettingsWindow : Window
         ModelBox.ItemsSource = null;
         ModelBox.Text = ProviderSettings.SuggestedModel(kind);
         EndpointBox.Text = string.Empty;
-        ModelStatus.Text = string.Empty;
+        Say(string.Empty);
         UpdateKeyHint();
     }
 
@@ -129,24 +129,36 @@ public partial class ProviderSettingsWindow : Window
         try
         {
             FetchButton.IsEnabled = false;
-            ModelStatus.Text = "Asking...";
+            Say("Asking...");
 
             var result = await ModelCatalog.ListAsync(settings, key).ConfigureAwait(true);
             if (!result.Ok)
             {
                 // Never a dialog: the list is a convenience, and the box below still works.
-                ModelStatus.Text = result.Problem;
+                Say(result.Problem);
                 return;
             }
 
             ModelBox.ItemsSource = result.Models;
             ModelBox.Text = result.Models.Contains(typed, StringComparer.Ordinal) ? typed : result.Models[0];
-            ModelStatus.Text = $"{result.Models.Count} models";
+            Say($"{result.Models.Count} models");
         }
         finally
         {
             FetchButton.IsEnabled = true;
         }
+    }
+
+    /// <summary>
+    /// Says something on the status line, and takes the line away again when there is nothing to
+    /// say. It is one line, so a provider's error is trimmed to fit — and the tooltip carries the
+    /// whole of it, because a truncated error is missing the half that says what went wrong.
+    /// </summary>
+    private void Say(string? text)
+    {
+        ModelStatus.Text = text ?? string.Empty;
+        ModelStatus.ToolTip = text is { Length: > 0 } ? text : null;
+        ModelStatus.Visibility = text is { Length: > 0 } ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateKeyHint()

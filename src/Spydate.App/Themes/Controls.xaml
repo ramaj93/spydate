@@ -406,6 +406,49 @@
         </Style.Triggers>
     </Style>
 
+    <!-- The password box was the one input left wearing the stock WPF look: paler, and half a line
+         taller than everything beside it, which is why the API key row stood out from the fields
+         above and below it. Same border, same density, same states as the text box. -->
+    <Style TargetType="{x:Type PasswordBox}">
+        <Setter Property="Background" Value="{DynamicResource Control.Background}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Control.Border}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+        <Setter Property="CaretBrush" Value="{DynamicResource Text.Primary}" />
+        <Setter Property="SelectionBrush" Value="{DynamicResource Selection.Background}" />
+        <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
+        <Setter Property="FontSize" Value="{DynamicResource App.FontSize}" />
+        <Setter Property="MinHeight" Value="21" />
+        <Setter Property="Padding" Value="3,1" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type PasswordBox}">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            SnapsToDevicePixels="True">
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                                      VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Text.Tertiary}" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Control.Disabled.Background}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Text.Disabled}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ================================================================ -->
     <!-- ComboBox                                                          -->
     <!-- ================================================================ -->

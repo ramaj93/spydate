@@ -7,10 +7,11 @@
         ResizeMode="NoResize" ShowInTaskbar="False"
         Background="{DynamicResource Panel.Background}"
         Foreground="{DynamicResource Text.Primary}">
+    <!-- Every field says what it is in its label, and what it wants in its placeholder or tooltip.
+         The paragraphs that used to sit under half of them said it a second time, in a dialog that
+         is read once and then only ever revisited to change one box. -->
     <Grid Margin="14">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -30,8 +31,8 @@
         <ComboBox x:Name="ProviderBox" Grid.Row="0" Grid.Column="1" Margin="0,0,0,8"
                   SelectionChanged="OnProviderChanged" />
 
-        <TextBlock Grid.Row="1" Grid.Column="0" Text="Model" VerticalAlignment="Center" Margin="0,0,10,8" />
-        <DockPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,8">
+        <TextBlock Grid.Row="1" Grid.Column="0" Text="Model" VerticalAlignment="Center" Margin="0,0,10,4" />
+        <DockPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,4">
             <Button x:Name="FetchButton" DockPanel.Dock="Right" Content="List models" Width="90" Margin="6,0,0,0"
                     Click="OnFetchModelsClick"
                     ToolTip="Ask the provider which models it has. You can still type one it does not list."
@@ -42,56 +43,46 @@
                       AutomationProperties.Name="Model" />
         </DockPanel>
 
-        <TextBlock Grid.Row="2" Grid.Column="0" Text="API key" VerticalAlignment="Center" Margin="0,0,10,8" />
-        <PasswordBox x:Name="KeyBox" Grid.Row="2" Grid.Column="1" Margin="0,0,0,8" />
+        <!-- Not there at all until there is something to say, rather than a blank line held open for
+             the one time in ten this dialog is opened that anybody presses List models. It can only
+             ever appear in answer to that button, directly above it, so nothing moves under a hand
+             that was reaching for something else. One line: a provider's error can run long, so what
+             does not fit is trimmed and the whole of it is in the tooltip. -->
+        <TextBlock x:Name="ModelStatus" Grid.Row="2" Grid.Column="1" Margin="0,0,0,8"
+                   Visibility="Collapsed"
+                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                   Foreground="{DynamicResource Text.Tertiary}" />
 
-        <TextBlock Grid.Row="3" Grid.Column="0" Text="Endpoint" VerticalAlignment="Center" Margin="0,0,10,4" />
-        <TextBox x:Name="EndpointBox" Grid.Row="3" Grid.Column="1" Margin="0,0,0,4"
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="API key" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <PasswordBox x:Name="KeyBox" Grid.Row="3" Grid.Column="1" Margin="0,0,0,8" />
+
+        <TextBlock Grid.Row="4" Grid.Column="0" Text="Endpoint" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <TextBox x:Name="EndpointBox" Grid.Row="4" Grid.Column="1" Margin="0,0,0,8"
+                 Tag="Only for a proxy or a compatible server"
                  AutomationProperties.Name="Endpoint" />
 
-        <TextBlock Grid.Row="4" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
-                   Foreground="{DynamicResource Text.Tertiary}"
-                   Text="Leave the endpoint empty unless you are going through a proxy or a compatible server." />
-
-        <TextBlock Grid.Row="6" Grid.Column="0" Text="Context" VerticalAlignment="Center" Margin="0,0,10,4" />
-        <DockPanel Grid.Row="6" Grid.Column="1" Margin="0,0,0,4">
+        <TextBlock Grid.Row="5" Grid.Column="0" Text="Context" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <DockPanel Grid.Row="5" Grid.Column="1" Margin="0,0,0,8">
             <TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0,0,0"
                        Foreground="{DynamicResource Text.Tertiary}"
                        Text="thousand tokens" />
             <TextBox x:Name="ContextBox" Width="70" HorizontalAlignment="Left"
-                     ToolTip="The model's context window, less room for its answer. Older exchanges are dropped to stay inside it."
+                     ToolTip="The model's context window, less room for its answer. Filled in from the model until you change it; older exchanges are dropped to stay inside it, and too high does not fail cleanly."
                      AutomationProperties.Name="Context size" />
         </DockPanel>
 
-        <TextBlock Grid.Row="7" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
-                   Foreground="{DynamicResource Text.Tertiary}"
-                   Text="Filled in from the model, with room left for the answer, and left alone once you change it. Windows vary by more than ten times between models, so check yours: too high does not fail cleanly." />
-
-        <CheckBox x:Name="StreamBox" Grid.Row="8" Grid.Column="1" Margin="0,0,0,10"
+        <CheckBox x:Name="StreamBox" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10"
                   Content="Show the answer as it is written"
                   ToolTip="Turn this off if the assistant prints its own tool-call markup as text instead of running the tools."
                   AutomationProperties.Name="Stream the answer" />
 
-        <!-- Across both columns, and not in the label column. That one is Auto-width, which measures
-             at infinite width, so TextWrapping there does nothing: a provider's error would lay out
-             on one line, widen the column past the whole dialog, squeeze the star column to nothing
-             and leave the hint above wrapping one word per line.
-
-             The height is fixed rather than capped, so the space is reserved whether or not there is
-             anything to say. The window is SizeToContent, and a status line that appears out of
-             nothing moves every control below it — including the buttons, at the moment someone is
-             reaching for them. A long message scrolls inside this box instead. -->
-        <ScrollViewer Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Height="52" Margin="0,0,0,10"
-                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <TextBlock x:Name="ModelStatus" TextWrapping="Wrap"
-                       Foreground="{DynamicResource Text.Tertiary}" />
-        </ScrollViewer>
-
-        <TextBlock Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,14"
+        <!-- The one thing left that a label cannot carry: where the key you are about to paste ends
+             up. It is the question somebody has while typing into the box above it. -->
+        <TextBlock Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,12"
                    Foreground="{DynamicResource Text.Tertiary}"
-                   Text="The key is encrypted to your Windows account and kept apart from these settings, so it is not in any file you might share. It is sent only to the provider above. Everything the assistant reads comes from the binary you have open — treat what it reports the way you would treat the binary itself." />
+                   Text="The key is encrypted to your Windows account, kept out of these settings, and sent only to the provider above." />
 
-        <StackPanel Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Forget key" Width="92" Margin="0,0,8,0" Click="OnForgetClick" />
             <Button Content="Cancel" Width="80" Margin="0,0,8,0" IsCancel="True" />
             <Button Content="Save" Width="80" IsDefault="True" Click="OnSaveClick" />
