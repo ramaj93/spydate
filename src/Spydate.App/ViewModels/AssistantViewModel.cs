@@ -60,6 +60,9 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private SessionStore? _session;
     private CancellationTokenSource? _turn;
 
+    /// <summary>The end of the conversation restored for this binary, or null when there was none.</summary>
+    private string? _earlier;
+
     public AssistantViewModel(WorkspaceService workspace, ISecretStore secrets, IFileDialogService dialogs)
     {
         _workspace = workspace;
@@ -228,6 +231,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     {
         ResetAgent();
         Transcript.Clear();
+        _earlier = null;       // nothing on screen to refer back to, so nothing to resolve against
         Remember();            // nothing left to remember, so the stored log goes too
         UpdateStatus();
     }
@@ -244,6 +248,10 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     {
         ResetAgent();
         Transcript.Clear();
+
+        // Cleared before Recall rather than by it: Recall returns early when the new binary has no
+        // stored conversation, and the previous binary's would otherwise still be sitting here.
+        _earlier = null;
         Recall();
         UpdateStatus();
     }
@@ -293,7 +301,13 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             Transcript.Add(new AssistantLine(entry.Kind, entry.Text, entry.At));
         }
 
-        Add("note", $"— {entries.Count} lines from {entries[^1].At.LocalDateTime:g}. Kept for you to read; the assistant does not remember them. —");
+        // Handed to the next agent built for this binary, so that answering the question the last
+        // session ended on means something. See AnalysisAgent.Prompt.
+        _earlier = ChatLog.Recap(entries);
+
+        Add("note", $"— {entries.Count} lines from {entries[^1].At.LocalDateTime:g}, kept for you to read. "
+                    + "A fresh conversation starts from here: the assistant is given the end of the above and "
+                    + "the names already in the project, not the whole of it. —");
     }
 
     /// <summary>
@@ -380,7 +394,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             patches: binary.Patches));
 
         var provider = Settings.ToProviderSettings();
-        _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, McpOptions.Default, provider);
+        _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, McpOptions.Default, provider, _earlier);
         return _agent;
     }
 

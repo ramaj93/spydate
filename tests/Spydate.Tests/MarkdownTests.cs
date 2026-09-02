@@ -192,6 +192,131 @@ public sealed class ChatLogTests
         }
     }
 
+    /// <summary>
+    /// The scenario the recap exists for: the window is closed on a question, and reopened, and the
+    /// answer is one word. Without the end of the conversation "yes" means nothing, and a model
+    /// holding tools that write to the project must not be left guessing what it just agreed to.
+    /// </summary>
+    [Fact]
+    public void TheQuestionAConversationEndedOnSurvivesIntoTheRecap()
+    {
+        var entries = new List<ChatEntry>();
+        for (int i = 0; i < 40; i++)
+        {
+            entries.Add(new ChatEntry { Kind = "you", Text = $"question {i}" });
+            entries.Add(new ChatEntry { Kind = "assistant", Text = $"answer {i}" });
+        }
+
+        entries.Add(new ChatEntry { Kind = "tool", Text = "read_function(target=sub_140001000)" });
+        entries.Add(new ChatEntry { Kind = "assistant", Text = "sub_140001000 looks like a CRC table build. Want me to name it?" });
+
+        string recap = ChatLog.Recap(entries);
+
+        Assert.Contains("Want me to name it?", recap, StringComparison.Ordinal);
+        Assert.EndsWith("Want me to name it?", recap, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheRecapKeepsTheEndAndDropsTheBeginning()
+    {
+        var entries = new List<ChatEntry>();
+        for (int i = 0; i < 200; i++)
+        {
+            entries.Add(new ChatEntry { Kind = "assistant", Text = $"line {i} " + new string('x', 100) });
+        }
+
+        string recap = ChatLog.Recap(entries, maxChars: 1000);
+
+        Assert.True(recap.Length <= 1000, $"recap was {recap.Length} characters");
+        Assert.Contains("line 199", recap, StringComparison.Ordinal);
+        Assert.DoesNotContain("line 0 ", recap, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToolLinesAreLeftOutOfTheRecap()
+    {
+        // A stored tool line is the call and never the result, so it would spend the budget on a
+        // question whose answer is missing.
+        var entries = new List<ChatEntry>
+        {
+            new() { Kind = "tool", Text = "find_strings(pattern=licence)" },
+            new() { Kind = "note", Text = "— an aside from the panel —" },
+            new() { Kind = "assistant", Text = "nothing obvious there" },
+        };
+
+        string recap = ChatLog.Recap(entries);
+
+        Assert.DoesNotContain("find_strings", recap, StringComparison.Ordinal);
+        Assert.DoesNotContain("an aside", recap, StringComparison.Ordinal);
+        Assert.Contains("nothing obvious there", recap, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneEnormousLastMessageIsKeptByItsEnd()
+    {
+        var entries = new List<ChatEntry>
+        {
+            new() { Kind = "assistant", Text = new string('y', 5000) + " so shall I go ahead?" },
+        };
+
+        string recap = ChatLog.Recap(entries, maxChars: 200);
+
+        Assert.True(recap.Length <= 200, $"recap was {recap.Length} characters");
+        Assert.EndsWith("so shall I go ahead?", recap, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Taken from a real log. The model failed to make the call and printed its own template as
+    /// text, the panel stored what it displayed, and the recap would otherwise hand that back as an
+    /// example of how an assistant answers here.
+    /// </summary>
+    [Fact]
+    public void LeakedToolCallMarkupDoesNotGetFedBack()
+    {
+        var entries = new List<ChatEntry>
+        {
+            new()
+            {
+                Kind = "assistant",
+                Text = "I want to verify the GString candidate.\n\n"
+                       + "<｜｜DSML｜｜tool_calls>\n"
+                       + "<｜｜DSML｜｜invoke name=\"read_function\">\n"
+                       + "</｜｜DSML｜｜tool_calls>",
+            },
+        };
+
+        string recap = ChatLog.Recap(entries);
+
+        Assert.Equal("assistant: I want to verify the GString candidate.", recap);
+    }
+
+    [Theory]
+    [InlineData("plain prose about sub_401000", "plain prose about sub_401000")]
+    [InlineData("some words <|tool_call|> junk", "some words")]
+    [InlineData("<invoke name=\"read_function\">", "")]
+    [InlineData("said it <tool_call>{}</tool_call>", "said it")]
+    public void MarkupIsCutFromTheFirstSentinelOnwards(string text, string expected)
+        => Assert.Equal(expected, ChatLog.WithoutMarkup(text));
+
+    [Fact]
+    public void AMessageThatIsNothingButMarkupIsDroppedFromTheRecapEntirely()
+    {
+        var entries = new List<ChatEntry>
+        {
+            new() { Kind = "assistant", Text = "the real answer" },
+            new() { Kind = "assistant", Text = "<invoke name=\"xrefs\"><parameter name=\"target\">x</parameter></invoke>" },
+        };
+
+        Assert.Equal("assistant: the real answer", ChatLog.Recap(entries));
+    }
+
+    [Fact]
+    public void NothingWorthKeepingGivesAnEmptyRecap()
+    {
+        Assert.Equal(string.Empty, ChatLog.Recap([]));
+        Assert.Equal(string.Empty, ChatLog.Recap([new ChatEntry { Kind = "tool", Text = "xrefs(target=x)" }]));
+    }
+
     [Fact]
     public void TwoBinariesWithTheSameNameDoNotShareALog()
     {

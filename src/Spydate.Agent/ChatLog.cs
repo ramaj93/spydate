@@ -83,6 +83,111 @@ public static class ChatLog
     }
 
     /// <summary>
+    /// The end of a stored conversation, small enough to hand to a model that is starting again.
+    ///
+    /// The end, not the beginning: what a restored session is asked next is nearly always about the
+    /// last thing that was said. A transcript that ends "want me to do that?" is answered with
+    /// "yes", and a model given no part of it has to guess what it just agreed to — which, holding
+    /// sixteen tools that write to the project, is the one thing it must not do.
+    ///
+    /// Only what a person said and what the assistant said. Tool lines are the call and never the
+    /// result, so they would spend the budget describing questions whose answers are missing.
+    /// </summary>
+    public static string Recap(IReadOnlyList<ChatEntry> entries, int maxChars = 3000)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+
+        var kept = new List<string>();
+        int budget = maxChars;
+
+        for (int i = entries.Count - 1; i >= 0 && budget > 0; i--)
+        {
+            if (entries[i].Kind is not ("you" or "assistant"))
+            {
+                continue;
+            }
+
+            string said = WithoutMarkup(entries[i].Text).Trim();
+            if (said.Length == 0)
+            {
+                continue;
+            }
+
+            string line = $"{(entries[i].Kind == "you" ? "user" : "assistant")}: {said}";
+
+            if (line.Length > budget)
+            {
+                // Too big to keep whole, so keep its end — the pending question is the last
+                // sentence of it, and half a paragraph from the middle answers nothing.
+                if (budget < 80)
+                {
+                    break;
+                }
+
+                line = $"…{line[^(budget - 1)..]}";
+            }
+
+            kept.Add(line);
+            budget -= line.Length;
+        }
+
+        kept.Reverse();
+        return string.Join("\n\n", kept);
+    }
+
+    /// <summary>
+    /// A message with any leaked tool-call template cut off the end of it.
+    ///
+    /// A model that fails to call a tool properly writes its own template out as prose instead, and
+    /// the panel stores what it displayed, so that markup ends up in the log. Handing it back is the
+    /// worst possible use of it: it is a picture of the failure, and putting it in the prompt as an
+    /// example of what an assistant says here invites the same failure again.
+    ///
+    /// Cut rather than picked apart, because a model only ever starts emitting one of these at the
+    /// end of a message — whatever prose came first is kept, and everything from the first sentinel
+    /// goes. The list is sentinels rather than a grammar: providers each have their own shape, they
+    /// change, and none of them occurs in a sentence about a binary.
+    /// </summary>
+    public static string WithoutMarkup(string? text)
+    {
+        if (text is null or { Length: 0 })
+        {
+            return string.Empty;
+        }
+
+        int cut = -1;
+        foreach (string marker in Sentinels)
+        {
+            int at = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (at >= 0 && (cut < 0 || at < cut))
+            {
+                cut = at;
+            }
+        }
+
+        if (cut < 0)
+        {
+            return text;
+        }
+
+        // The fullwidth bar sits inside an opening tag — "<｜｜DSML｜｜tool_calls>" — so the angle
+        // bracket in front of it belongs to the markup as well, and cutting on the bar alone leaves
+        // it dangling on the end of the prose.
+        string head = text[..cut].TrimEnd();
+        return head.EndsWith('<') ? head[..^1].TrimEnd() : head;
+    }
+
+    private static readonly string[] Sentinels =
+    [
+        "｜",           // the fullwidth bar these are built out of: <｜tool▁calls▁begin｜>
+        "<|",
+        "<tool_call", "</tool_call",
+        "<function_call", "</function_call",
+        "<invoke", "</invoke",
+        "<parameter", "</parameter",
+    ];
+
+    /// <summary>
     /// Writes the conversation, or deletes the file when there is nothing left to remember. Never
     /// throws, for the same reason as <see cref="Load"/>: this is a convenience, and a full disk
     /// should not take the window down with it.
