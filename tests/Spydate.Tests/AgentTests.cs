@@ -182,6 +182,91 @@ public class AgentTests
         Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "yes");
     }
 
+    /// <summary>
+    /// Stop, then ask something else. The conversation before the stop is untouched; what matters is
+    /// that the stopped turn is not a hole — the panel still shows the half-answer, and a history
+    /// without it puts the model back to not seeing what the reader is looking at.
+    /// </summary>
+    [Fact]
+    public async Task StoppingATurnKeepsWhatItHadSaidAndSaysWhatWasLost()
+    {
+        var stop = new CancellationTokenSource();
+        using var agent = new AnalysisAgent(
+            new StoppingChatClient(stop), new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test" });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => agent.AskAsync("what does the entry point do", cancellationToken: stop.Token));
+
+        // The question is answered by something, rather than left with nothing after it.
+        Assert.Equal(ChatRole.User, agent.History[^2].Role);
+        Assert.Equal(ChatRole.Assistant, agent.History[^1].Role);
+
+        // What it managed to say is kept, and the part it can no longer stand behind is flagged.
+        Assert.Contains("the entry point sets up", agent.History[^1].Text, StringComparison.Ordinal);
+        Assert.Contains("Stopped there", agent.History[^1].Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AskingAgainAfterAStopStillHasEverythingSaidBeforeIt()
+    {
+        var stop = new CancellationTokenSource();
+        using var agent = new AnalysisAgent(
+            new StoppingChatClient(stop), new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test" });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => agent.AskAsync("first", cancellationToken: stop.Token));
+
+        // The next question carries its own token, the way the panel gives each turn a fresh one.
+        await agent.AskAsync("second");
+
+        // Cancelling ended one request, not the session: everything from before it is still here,
+        // including the half-answer the stop interrupted.
+        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "first");
+        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "second");
+        Assert.Contains(agent.History, m => m.Text.Contains("the entry point sets up", StringComparison.Ordinal));
+        Assert.Contains(agent.History, m => m.Text.Contains("carrying on then", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Says half an answer and then stops, the way pressing Stop mid-stream does — once. The turn
+    /// after it answers normally, so that what a stop does to the conversation can be looked at from
+    /// the other side of one.
+    /// </summary>
+    private sealed class StoppingChatClient(CancellationTokenSource stop) : IChatClient
+    {
+        private int _turn;
+
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new OperationCanceledException();
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            if (_turn++ == 0)
+            {
+                yield return new ChatResponseUpdate(ChatRole.Assistant, "the entry point sets up");
+
+                await stop.CancelAsync().ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                yield break;
+            }
+
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "carrying on then");
+            await Task.CompletedTask.ConfigureAwait(false);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
     // ------------------------------------------------------------------
     // Providers
     // ------------------------------------------------------------------

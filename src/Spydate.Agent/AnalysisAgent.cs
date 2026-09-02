@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Reflection;
+using System.Text;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol.Server;
 using Spydate.Agent.Providers;
@@ -49,7 +50,7 @@ public sealed class AnalysisAgent : IDisposable
 
     /// <param name="earlier">
     /// The end of a conversation somebody had about this binary before, or null. See
-    /// <see cref="Prompt"/> for why it is given at all and why it is only the end.
+    /// <see cref="Earlier"/> for why it is given at all and why it is only the end.
     /// </param>
     public AnalysisAgent(IChatClient client, SessionStore store, McpOptions options, ProviderSettings settings, string? earlier = null)
     {
@@ -120,11 +121,24 @@ public sealed class AnalysisAgent : IDisposable
         // take minutes, and the previous version reported every tool call at the end, all at once,
         // after the silence rather than during it — which is the same as not reporting them.
         ChatResponse response;
+        var said = new StringBuilder();
         try
         {
             response = _stream
-                ? await StreamAsync(progress, cancellationToken).ConfigureAwait(false)
+                ? await StreamAsync(said, progress, cancellationToken).ConfigureAwait(false)
                 : await _client.GetResponseAsync(_history, _options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopping ends the request, so none of the turn reaches the history: not what it read,
+            // and not what it had begun to say. The panel goes on showing that half-answer, which is
+            // the state this whole area keeps having to be fixed out of — plain to the reader,
+            // invisible to the model — and leaves a question with nothing after it, a shape no other
+            // path produces. So what was actually said is kept, and what was read is admitted gone.
+            _history.Add(new ChatMessage(ChatRole.Assistant, said.Length > 0
+                ? $"{said}\n\n[Stopped there. Whatever was read during that turn was not kept, so look it up again rather than relying on it.]"
+                : "[Stopped before answering.]"));
+            throw;
         }
         finally
         {
@@ -156,7 +170,7 @@ public sealed class AnalysisAgent : IDisposable
     /// the history is the same shape it would have been un-streamed and the next turn sees finished
     /// messages rather than fragments.
     /// </summary>
-    private async Task<ChatResponse> StreamAsync(IProgress<AgentStep>? progress, CancellationToken cancellationToken)
+    private async Task<ChatResponse> StreamAsync(StringBuilder said, IProgress<AgentStep>? progress, CancellationToken cancellationToken)
     {
         var updates = new List<ChatResponseUpdate>();
 
@@ -173,6 +187,9 @@ public sealed class AnalysisAgent : IDisposable
 
             if (update.Text is { Length: > 0 } delta)
             {
+                // Kept as well as reported, so that a turn cut short can still be recorded as what
+                // it managed to say rather than as nothing at all.
+                said.Append(delta);
                 progress?.Report(AgentStep.Delta(delta));
             }
         }
