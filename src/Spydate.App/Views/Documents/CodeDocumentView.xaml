@@ -45,6 +45,7 @@
 
         <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
                              HighlightingName="{Binding Highlighting, Mode=OneWay}"
+                             RevealLine="{Binding RevealLine, Mode=OneWay}"
                              CaretAddress="{Binding CaretAddress, Mode=OneWayToSource}"
                              CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
                              Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
@@ -59,6 +60,12 @@
                               ToolTip="Type an instruction to put here. Nothing is written until you save a patched copy." />
                     <MenuItem Header="_NOP out" Command="{Binding NopOutCommand}" />
                     <MenuItem Header="_Invert branch" Command="{Binding InvertBranchCommand}" />
+
+                    <Separator />
+
+                    <MenuItem Header="Toggle _breakpoint" InputGestureText="F9" Command="{Binding ToggleBreakpointCommand}" />
+
+                    <MenuItem Header="R_un to cursor" InputGestureText="Ctrl+F10" Command="{Binding RunToCursorCommand}" />
                     <Separator />
                     <MenuItem Header="Cop_y" InputGestureText="Ctrl+C" Command="ApplicationCommands.Copy" />
                 </ContextMenu>

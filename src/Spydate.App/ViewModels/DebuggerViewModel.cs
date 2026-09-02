@@ -77,6 +77,18 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Refused rather than attempted. The register context here is CONTEXT_AMD64; a 32-bit process
+        // runs under WOW64 and needs Wow64GetThreadContext, and asking for the 64-bit one gives back
+        // a structure that is read as registers and is not. Wrong register values in a debugger are
+        // worse than no debugger — they are believed.
+        if (!binary.Image.Is64Bit)
+        {
+            Status = "Only 64-bit binaries can be debugged so far.";
+            Add($"{binary.DisplayName} is 32-bit. Reading a WOW64 process's registers needs a different "
+                + "call than this uses, and using the wrong one reports values that look real. Not started.");
+            return;
+        }
+
         // Asked every time, not once and remembered. The answer is about this binary, and the cost
         // of getting it wrong is running something hostile on the analyst's own machine.
         if (!_confirm(

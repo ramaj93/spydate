@@ -122,13 +122,7 @@ public sealed class CodeEditor : TextEditor
             return;
         }
 
-        var target = editor.Document.GetLineByNumber(line);
-        if (editor.TextArea.Caret.Line != line)
-        {
-            editor.TextArea.Caret.Offset = target.Offset;
-        }
-
-        editor.ScrollToLine(line);
+        editor.Reveal(line);
     }
 
     /// <summary>
@@ -182,12 +176,32 @@ public sealed class CodeEditor : TextEditor
     {
         var editor = (CodeEditor)d;
         string text = e.NewValue as string ?? string.Empty;
-        if (editor.Text != text)
+        if (editor.Text == text)
         {
-            editor.Text = text;
-            editor.ScrollToHome();
-            editor.UpdateCaretContext();
+            return;
         }
+
+        editor.Text = text;
+        editor.ScrollToHome();
+
+        // Back to the line the document is about, if it has one. New text resets the view to the
+        // top, and a listing is re-read whenever a patch or a breakpoint changes how it is marked —
+        // so without this, every toggle throws away the place the analyst was reading and puts the
+        // caret on a header comment, where the very commands they were using go grey.
+        editor.Reveal(editor.RevealLine);
+        editor.UpdateCaretContext();
+    }
+
+    /// <summary>Moves the caret to a 1-based line and scrolls it into view. Zero leaves things alone.</summary>
+    private void Reveal(int line)
+    {
+        if (line <= 0 || Document is null || line > Document.LineCount)
+        {
+            return;
+        }
+
+        TextArea.Caret.Offset = Document.GetLineByNumber(line).Offset;
+        ScrollToLine(line);
     }
 
     private static void OnHighlightingNameChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)

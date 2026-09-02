@@ -4,6 +4,7 @@ using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.Decompiler.Native;
 using Spydate.Core.Project;
+using Spydate.Core.Text;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
 
@@ -62,6 +63,10 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
 
     public ObservableCollection<string> Notes { get; } = new();
 
+    /// <summary>Line to put the caret on when the document loads, 1-based. Zero leaves it alone.</summary>
+    [ObservableProperty]
+    private int _revealLine;
+
     [ObservableProperty]
     private bool _hasNotes;
 
@@ -76,6 +81,30 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
         }
 
         HasNotes = Notes.Count > 0;
+
+        // Put the caret on the line this document is about.
+        //
+        // Without it the caret sits at offset 0, which in a function listing is the header comment —
+        // a line with no address. Everything that acts on the caret then reports that there is
+        // nothing here: Rename, Comment, the patch commands and Toggle breakpoint are all disabled
+        // on a function you have only just opened, until you happen to click a line. The split view
+        // has always done this; the single-pane view never did.
+        RevealLine = Address is { } va ? LineOf(va, content.Text) : 0;
+    }
+
+    /// <summary>The 1-based line stating this address, or 0 when none does.</summary>
+    private static int LineOf(ulong va, string text)
+    {
+        string[] lines = text.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (AddressText.FromLine(lines[i]) == va)
+            {
+                return i + 1;
+            }
+        }
+
+        return 0;
     }
 
     // ------------------------------------------------------------------
