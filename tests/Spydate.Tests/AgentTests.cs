@@ -124,6 +124,64 @@ public class AgentTests
         Assert.Equal(ChatRole.System, agent.History[0].Role);
     }
 
+    [Fact]
+    public async Task AnEarlierConversationIsTheFirstMessageAndNotPartOfTheInstructions()
+    {
+        var fake = new ScriptedChatClient(turn1: null, turn2: "hello");
+        using var agent = new AnalysisAgent(
+            fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test" },
+            earlier: "assistant: sub_140001000 looks like a CRC table build. Want me to name it?");
+
+        await agent.AskAsync("yes");
+
+        // The instructions stay the instructions: they are about the binary and never stop being
+        // true, and a record of one afternoon does not belong in them.
+        Assert.Equal(ChatRole.System, agent.History[0].Role);
+        Assert.DoesNotContain("CRC table build", agent.History[0].Text, StringComparison.Ordinal);
+
+        Assert.Equal(ChatRole.User, agent.History[1].Role);
+        Assert.Contains("CRC table build", agent.History[1].Text, StringComparison.Ordinal);
+
+        // And it says what it is, so "yes" is answered against a record rather than a request.
+        Assert.Contains("they did not type it now", agent.History[1].Text, StringComparison.Ordinal);
+
+        // The question itself is still its own message, after it.
+        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "yes");
+    }
+
+    [Fact]
+    public async Task TheEarlierConversationIsTheFirstThingDroppedWhenTheWindowFills()
+    {
+        // The budget is measured off the real system prompt rather than guessed at, so that editing
+        // that prompt cannot quietly turn this into a test of nothing: too small and the record
+        // never survives the first question, too large and nothing is ever dropped at all.
+        using var probe = new AnalysisAgent(
+            new ScriptedChatClient(turn1: null, turn2: "x"), new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test" });
+
+        string record = "assistant: shall I carry on with the hot list? " + new string('.', 4000);
+        int room = probe.History[0].Text.Length + record.Length + 1000;
+
+        var fake = new ScriptedChatClient(turn1: null, turn2: "hello");
+        using var agent = new AnalysisAgent(
+            fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test", MaxContextTokens = room / 4 },
+            earlier: record);
+
+        await agent.AskAsync("yes");
+        Assert.Contains(agent.History, m => m.Text.Contains("hot list", StringComparison.Ordinal));
+
+        // Enough to go over, and still smaller than the record, so exactly one thing has to go.
+        await agent.AskAsync("and the next one " + new string('.', 1000));
+
+        // Shed before any of the real conversation, which is the right order: by now the reference
+        // it existed to resolve has been resolved, and the exchange after it has not.
+        Assert.DoesNotContain(agent.History, m => m.Text.Contains("hot list", StringComparison.Ordinal));
+        Assert.Equal(ChatRole.System, agent.History[0].Role);
+        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "yes");
+    }
+
     // ------------------------------------------------------------------
     // Providers
     // ------------------------------------------------------------------

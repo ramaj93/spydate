@@ -73,7 +73,17 @@ public sealed class AnalysisAgent : IDisposable
         _stream = settings.Stream;
         _maxHistoryChars = settings.MaxHistoryChars;
         _options = new ChatOptions { Tools = ToolsFor(store, options).Cast<AITool>().ToList() };
-        _history.Add(new ChatMessage(ChatRole.System, Prompt(earlier)));
+        _history.Add(new ChatMessage(ChatRole.System, SystemPrompt));
+
+        // First in the conversation rather than folded into the instructions. The instructions are
+        // about this binary and never stop being true; this is about one particular afternoon and
+        // stops mattering as soon as the reference it exists to resolve has been resolved. Sat here
+        // it is the oldest exchange, so it is the first thing Trim sheds when the window fills —
+        // which is exactly the right order to shed things in, and needs no code to arrange.
+        if (earlier is { Length: > 0 } recap)
+        {
+            _history.Add(new ChatMessage(ChatRole.User, Earlier(recap)));
+        }
     }
 
     /// <summary>Everything said so far, oldest first. The panel renders this.</summary>
@@ -333,33 +343,32 @@ public sealed class AnalysisAgent : IDisposable
         """;
 
     /// <summary>
-    /// The prompt, with the end of any earlier conversation about this binary attached.
+    /// The end of an earlier conversation, framed so it is not mistaken for what the user just said.
     ///
     /// The panel restores that conversation on screen, which makes it look continuous, and somebody
     /// who closed the window on "want me to do that?" reasonably answers "yes". Without this the
     /// model receives that "yes" with nothing before it and sixteen tools in hand, which is the
     /// worst of both: it looks like it remembers and it does not.
     ///
-    /// It gets the end of the transcript and not the history, because the history is not kept - and
+    /// It is the end of the transcript and not the history, because the history is not kept — and
     /// could not be replayed if it were, since a stored tool call has no result and a call without
-    /// its result is rejected outright. So this is a record to resolve a reference against, and it
-    /// is labelled as one. The durable half of the earlier session is not here at all: it is the
-    /// names and comments in the project, which are loaded and current.
+    /// its result is rejected outright. So it is a record to resolve a reference against, and says
+    /// so. The durable half of the earlier session is not in here at all: it is the names and
+    /// comments in the project, loaded and current, which the instructions point at instead.
+    ///
+    /// Everything about how to treat the record lives in the same message as the record, so that
+    /// when the window fills and this is dropped, the caveats about it go at the same moment rather
+    /// than being left behind describing something that is no longer there.
     /// </summary>
-    private static string Prompt(string? earlier) => earlier is not { Length: > 0 } recap
-        ? SystemPrompt
-        : $"""
-           {SystemPrompt}
+    private static string Earlier(string recap) => $"""
+        [Spydate: below is the end of an earlier conversation about this binary. It is on screen in
+        front of the person you are talking to; they did not type it now. Use it only to work out
+        what they mean when they refer back to it — "yes", "carry on", "the one you mentioned". You
+        did not run those tools in this conversation and you do not have what they returned, so do
+        not act on a plan from it as though you still held the evidence for it: say what you are
+        about to do, check it against the binary again, and only then do it. Anything that was named
+        or commented then is in the project now, and list_annotations shows it.]
 
-           ## What was said about this binary before
-
-           Below is the end of an earlier conversation, shown on screen to the person you are
-           talking to. Use it only to work out what they mean when they refer back to it - "yes",
-           "carry on", "the one you mentioned". You did not run those tools in this conversation and
-           you do not have what they returned, so do not act on a plan from it as though you still
-           had the evidence for it: say what you are about to do, check it against the binary again,
-           and only then do it. Anything that was named or commented then is in the project now.
-
-           {recap}
-           """;
+        {recap}
+        """;
 }
