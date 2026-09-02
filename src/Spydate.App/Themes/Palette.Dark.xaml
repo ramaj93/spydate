@@ -79,6 +79,13 @@
     <!-- Semantic -->
     <SolidColorBrush x:Key="Semantic.Warning" Color="#DCDCAA" />
     <SolidColorBrush x:Key="Semantic.Error" Color="#F48771" />
+
+    <!-- Debugger gutter. The breakpoint red is the one every debugger uses; recognising it matters
+         more here than fitting the rest of the palette. -->
+    <SolidColorBrush x:Key="Debug.Breakpoint" Color="#E51400" />
+    <SolidColorBrush x:Key="Debug.BreakpointEdge" Color="#8B0000" />
+    <SolidColorBrush x:Key="Debug.Current" Color="#FFD700" />
+    <SolidColorBrush x:Key="Debug.CurrentLine" Color="#3A3417" />
     <SolidColorBrush x:Key="Semantic.Success" Color="#4EC9B0" />
     <SolidColorBrush x:Key="Semantic.Ascii" Color="#4EC9B0" />
     <SolidColorBrush x:Key="Semantic.Address" Color="#858585" />

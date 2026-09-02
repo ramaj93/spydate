@@ -344,12 +344,41 @@ public sealed class DebugSession : IDisposable
 
             var all = context.General().ToList();
             all.Add(("rip", context.Rip));
+            all.Add(("rflags", context.EFlags));
             return all;
         }
         finally
         {
             Native.CloseHandle(thread);
         }
+    }
+
+    /// <summary>
+    /// The top of the stack, as address and value pairs. At a breakpoint this is usually the first
+    /// thing worth looking at: the return address, then whatever the frame is holding.
+    /// </summary>
+    public IReadOnlyList<(ulong Address, ulong Value)> Stack(int count = 16)
+    {
+        if (State != DebugState.Stopped)
+        {
+            return [];
+        }
+
+        var registers = Registers();
+        ulong rsp = registers?.FirstOrDefault(r => r.Name == "rsp").Value ?? 0;
+        if (rsp == 0)
+        {
+            return [];
+        }
+
+        byte[] bytes = ReadMemory(rsp, count * 8);
+        var rows = new List<(ulong, ulong)>();
+        for (int i = 0; i + 8 <= bytes.Length; i += 8)
+        {
+            rows.Add((rsp + (ulong)i, BitConverter.ToUInt64(bytes, i)));
+        }
+
+        return rows;
     }
 
     /// <summary>Ends the debuggee. It is a debugged process, so it does not outlive the session.</summary>

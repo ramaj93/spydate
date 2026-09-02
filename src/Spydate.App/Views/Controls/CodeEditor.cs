@@ -31,6 +31,29 @@ public sealed class CodeEditor : TextEditor
         nameof(CaretWord), typeof(string), typeof(CodeEditor),
         new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
 
+    /// <summary>Breakpoints to draw in the margin, by the address the listing states.</summary>
+    public static readonly DependencyProperty BreakpointAddressesProperty = DependencyProperty.Register(
+        nameof(BreakpointAddresses), typeof(IReadOnlySet<ulong>), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null, OnMarginDataChanged));
+
+    /// <summary>Where execution is stopped, marked with an arrow. Null when nothing is running.</summary>
+    public static readonly DependencyProperty ExecutionAddressProperty = DependencyProperty.Register(
+        nameof(ExecutionAddress), typeof(ulong?), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null, OnMarginDataChanged));
+
+    /// <summary>
+    /// Bumped by the view model whenever the breakpoint set changes. A set is not observable, so
+    /// without a value that actually changes the margin has no way to know it should redraw.
+    /// </summary>
+    public static readonly DependencyProperty BreakpointsVersionProperty = DependencyProperty.Register(
+        nameof(BreakpointsVersion), typeof(int), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(0, OnMarginDataChanged));
+
+    /// <summary>Invoked with the address of the clicked line.</summary>
+    public static readonly DependencyProperty ToggleBreakpointCommandProperty = DependencyProperty.Register(
+        nameof(ToggleBreakpointCommand), typeof(System.Windows.Input.ICommand), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null));
+
     /// <summary>Line to move to and mark, 1-based. Zero leaves the editor alone.</summary>
     public static readonly DependencyProperty RevealLineProperty = DependencyProperty.Register(
         nameof(RevealLine), typeof(int), typeof(CodeEditor),
@@ -75,6 +98,7 @@ public sealed class CodeEditor : TextEditor
         TextArea.LeftMargins.CollectionChanged += (_, _) => StyleLineNumberMargin();
         StyleLineNumberMargin();
 
+        TextArea.LeftMargins.Insert(0, new BreakpointMargin(this));
         TextArea.Caret.PositionChanged += (_, _) => UpdateCaretContext();
         PreviewMouseRightButtonDown += MoveCaretToClick;
     }
@@ -89,6 +113,30 @@ public sealed class CodeEditor : TextEditor
     {
         get => (string)GetValue(HighlightingNameProperty);
         set => SetValue(HighlightingNameProperty, value);
+    }
+
+    public IReadOnlySet<ulong>? BreakpointAddresses
+    {
+        get => (IReadOnlySet<ulong>?)GetValue(BreakpointAddressesProperty);
+        set => SetValue(BreakpointAddressesProperty, value);
+    }
+
+    public ulong? ExecutionAddress
+    {
+        get => (ulong?)GetValue(ExecutionAddressProperty);
+        set => SetValue(ExecutionAddressProperty, value);
+    }
+
+    public int BreakpointsVersion
+    {
+        get => (int)GetValue(BreakpointsVersionProperty);
+        set => SetValue(BreakpointsVersionProperty, value);
+    }
+
+    public System.Windows.Input.ICommand? ToggleBreakpointCommand
+    {
+        get => (System.Windows.Input.ICommand?)GetValue(ToggleBreakpointCommandProperty);
+        set => SetValue(ToggleBreakpointCommandProperty, value);
     }
 
     public ulong? CaretAddress
@@ -202,6 +250,17 @@ public sealed class CodeEditor : TextEditor
 
         TextArea.Caret.Offset = Document.GetLineByNumber(line).Offset;
         ScrollToLine(line);
+    }
+
+    private static void OnMarginDataChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        foreach (var margin in ((CodeEditor)d).TextArea.LeftMargins)
+        {
+            if (margin is BreakpointMargin breakpoints)
+            {
+                breakpoints.InvalidateVisual();
+            }
+        }
     }
 
     private static void OnHighlightingNameChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)

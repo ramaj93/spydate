@@ -46,6 +46,10 @@
         <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
                              HighlightingName="{Binding Highlighting, Mode=OneWay}"
                              RevealLine="{Binding RevealLine, Mode=OneWay}"
+                             BreakpointAddresses="{Binding DataContext.Debugger.BreakpointAddresses, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
+                             BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
+                             ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
+                             ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                              CaretAddress="{Binding CaretAddress, Mode=OneWayToSource}"
                              CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
                              Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">

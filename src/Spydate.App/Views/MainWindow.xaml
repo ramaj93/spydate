@@ -397,13 +397,25 @@
                                                     Command="{Binding ContinueCommand}" AutomationProperties.Name="Continue running" />
                                             <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Run"
                                                     Command="{Binding StartCommand}" AutomationProperties.Name="Run under the debugger" />
+                                            <TextBlock Text="{Binding Flags}" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="12,0,12,0"
+
+                                                       FontFamily="{DynamicResource Mono.FontFamily}"
+
+                                                       Foreground="{DynamicResource Text.Tertiary}"
+
+                                                       ToolTip="Processor flags at the last stop" />
+
                                             <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="4,0,0,0"
+
                                                        Foreground="{DynamicResource Text.Secondary}" />
                                         </DockPanel>
                                     </Border>
                                     <Grid Grid.Row="1">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="260" />
+                                            <ColumnDefinition Width="Auto" />
+
+                                            <ColumnDefinition Width="300" />
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
@@ -413,12 +425,56 @@
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="reg" Binding="{Binding Name}" />
                                                 <DataGridTextColumn Header="value" Binding="{Binding Value}"
-                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}">
+
+                                                    <DataGridTextColumn.CellStyle>
+
+                                                        <Style TargetType="DataGridCell">
+
+                                                            <Style.Triggers>
+
+                                                                <DataTrigger Binding="{Binding Changed}" Value="True">
+
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Debug.Breakpoint}" />
+
+                                                                </DataTrigger>
+
+                                                            </Style.Triggers>
+
+                                                        </Style>
+
+                                                    </DataGridTextColumn.CellStyle>
+
+                                                </DataGridTextColumn>
                                             </DataGrid.Columns>
                                         </DataGrid>
                                         <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+
                                                       Background="{DynamicResource Chrome.Border}" />
-                                        <ListBox Grid.Column="2" ItemsSource="{Binding Log}"
+
+                                        <DataGrid Grid.Column="2" ItemsSource="{Binding Stack}" AutoGenerateColumns="False"
+
+                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+
+                                                  FontFamily="{DynamicResource Mono.FontFamily}"
+
+                                                  AutomationProperties.Name="Stack">
+
+                                            <DataGrid.Columns>
+
+                                                <DataGridTextColumn Header="stack" Binding="{Binding Address}" />
+
+                                                <DataGridTextColumn Header="value" Binding="{Binding Value}" />
+
+                                            </DataGrid.Columns>
+
+                                        </DataGrid>
+
+                                        <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch"
+
+                                                      Background="{DynamicResource Chrome.Border}" />
+                                        <ListBox Grid.Column="4" ItemsSource="{Binding Log}"
                                                  FontFamily="{DynamicResource Mono.FontFamily}"
                                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                                  AutomationProperties.Name="Debug log" />

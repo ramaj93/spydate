@@ -169,6 +169,11 @@ public sealed partial class MainViewModel : ObservableObject
 
     private bool CanRunToCursor() => Debugger.IsStopped && CanPatchHere();
 
+    /// <summary>Sets or clears a breakpoint at a given address, for the margin, which knows the line
+    /// that was clicked and does not need the caret moved to it first.</summary>
+    [RelayCommand]
+    private void ToggleBreakpointAt(ulong va) => Debugger.ToggleBreakpoint(va);
+
     /// <summary>Sets or clears a breakpoint where the caret is. Works before anything is running.</summary>
     [RelayCommand(CanExecute = nameof(CanPatchHere))]
     private void ToggleBreakpoint()
@@ -1093,8 +1098,8 @@ public sealed partial class MainViewModel : ObservableObject
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
-            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches, Debugger.BreakpointAddresses),
-            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches, Debugger.BreakpointAddresses),
+            DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
+            RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
             ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
             ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member),
@@ -1195,7 +1200,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (Binary?.Analysis is { } a)
         {
             var doc = Find($"disasm:{f.EntryVa:X}")
-                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, Binary.Patches, Debugger.BreakpointAddresses);
+                      ?? CodeDocumentViewModel.ForFunctionDisassembly(a, f, Binary.NativeDecompiler is null ? null : OpenFunctionPseudoC, Binary.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, Binary.Patches);
             Show(doc);
             Record(doc, new DisassemblyTarget(f.EntryVa, f.Name));
         }

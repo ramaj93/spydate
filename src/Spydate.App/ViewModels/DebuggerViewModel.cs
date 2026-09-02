@@ -9,8 +9,12 @@ using Spydate.Debugger;
 
 namespace Spydate.App.ViewModels;
 
-/// <summary>One register, as the panel shows it.</summary>
-public sealed record RegisterRow(string Name, string Value);
+/// <summary>One register, as the panel shows it. Changed since the last stop is the useful part:
+/// at a breakpoint the question is almost always what the last few instructions did.</summary>
+public sealed record RegisterRow(string Name, string Value, bool Changed);
+
+/// <summary>One qword on the stack.</summary>
+public sealed record StackRow(string Address, string Value);
 
 /// <summary>
 /// The debugger panel: starting the open binary, stopping it, and reading it while it is stopped.
@@ -29,6 +33,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private readonly Func<string, string, bool> _confirm;
     private DebugSession? _session;
 
+    /// <summary>Registers as they were at the previous stop, so a change can be pointed at.</summary>
+    private IReadOnlyDictionary<string, ulong> _previous = new Dictionary<string, ulong>(StringComparer.Ordinal);
+
     public DebuggerViewModel(WorkspaceService workspace, Func<string, string, bool>? confirm = null)
     {
         _workspace = workspace;
@@ -39,6 +46,13 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>Registers as of the last stop. Empty while it is running, because they would be a guess.</summary>
     public ObservableCollection<RegisterRow> Registers { get; } = new();
 
+    /// <summary>The top of the stack as of the last stop.</summary>
+    public ObservableCollection<StackRow> Stack { get; } = new();
+
+    /// <summary>The processor flags, spelled out. "ZF 1 CF 0" is read; 0x246 is decoded.</summary>
+    [ObservableProperty]
+    private string _flags = string.Empty;
+
     /// <summary>What the debuggee has done, newest last.</summary>
     public ObservableCollection<string> Log { get; } = new();
 
@@ -46,6 +60,17 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public HashSet<ulong> BreakpointAddresses { get; } = new();
 
     public ObservableCollection<string> Breakpoints { get; } = new();
+
+    /// <summary>
+    /// Bumped whenever the set changes. The margin binds a set, which raises nothing when it gains
+    /// a member, so this is what actually tells it to redraw.
+    /// </summary>
+    [ObservableProperty]
+    private int _breakpointsVersion;
+
+    /// <summary>Where execution is stopped, as the listing states it. Null when nothing is stopped.</summary>
+    [ObservableProperty]
+    private ulong? _executionAddress;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDebugging))]
@@ -197,6 +222,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             Add($"breakpoint at 0x{staticVa:X}");
         }
 
+        BreakpointsVersion++;
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -209,6 +235,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         BreakpointAddresses.Clear();
+        BreakpointsVersion++;
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -232,6 +259,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             {
                 case "stopped":
                     State = DebugState.Stopped;
+                    ExecutionAddress = e.Address;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";
                     RefreshRegisters();
                     if (e.Address is { } address)
@@ -243,6 +271,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
                 case "exited":
                     State = DebugState.Exited;
+                    ExecutionAddress = null;
                     Status = "It exited.";
                     Registers.Clear();
                     break;
@@ -254,11 +283,42 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private void RefreshRegisters()
     {
+        var current = _session?.Registers() ?? [];
+
         Registers.Clear();
-        foreach (var (name, value) in _session?.Registers() ?? [])
+        foreach (var (name, value) in current)
         {
-            Registers.Add(new RegisterRow(name, $"0x{value:X16}"));
+            if (name == "rflags")
+            {
+                Flags = DescribeFlags((uint)value);
+                continue;
+            }
+
+            bool changed = _previous.TryGetValue(name, out ulong was) && was != value;
+            Registers.Add(new RegisterRow(name, $"0x{value:X16}", changed));
         }
+
+        _previous = current.ToDictionary(r => r.Name, r => r.Value, StringComparer.Ordinal);
+
+        Stack.Clear();
+        foreach (var (address, value) in _session?.Stack() ?? [])
+        {
+            Stack.Add(new StackRow($"0x{address:X16}", $"0x{value:X16}"));
+        }
+    }
+
+    /// <summary>
+    /// The flags that get looked at. A conditional jump is about ZF, SF, OF and CF, and reading them
+    /// off a hex RFLAGS by hand is exactly the sort of arithmetic a debugger should have done.
+    /// </summary>
+    private static string DescribeFlags(uint eflags)
+    {
+        (string Name, int Bit)[] bits =
+        [
+            ("CF", 0), ("PF", 2), ("AF", 4), ("ZF", 6), ("SF", 7), ("TF", 8), ("IF", 9), ("DF", 10), ("OF", 11),
+        ];
+
+        return string.Join("  ", bits.Select(b => $"{b.Name} {(eflags >> b.Bit) & 1}"));
     }
 
     private void RefreshBreakpoints()
@@ -272,6 +332,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private void StopSession()
     {
+        ExecutionAddress = null;
         if (_session is { } session)
         {
             session.Reported -= OnReported;
