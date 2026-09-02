@@ -321,16 +321,36 @@ public partial class MainWindow : FluentWindow
     /// Only while the end is what is being watched. Following an answer down is right; hauling
     /// somebody back down from the middle of a conversation they are reading is not.
     /// </summary>
-    private void ScrollAssistantToEnd()
+    private void ScrollAssistantToEnd(int attempts = 12)
     {
-        if (!_followTranscript)
+        if (!_followTranscript || attempts <= 0)
         {
             return;
         }
 
-        Dispatcher.BeginInvoke(
-            DispatcherPriority.Background,
-            new Action(() => AssistantTranscript.ScrollToEnd()));
+        double was = AssistantTranscript.ExtentHeight;
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            if (!_followTranscript)
+            {
+                return;
+            }
+
+            AssistantTranscript.ScrollToEnd();
+
+            // Again if the document grew under that scroll, or if it landed short of the bottom:
+            // a FlowDocument of several hundred messages is not measured in one pass, so the first
+            // scroll reaches the end of what had been laid out rather than the end of the text.
+            // Each retry is queued behind the layout it is waiting for.
+            bool grew = AssistantTranscript.ExtentHeight > was;
+            bool shortOfIt = AssistantTranscript.VerticalOffset
+                             < AssistantTranscript.ExtentHeight - AssistantTranscript.ViewportHeight - 1;
+            if (grew || shortOfIt)
+            {
+                ScrollAssistantToEnd(attempts - 1);
+            }
+        }));
     }
 
     // ------------------------------------------------------------------
