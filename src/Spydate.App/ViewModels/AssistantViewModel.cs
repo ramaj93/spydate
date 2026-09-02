@@ -302,12 +302,14 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         }
 
         // Handed to the next agent built for this binary, so that answering the question the last
-        // session ended on means something. See AnalysisAgent.Prompt.
+        // session ended on means something. See AnalysisAgent.Earlier.
+        //
+        // Nothing is added to say so. There was a line here explaining that the conversation had
+        // been restored and how much of it the assistant would be given, which was two sentences of
+        // apology for a discontinuity that no longer exists: it picks up from the end of this, and
+        // the names are in the project. A panel that explains itself every time it opens is one
+        // more thing to read past.
         _earlier = ChatLog.Recap(entries);
-
-        Add("note", $"— {entries.Count} lines from {entries[^1].At.LocalDateTime:g}, kept for you to read. "
-                    + "A fresh conversation starts from here: the assistant is given the end of the above and "
-                    + "the names already in the project, not the whole of it. —");
     }
 
     /// <summary>
@@ -345,7 +347,9 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             // is on screen stays: it is a record, and changing model is no reason to destroy it.
             ResetAgent();
             UpdateStatus();
-            Add("note", $"— now using {Settings.Provider} / {Settings.Model}, with a fresh conversation —");
+            // Which provider and model is on the line above the transcript, so this says only the
+            // part that is not: that what follows cannot see what came before it.
+            Add("note", "— fresh conversation from here —");
         }
         finally
         {
