@@ -45,6 +45,13 @@ public sealed partial class MainViewModel : ObservableObject
         // Breakpoints are drawn in the listings, so a toggle redraws them; a stop opens where it
         // stopped, which is the whole reason for stopping there.
         debugger.BreakpointsChanged += (_, _) => ReloadDocuments();
+        debugger.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(DebuggerViewModel.State) or nameof(DebuggerViewModel.IsStopped))
+            {
+                RunToCursorCommand.NotifyCanExecuteChanged();
+            }
+        };
         debugger.StoppedAt += (_, va) => OpenTarget(new DisassemblyTarget(va, NameOf(va)));
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
         RefreshRecent(RecentFiles.Load());
@@ -150,6 +157,18 @@ public sealed partial class MainViewModel : ObservableObject
 
     private string NameOf(ulong va) => Binary?.Analysis is { } a ? a.NameFor(va) : $"0x{va:X}";
 
+    /// <summary>Runs until the caret, without leaving a breakpoint behind.</summary>
+    [RelayCommand(CanExecute = nameof(CanRunToCursor))]
+    private void RunToCursor()
+    {
+        if (PatchTarget is { } va)
+        {
+            Debugger.RunTo(va);
+        }
+    }
+
+    private bool CanRunToCursor() => Debugger.IsStopped && CanPatchHere();
+
     /// <summary>Sets or clears a breakpoint where the caret is. Works before anything is running.</summary>
     [RelayCommand(CanExecute = nameof(CanPatchHere))]
     private void ToggleBreakpoint()
@@ -169,6 +188,7 @@ public sealed partial class MainViewModel : ObservableObject
         InvertBranchCommand.NotifyCanExecuteChanged();
         PatchCommand.NotifyCanExecuteChanged();
         ToggleBreakpointCommand.NotifyCanExecuteChanged();
+        RunToCursorCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>

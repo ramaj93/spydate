@@ -10,6 +10,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Iced directly rather than Spydate.Disassembly: stepping over a call needs the length of one
+         instruction, not function discovery or listings. -->
+    <PackageReference Include="Iced" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Spydate.Core\Spydate.Core.csproj" />
   </ItemGroup>
 

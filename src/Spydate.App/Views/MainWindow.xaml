@@ -32,6 +32,8 @@
         <KeyBinding Key="P" Modifiers="Control" Command="{Binding PatchCommand}" />
         <KeyBinding Key="F9" Command="{Binding ToggleBreakpointCommand}" />
         <KeyBinding Key="F8" Command="{Binding Debugger.ContinueCommand}" />
+        <KeyBinding Key="F10" Command="{Binding Debugger.StepOverCommand}" />
+        <KeyBinding Key="F10" Modifiers="Control" Command="{Binding RunToCursorCommand}" />
         <KeyBinding Key="F11" Command="{Binding Debugger.StepInstructionCommand}" />
         <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Debugger.StopDebuggingCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
@@ -148,7 +150,10 @@
                     <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
                     <Separator />
                     <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
+                    <MenuItem Header="Step _over" InputGestureText="F10" Command="{Binding Debugger.StepOverCommand}"
+                              ToolTip="Runs a call to completion instead of stepping into it" />
                     <MenuItem Header="Step one _instruction" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}" />
+                    <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding RunToCursorCommand}" />
                     <Separator />
                     <MenuItem Header="Toggle _breakpoint" InputGestureText="F9" Command="{Binding ToggleBreakpointCommand}"
                               ToolTip="Marks the line the caret is on. Works before anything is running." />

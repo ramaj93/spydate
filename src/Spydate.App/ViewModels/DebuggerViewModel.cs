@@ -142,6 +142,30 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
+    [RelayCommand(CanExecute = nameof(IsStopped))]
+    private void StepOver()
+    {
+        Registers.Clear();
+        _session?.StepOver();
+        State = DebugState.Running;
+        NotifyCommands();
+    }
+
+    /// <summary>Runs until execution reaches an address, without keeping a breakpoint there.</summary>
+    public void RunTo(ulong staticVa)
+    {
+        if (!IsStopped)
+        {
+            return;
+        }
+
+        Registers.Clear();
+        _session?.RunTo(staticVa);
+        State = DebugState.Running;
+        Status = $"Running to 0x{staticVa:X}.";
+        NotifyCommands();
+    }
+
     /// <summary>
     /// Sets or clears a breakpoint at a static address. It works before anything is running: the
     /// addresses are kept here and planted when a session starts, which is how anyone actually uses
@@ -256,6 +280,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         StopDebuggingCommand.NotifyCanExecuteChanged();
         ContinueCommand.NotifyCanExecuteChanged();
         StepInstructionCommand.NotifyCanExecuteChanged();
+        StepOverCommand.NotifyCanExecuteChanged();
     }
 
     private static bool DefaultConfirm(string title, string message)

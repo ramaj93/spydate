@@ -52,6 +52,10 @@ public sealed class DebugSession : IDisposable
     /// <summary>Set while stepping over a breakpoint, so its byte goes back afterwards.</summary>
     private ulong? _reArm;
 
+    /// <summary>A breakpoint that exists to get somewhere once: step-over, or run-to-cursor.</summary>
+    private ulong? _temporary;
+    private byte _temporaryOriginal;
+
     private bool _sawInitialBreak;
 
     /// <summary>Raised on the debug loop's thread. Consumers marshal for themselves.</summary>
@@ -145,22 +149,106 @@ public sealed class DebugSession : IDisposable
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     public void Continue() => Post(() => { });
 
-    /// <summary>One instruction, then stop again.</summary>
-    public void StepInstruction() => Post(() =>
+    /// <summary>One instruction, then stop again. Into a call, not over it.</summary>
+    public void StepInstruction() => Post(() => Trap());
+
+    /// <summary>
+    /// One instruction, but over a call rather than into it.
+    ///
+    /// A call is stepped by breaking on the instruction after it and letting the whole call run,
+    /// which is the only way that works: single-stepping through a call means single-stepping every
+    /// instruction it and everything it calls executes, which for anything touching the CRT is
+    /// millions of round trips through the debug loop.
+    ///
+    /// Everything else is an ordinary step. A conditional jump stepped "over" still has to go where
+    /// it goes — there is no instruction after it to break on in any useful sense.
+    /// </summary>
+    public void StepOver() => Post(() =>
+    {
+        if (Decode() is not { } instruction || !IsCall(instruction))
+        {
+            Trap();
+            return;
+        }
+
+        // Armed only if it is really in place; otherwise a one-shot nobody will ever hit stays set.
+        if (Plant(instruction.NextIP, temporary: true))
+        {
+            _temporary = instruction.NextIP;
+        }
+        else
+        {
+            Trap();
+        }
+    });
+
+    /// <summary>
+    /// Runs until execution reaches a static address, then stops. The breakpoint is not remembered:
+    /// it is a way of getting somewhere, not a place to keep stopping at.
+    /// </summary>
+    public void RunTo(ulong staticVa) => Post(() =>
+    {
+        ulong runtime = ToRuntime(staticVa);
+        if (Plant(runtime, temporary: true))
+        {
+            _temporary = runtime;
+        }
+    });
+
+    /// <summary>The instruction at RIP, or null when it cannot be read or decoded.</summary>
+    private Iced.Intel.Instruction? Decode()
     {
         using var context = new ThreadContext();
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
-        if (thread != IntPtr.Zero && context.Read(thread))
+        if (thread == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!context.Read(thread))
+            {
+                return null;
+            }
+
+            byte[] code = ReadMemory(context.Rip, 16);
+            if (code.Length == 0)
+            {
+                return null;
+            }
+
+            var decoder = Iced.Intel.Decoder.Create(64, new Iced.Intel.ByteArrayCodeReader(code), context.Rip);
+            var instruction = decoder.Decode();
+            return instruction.IsInvalid ? null : instruction;
+        }
+        finally
+        {
+            Native.CloseHandle(thread);
+        }
+    }
+
+    private static bool IsCall(Iced.Intel.Instruction instruction)
+        => instruction.FlowControl is Iced.Intel.FlowControl.Call or Iced.Intel.FlowControl.IndirectCall;
+
+    /// <summary>Asks the processor to fault after the next instruction.</summary>
+    private void Trap()
+    {
+        using var context = new ThreadContext();
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return;
+        }
+
+        if (context.Read(thread))
         {
             context.SetTrapFlag(true);
             context.Write(thread);
         }
 
-        if (thread != IntPtr.Zero)
-        {
-            Native.CloseHandle(thread);
-        }
-    });
+        Native.CloseHandle(thread);
+    }
 
     /// <summary>
     /// Adds a breakpoint at a <em>static</em> address — the one in the listing. It is translated for
@@ -458,6 +546,20 @@ public sealed class DebugSession : IDisposable
     /// <summary>An int3 we planted: put the byte back, wind RIP back onto it, and stop.</summary>
     private bool HitBreakpoint(ulong address)
     {
+        // A one-shot first: step-over and run-to-cursor put it there to get here, and it goes away
+        // whether or not a real breakpoint happens to be at the same address.
+        if (_temporary == address)
+        {
+            _temporary = null;
+            WriteByte(address, _temporaryOriginal);
+            Rewind(address, thenStep: false);
+
+            // Not re-armed — that is the whole difference from a breakpoint someone set.
+            CurrentAddress = address;
+            Report("stopped", $"stopped at 0x{ToStatic(address):X}", Reportable(address));
+            return true;
+        }
+
         Breakpoint? hit;
         lock (_breakpoints)
         {
@@ -471,28 +573,40 @@ public sealed class DebugSession : IDisposable
         }
 
         WriteByte(address, hit.Original);
-
-        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
-        if (thread != IntPtr.Zero)
-        {
-            using var context = new ThreadContext();
-            if (context.Read(thread))
-            {
-                // RIP is past the int3 that just executed; the instruction it replaced starts here.
-                context.Rip = address;
-                context.SetTrapFlag(true);
-                context.Write(thread);
-            }
-
-            Native.CloseHandle(thread);
-        }
+        Rewind(address, thenStep: true);
 
         // Re-planted after the single step that carries execution off this address; planting it now
         // would break on the instruction we are about to resume.
         _reArm = address;
         CurrentAddress = address;
-        Report("stopped", $"breakpoint at 0x{ToStatic(address):X}", ToStatic(address));
+        Report("stopped", $"breakpoint at 0x{ToStatic(address):X}", Reportable(address));
         return true;
+    }
+
+    /// <summary>
+    /// Puts RIP back on the instruction the int3 replaced, and asks for a single step off it.
+    ///
+    /// RIP is one past the int3 that just executed, which is the middle of whatever instruction used
+    /// to be there. Resuming from it would run the tail of that instruction as if it were a whole
+    /// one — the same failure as a patch that overwrites half of something.
+    /// </summary>
+    private void Rewind(ulong address, bool thenStep)
+    {
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return;
+        }
+
+        using var context = new ThreadContext();
+        if (context.Read(thread))
+        {
+            context.Rip = address;
+            context.SetTrapFlag(thenStep);
+            context.Write(thread);
+        }
+
+        Native.CloseHandle(thread);
     }
 
     /// <summary>
@@ -509,29 +623,41 @@ public sealed class DebugSession : IDisposable
         }
     }
 
-    private void Plant(ulong address)
+    /// <summary>
+    /// Puts an int3 at an address and remembers the byte it replaced. A temporary one is remembered
+    /// separately, because it is removed on the first hit rather than kept and re-armed.
+    /// </summary>
+    private bool Plant(ulong address, bool temporary = false)
     {
         byte[] existing = ReadMemory(address, 1);
         if (existing.Length != 1)
         {
             Report("problem", $"could not read 0x{ToStatic(address):X} to put a breakpoint there");
-            return;
+            return false;
         }
 
         if (existing[0] == 0xCC)
         {
-            return;
+            return true;   // already broken here, by us or by the program itself
         }
 
-        lock (_breakpoints)
+        if (temporary)
         {
-            if (_breakpoints.TryGetValue(address, out var breakpoint))
+            _temporaryOriginal = existing[0];
+        }
+        else
+        {
+            lock (_breakpoints)
             {
-                _breakpoints[address] = breakpoint with { Original = existing[0], Planted = true };
+                if (_breakpoints.TryGetValue(address, out var breakpoint))
+                {
+                    _breakpoints[address] = breakpoint with { Original = existing[0], Planted = true };
+                }
             }
         }
 
         WriteByte(address, 0xCC);
+        return true;
     }
 
     private void WriteByte(ulong address, byte value)

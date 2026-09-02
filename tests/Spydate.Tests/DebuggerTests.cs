@@ -207,6 +207,61 @@ public sealed class DebuggerTests
         session.Stop();
     }
 
+    [Fact]
+    public void SteppingOverACallLandsAfterItRatherThanInsideIt()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
+
+        // Step until a call is the next instruction, so the case is actually exercised rather than
+        // assumed to come up.
+        ulong callAt = 0, after = 0;
+        for (int i = 0; i < 400 && callAt == 0; i++)
+        {
+            ulong rip = session.Registers()!.Single(r => r.Name == "rip").Value;
+            byte[] code = session.ReadMemory(rip, 16);
+            if (code.Length == 16)
+            {
+                var decoder = Iced.Intel.Decoder.Create(64, new Iced.Intel.ByteArrayCodeReader(code), rip);
+                var instruction = decoder.Decode();
+                if (!instruction.IsInvalid
+                    && instruction.FlowControl is Iced.Intel.FlowControl.Call or Iced.Intel.FlowControl.IndirectCall)
+                {
+                    callAt = rip;
+                    after = instruction.NextIP;
+                    break;
+                }
+            }
+
+            session.StepInstruction();
+            if (!Wait(() => session.State == DebugState.Stopped, 5))
+            {
+                break;
+            }
+        }
+
+        // Not a silent return: a program's startup calls things, and if 400 instructions went by
+        // without one then the stepping itself is broken and this test would pass having proved it.
+        Assert.True(callAt != 0, "no call was reached in 400 instructions");
+
+        session.StepOver();
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped after stepping over");
+
+        ulong landed = session.Registers()!.Single(r => r.Name == "rip").Value;
+
+        // The instruction after the call, not its target. Stepping into it would land somewhere else
+        // entirely, and single-stepping through it would take millions of round trips.
+        Assert.Equal(after, landed);
+
+        session.Stop();
+    }
+
     private static bool Wait(Func<bool> until, int seconds = 20)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
