@@ -65,7 +65,7 @@
 
         <TextBlock Grid.Row="7" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
                    Foreground="{DynamicResource Text.Tertiary}"
-                   Text="Windows vary by more than ten times between models — 64 for most DeepSeek models, 200 for Claude, 1000 for Gemini. Too high does not fail cleanly, so leave headroom." />
+                   Text="Filled in from the model, with room left for the answer, and left alone once you change it. Windows vary by more than ten times between models, so check yours: too high does not fail cleanly." />
 
         <CheckBox x:Name="StreamBox" Grid.Row="8" Grid.Column="1" Margin="0,0,0,10"
                   Content="Show the answer as it is written"

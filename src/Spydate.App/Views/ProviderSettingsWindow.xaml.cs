@@ -14,6 +14,15 @@ public partial class ProviderSettingsWindow : Window
 {
     private readonly ISecretStore _secrets;
 
+    /// <summary>
+    /// The context suggestion for whatever model the box last held, in thousands.
+    ///
+    /// It is what tells a typed number apart from a seeded one. Following the model matters most to
+    /// the person who never opens this dialog twice, and overwriting a figure somebody chose by hand
+    /// because they then corrected a typo in the model id would be the worse failure of the two.
+    /// </summary>
+    private int _seededContext;
+
     public ProviderSettingsWindow(AgentSettings settings, ISecretStore secrets)
     {
         ArgumentNullException.ThrowIfNull(settings);
@@ -41,6 +50,36 @@ public partial class ProviderSettingsWindow : Window
         // reported as present, and replaced only if something is typed here.
         KeyBox.Password = string.Empty;
         UpdateKeyHint();
+
+        // Attached after everything above, so setting the initial model does not read as a change.
+        _seededContext = ProviderSettings.SuggestedContextTokens(settings.Provider, ModelBox.Text) / 1000;
+        ModelBox.AddHandler(TextBox.TextChangedEvent, new TextChangedEventHandler(OnModelTextChanged));
+    }
+
+    /// <summary>
+    /// Moves the context budget with the model, unless it has been set by hand.
+    ///
+    /// The number that matters is the model's, and asking every user to look up their own model's
+    /// window and convert it to thousands is asking most of them to leave it wrong — which is what
+    /// happened: one figure, chosen for no model in particular, quietly bounding every conversation.
+    /// </summary>
+    private void OnModelTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (ProviderBox.SelectedItem is not ProviderKind kind)
+        {
+            return;
+        }
+
+        int suggested = ProviderSettings.SuggestedContextTokens(kind, ModelBox.Text) / 1000;
+        bool untouched = int.TryParse(ContextBox.Text.Trim(), System.Globalization.NumberStyles.Integer,
+                             System.Globalization.CultureInfo.CurrentCulture, out int shown)
+                         && shown == _seededContext;
+
+        _seededContext = suggested;
+        if (untouched)
+        {
+            ContextBox.Text = suggested.ToString(System.Globalization.CultureInfo.CurrentCulture);
+        }
     }
 
     /// <summary>What was chosen. Only meaningful when the dialog was accepted.</summary>

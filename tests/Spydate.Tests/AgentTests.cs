@@ -164,6 +164,110 @@ public class AgentTests
     }
 
     // ------------------------------------------------------------------
+    // How much conversation is carried
+    // ------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(ProviderKind.Anthropic, "claude-sonnet-5")]
+    [InlineData(ProviderKind.OpenRouter, "google/gemini-2.5-pro")]
+    [InlineData(ProviderKind.OpenAi, "gpt-5")]
+    [InlineData(ProviderKind.DeepSeek, "deepseek-chat")]
+    public void EveryModelIsOfferedMoreThanTheOneNumberEverybodyUsedToGet(ProviderKind kind, string model)
+    {
+        // The point of the table is that it is not one number. Anything at or below the old flat
+        // default for a model with a large window means it has fallen back to a default it should
+        // not have reached, which is the failure this replaced and would be invisible otherwise.
+        Assert.True(
+            ProviderSettings.SuggestedContextTokens(kind, model) > ProviderSettings.LegacyContextTokens,
+            $"{model} was suggested no more than the old flat default");
+    }
+
+    [Fact]
+    public void TheModelDecidesTheBudgetBeforeTheProviderDoes()
+    {
+        // OpenRouter serves every family, so under it the provider name says nothing at all about
+        // the window and only the model id does.
+        Assert.Equal(
+            ProviderSettings.SuggestedContextTokens(ProviderKind.Anthropic, "claude-sonnet-5"),
+            ProviderSettings.SuggestedContextTokens(ProviderKind.OpenRouter, "anthropic/claude-sonnet-5"));
+
+        Assert.NotEqual(
+            ProviderSettings.SuggestedContextTokens(ProviderKind.OpenRouter, "anthropic/claude-sonnet-5"),
+            ProviderSettings.SuggestedContextTokens(ProviderKind.OpenRouter, "google/gemini-2.5-pro"));
+    }
+
+    [Fact]
+    public void AModelNobodyHasHeardOfStillGetsSomethingUsable()
+    {
+        foreach (var kind in Enum.GetValues<ProviderKind>())
+        {
+            Assert.True(ProviderSettings.SuggestedContextTokens(kind, "some-model-shipped-tomorrow") >= 96_000);
+            Assert.True(ProviderSettings.SuggestedContextTokens(kind, null) >= 96_000);
+        }
+    }
+
+    [Fact]
+    public void SettingsStillHoldingTheOldFlatDefaultAreReadAsNeverSet()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"spydate-agent-{Guid.NewGuid():N}.json");
+        try
+        {
+            new AgentSettings
+            {
+                Provider = ProviderKind.OpenRouter,
+                Model = "google/gemini-2.5-pro",
+                MaxContextTokens = ProviderSettings.LegacyContextTokens,
+            }.Save(path);
+
+            var loaded = AgentSettings.Load(path);
+
+            Assert.Equal(
+                ProviderSettings.SuggestedContextTokens(ProviderKind.OpenRouter, "google/gemini-2.5-pro"),
+                loaded.MaxContextTokens);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void SettingsWithNoContextKeyAtAllFollowTheirOwnModelAndNotSomeOtherProvidersDefault()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"spydate-agent-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, """{ "provider": "deepSeek", "model": "deepseek-chat" }""");
+
+            var loaded = AgentSettings.Load(path);
+
+            Assert.Null(loaded.ContextTokens);
+            Assert.Equal(
+                ProviderSettings.SuggestedContextTokens(ProviderKind.DeepSeek, "deepseek-chat"),
+                loaded.MaxContextTokens);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void AContextSizeSomebodyChoseIsLeftAlone()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"spydate-agent-{Guid.NewGuid():N}.json");
+        try
+        {
+            new AgentSettings { Model = "claude-sonnet-5", MaxContextTokens = 12_000 }.Save(path);
+            Assert.Equal(12_000, AgentSettings.Load(path).MaxContextTokens);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Keys
     // ------------------------------------------------------------------
 

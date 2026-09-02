@@ -53,11 +53,12 @@ public sealed record ProviderSettings
     /// room for the answer — these differ by more than an order of magnitude between providers, so
     /// there is no default that is not wrong for somebody.
     ///
-    /// The default is deliberately modest rather than optimistic: a window too large for the model
-    /// does not fail cleanly. Models degrade before they refuse, and one way they degrade is writing
-    /// their own tool-call template into the answer as text instead of calling anything.
+    /// It stays a setting rather than becoming automatic, because a window too large for the model
+    /// does not fail cleanly: models degrade before they refuse, and one way they degrade is writing
+    /// their own tool-call template into the answer as text instead of calling anything. What
+    /// changed is where it starts — see <see cref="SuggestedContextTokens"/>.
     /// </summary>
-    public int MaxContextTokens { get; init; } = 48_000;
+    public int MaxContextTokens { get; init; } = SuggestedContextTokens(ProviderKind.Anthropic, null);
 
     /// <summary>
     /// The budget as it is actually measured. Characters, because there is no tokeniser here to be
@@ -82,6 +83,48 @@ public sealed record ProviderSettings
         ProviderKind.Anthropic => "https://api.anthropic.com",
         _ => "https://api.openai.com/v1",
     };
+
+    /// <summary>
+    /// The old flat default, which every installation carried before the budget followed the model.
+    /// A stored setting still holding exactly this was never chosen by anybody, so it is read as
+    /// never set — otherwise the one number that caused the forgetting would be the one number the
+    /// fix could not reach.
+    /// </summary>
+    public const int LegacyContextTokens = 48_000;
+
+    /// <summary>
+    /// A context budget worth starting from, in tokens, for a provider and a model.
+    ///
+    /// A starting point and nothing more. Windows change with every release and this cannot be
+    /// right about a model that did not exist when it was written, which is exactly why the box it
+    /// seeds stays editable. It earns its place because the alternative was one number for every
+    /// model — a third of what Claude holds, a twentieth of what Gemini holds — and an assistant
+    /// given a twentieth of its memory drops nineteen twentieths of the conversation for no reason
+    /// at all. Every value here is under the published window, leaving room for the answer and for
+    /// the system prompt and tool schemas that go with every turn.
+    /// </summary>
+    public static int SuggestedContextTokens(ProviderKind kind, string? model)
+    {
+        string id = model?.ToLowerInvariant() ?? string.Empty;
+
+        // Matched on the family in the id rather than on an exact name, so a point release does not
+        // fall back to the provider's default on the day it ships. The model is looked at before the
+        // provider because OpenRouter serves all of these, and under it the provider says nothing.
+        return true switch
+        {
+            _ when id.Contains("gemini", StringComparison.Ordinal) => 900_000,
+            _ when id.Contains("gpt-4.1", StringComparison.Ordinal) => 700_000,
+            _ when id.Contains("claude", StringComparison.Ordinal) => 160_000,
+            _ when id.Contains("gpt-5", StringComparison.Ordinal) => 300_000,
+            _ when id.Contains("deepseek", StringComparison.Ordinal) => 96_000,
+            _ => kind switch
+            {
+                ProviderKind.Anthropic => 160_000,
+                ProviderKind.DeepSeek => 96_000,
+                _ => 100_000,
+            },
+        };
+    }
 
     /// <summary>A model worth defaulting to, so a first-time setup has something in the box.</summary>
     public static string SuggestedModel(ProviderKind kind) => kind switch

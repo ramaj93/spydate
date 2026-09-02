@@ -366,12 +366,17 @@
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}"
                             SnapsToDevicePixels="True">
+                        <!-- Both follow VerticalContentAlignment rather than being pinned to the
+                             middle. Centred is right for the one-line boxes that fill the chrome,
+                             and wrong the moment a box takes more than one line: the text would sit
+                             in the middle of the box and drift as it was typed. -->
                         <Grid>
-                            <TextBlock x:Name="Placeholder" Text="{TemplateBinding Tag}" Margin="4,0,0,0"
-                                       VerticalAlignment="Center" IsHitTestVisible="False" Visibility="Collapsed"
+                            <TextBlock x:Name="Placeholder" Text="{TemplateBinding Tag}" Margin="4,1,0,0"
+                                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                       IsHitTestVisible="False" Visibility="Collapsed"
                                        Foreground="{DynamicResource Text.Tertiary}" />
                             <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
-                                          VerticalAlignment="Center" />
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
@@ -392,6 +397,13 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <Style.Triggers>
+            <!-- A box that takes more than one line starts at the top of itself, like every other
+                 multi-line box anywhere. Set here rather than at each use, so the next one gets it. -->
+            <Trigger Property="AcceptsReturn" Value="True">
+                <Setter Property="VerticalContentAlignment" Value="Top" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ================================================================ -->

@@ -546,18 +546,51 @@
                                                  AutomationProperties.Name="Assistant transcript" />
 
                                     <DockPanel Grid.Row="2" Margin="4">
-                                        <Button DockPanel.Dock="Right" Content="Stop" Width="60" Margin="4,0,0,0"
-                                                Command="{Binding StopCommand}"
-                                                Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}"
-                                                AutomationProperties.Name="Stop the assistant" />
-                                        <Button DockPanel.Dock="Right" Content="Ask" Width="60" Margin="4,0,0,0"
-                                                Command="{Binding AskCommand}" IsDefault="True"
-                                                AutomationProperties.Name="Ask the assistant" />
+                                        <!-- One button in one place, not two that trade places. Ask
+                                             and Stop are never both available, so a second button is
+                                             either disabled or absent - and a control that appears
+                                             under the pointer, at the moment a slow turn starts, is
+                                             one that gets clicked by accident. -->
+                                        <Button DockPanel.Dock="Right" Width="66" Margin="6,0,0,0" VerticalAlignment="Bottom"
+                                                AutomationProperties.Name="Ask or stop the assistant">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                    <Setter Property="Content" Value="Ask" />
+                                                    <Setter Property="Command" Value="{Binding AskCommand}" />
+                                                    <Setter Property="ToolTip" Value="Send the question" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                                                            <Setter Property="Content" Value="Stop" />
+                                                            <Setter Property="Command" Value="{Binding StopCommand}" />
+                                                            <Setter Property="ToolTip" Value="Stop this turn" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
+
+                                        <!-- Beside the box rather than at the top of the panel: this
+                                             is about the question just typed, and a fixed width so
+                                             the box does not shift as the word changes. -->
+                                        <TextBlock DockPanel.Dock="Left" Text="{Binding Activity}"
+                                                   Width="62" VerticalAlignment="Bottom" Margin="2,0,6,3"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Foreground="{DynamicResource Text.Tertiary}"
+                                                   AutomationProperties.Name="Assistant activity" />
+
                                         <!-- Off while a turn runs, so it is visible that the question
-                                             went somewhere and a second one is not wanted yet. -->
+                                             went somewhere and a second one is not wanted yet.
+
+                                             AcceptsReturn is what lets a pasted listing arrive as the
+                                             several lines it is: without it the box keeps the first
+                                             line and drops the rest, silently. Enter still asks -
+                                             OnAssistantKeyDown handles it, and Shift+Enter breaks
+                                             the line - and it grows to a few lines before scrolling. -->
                                         <TextBox x:Name="AssistantQuestion" Tag="Ask about the binary, or tell it what to name"
                                                  Text="{Binding Question, UpdateSourceTrigger=PropertyChanged}"
                                                  IsEnabled="{Binding IsIdle}"
+                                                 AcceptsReturn="True" TextWrapping="Wrap"
+                                                 MaxHeight="120" VerticalScrollBarVisibility="Auto"
                                                  KeyDown="OnAssistantKeyDown"
                                                  AutomationProperties.Name="Assistant question" />
                                     </DockPanel>

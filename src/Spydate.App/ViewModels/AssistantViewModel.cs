@@ -89,8 +89,23 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     /// <summary>The other way round, for anything that should be off while a turn is running.</summary>
     public bool IsIdle => !IsBusy;
 
+    /// <summary>Which provider and model this is. Says the same thing whether or not it is working.</summary>
     [ObservableProperty]
     private string _status = string.Empty;
+
+    /// <summary>
+    /// Whether it is doing anything, shown beside the box the question is typed into.
+    ///
+    /// It is a separate line from <see cref="Status"/> because the two answer different questions —
+    /// which model am I talking to, and is it listening — and one line cannot hold both. Overwriting
+    /// the model with "Working…" took away the answer to the first every time the second changed,
+    /// and put the news that a turn had started at the opposite end of the panel from the button
+    /// that started it.
+    /// </summary>
+    [ObservableProperty]
+    private string _activity = Idle;
+
+    private const string Idle = "Idle";
 
     /// <summary>True once a provider, a model and a key are all present.</summary>
     public bool IsConfigured => Settings.Model.Length > 0 && !string.IsNullOrEmpty(_secrets.Get(Settings.Provider.ToString()));
@@ -124,7 +139,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             // A turn can be a long silence — a slow provider, or several tool calls before it says
             // anything. Without this the panel looks broken rather than busy, and the reasonable
             // thing to do about a broken-looking panel is to send the question again.
-            Status = "Working…";
+            Activity = "Working…";
 
             var agent = Agent();
             _turn = new CancellationTokenSource();
@@ -181,6 +196,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         finally
         {
             IsBusy = false;
+            Activity = Idle;
             _turn?.Dispose();
             _turn = null;
             _answer = null;
@@ -193,8 +209,19 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
     private bool CanAsk() => !IsBusy;
 
+    /// <summary>
+    /// Asks the turn to stop. Not instant — a request already in flight has to come back, and a tool
+    /// already running finishes — so the label says "Stopping" rather than pretending it is over.
+    /// </summary>
     [RelayCommand]
-    private void Stop() => _turn?.Cancel();
+    private void Stop()
+    {
+        if (_turn is { } turn)
+        {
+            Activity = "Stopping…";
+            turn.Cancel();
+        }
+    }
 
     [RelayCommand]
     private void StartOver()

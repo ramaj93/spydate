@@ -49,6 +49,9 @@ public partial class MainWindow : FluentWindow
                 ScrollAssistantToEnd();
             }
         };
+
+        AssistantTranscript.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(OnTranscriptScrolled));
+        AssistantTranscript.GotKeyboardFocus += (_, _) => HoldTranscriptStill();
     }
 
     /// <summary>Ctrl+G: focus the go-to box.</summary>
@@ -169,12 +172,54 @@ public partial class MainWindow : FluentWindow
     /// <summary>How many blocks the line being streamed into currently occupies, so it can be redrawn.</summary>
     private int _streamingBlocks;
 
+    /// <summary>
+    /// Whether new lines pull the view down with them. True until somebody scrolls up, and true
+    /// again the moment they ask something — reading back through a long conversation while an
+    /// answer arrives should not keep throwing them to the bottom of it.
+    /// </summary>
+    private bool _followTranscript = true;
+
+    private void OnTranscriptScrolled(object sender, ScrollChangedEventArgs e)
+    {
+        // Only a scroll somebody made says anything about whether they want to follow along. The
+        // view moving because the document grew underneath it says nothing, and reading it as an
+        // instruction would turn every streamed token into a vote about where to look.
+        if (e.ExtentHeightChange == 0 && e.ViewportHeightChange == 0)
+        {
+            _followTranscript = e.VerticalOffset >= e.ExtentHeight - e.ViewportHeight - 1;
+        }
+    }
+
+    /// <summary>
+    /// Keeps focus from moving the transcript.
+    ///
+    /// A read-only RichTextBox still has a caret; it sits at the start of the document, and taking
+    /// keyboard focus brings it into view. So clicking the panel to select a line, or tabbing into
+    /// it, threw the reader back to the first message of the conversation — the jump. The position
+    /// is read before the caret is honoured and put back afterwards.
+    /// </summary>
+    private void HoldTranscriptStill()
+    {
+        double offset = AssistantTranscript.VerticalOffset;
+
+        // Later than Render and Loaded, which is when the caret is brought into view, and earlier
+        // than the Background pass that follows a growing answer down.
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+        {
+            if (Math.Abs(AssistantTranscript.VerticalOffset - offset) > 0.5)
+            {
+                AssistantTranscript.ScrollToVerticalOffset(offset);
+            }
+        }));
+    }
+
     private void OnTranscriptChanged(NotifyCollectionChangedEventArgs e)
     {
         if (e.Action == NotifyCollectionChangedAction.Reset)
         {
             AssistantTranscript.Document.Blocks.Clear();
             _streamingBlocks = 0;
+            _followTranscript = true;
             return;
         }
 
@@ -182,6 +227,9 @@ public partial class MainWindow : FluentWindow
         {
             // A new line means the previous one is finished, whatever it was.
             _streamingBlocks = 0;
+
+            // Asking is a request to be shown the answer, wherever the reader had scrolled to.
+            _followTranscript |= line.IsYou;
             Append(line);
         }
 
@@ -269,10 +317,21 @@ public partial class MainWindow : FluentWindow
     /// measured yet, so scrolling now scrolls to the end of what was there a moment ago — which for
     /// a restored conversation means sitting at the top of it, and for a streaming answer means
     /// falling steadily further behind.
+    ///
+    /// Only while the end is what is being watched. Following an answer down is right; hauling
+    /// somebody back down from the middle of a conversation they are reading is not.
     /// </summary>
-    private void ScrollAssistantToEnd() => Dispatcher.BeginInvoke(
-        DispatcherPriority.Background,
-        new Action(() => AssistantTranscript.ScrollToEnd()));
+    private void ScrollAssistantToEnd()
+    {
+        if (!_followTranscript)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Background,
+            new Action(() => AssistantTranscript.ScrollToEnd()));
+    }
 
     // ------------------------------------------------------------------
     // Menu / window plumbing

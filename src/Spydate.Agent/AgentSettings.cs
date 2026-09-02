@@ -32,11 +32,25 @@ public sealed class AgentSettings
     public bool Stream { get; set; } = true;
 
     /// <summary>
-    /// How much conversation to carry, in tokens. Context windows run from tens of thousands to a
-    /// million depending on the model, so this belongs next to the model rather than in a constant.
+    /// The context budget as it was chosen, or null if nobody has ever chosen one.
+    ///
+    /// Nullable so that absent and chosen are different things. A plain int cannot tell them apart:
+    /// a file with no such key would take whatever constant the class was written with, which is a
+    /// number picked for one provider being applied to whichever one is actually configured.
     /// </summary>
     [JsonPropertyName("maxContextTokens")]
-    public int MaxContextTokens { get; set; } = 48_000;
+    public int? ContextTokens { get; set; }
+
+    /// <summary>
+    /// How much conversation to carry, in tokens. Context windows run from tens of thousands to a
+    /// million depending on the model, so unless it has been set by hand this follows the model.
+    /// </summary>
+    [JsonIgnore]
+    public int MaxContextTokens
+    {
+        get => ContextTokens ?? ProviderSettings.SuggestedContextTokens(Provider, Model);
+        set => ContextTokens = value;
+    }
 
     public ProviderSettings ToProviderSettings() => new()
     {
@@ -62,9 +76,23 @@ public sealed class AgentSettings
         path ??= DefaultPath;
         try
         {
-            return File.Exists(path)
-                ? JsonSerializer.Deserialize<AgentSettings>(File.ReadAllText(path), Options) ?? new AgentSettings()
-                : new AgentSettings();
+            if (!File.Exists(path))
+            {
+                return new AgentSettings();
+            }
+
+            var settings = JsonSerializer.Deserialize<AgentSettings>(File.ReadAllText(path), Options) ?? new AgentSettings();
+
+            // Every file written before the budget followed the model says 48000, whether or not
+            // anybody ever looked at the setting. Taken at face value it would leave the assistant
+            // with a third of Claude's memory and a twentieth of Gemini's on exactly the machines
+            // that had already hit the problem, so it is read as never chosen instead.
+            if (settings.ContextTokens == ProviderSettings.LegacyContextTokens)
+            {
+                settings.ContextTokens = null;
+            }
+
+            return settings;
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
