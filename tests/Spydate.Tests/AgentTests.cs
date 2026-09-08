@@ -296,6 +296,65 @@ public class AgentTests
     }
 
     /// <summary>
+    /// The panel has to show what it is doing whether or not there is a stream to show it from.
+    /// A recovery retry is never streamed, and the streaming setting can be off, and either way a
+    /// turn that reads several functions is minutes of silence with no way to tell working from
+    /// hung.
+    /// </summary>
+    [Fact]
+    public async Task ToolCallsAreReportedEvenWhenNothingIsStreaming()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var fake = new ScriptedChatClient(
+            turn1: new FunctionCallContent("call-1", "list_functions", new Dictionary<string, object?> { ["limit"] = 3 }),
+            turn2: "there are functions");
+
+        using var agent = new AnalysisAgent(
+            fake, Store(Corpus.NotepadX64), McpOptions.Default,
+            new ProviderSettings { Model = "test", Stream = false });
+
+        var steps = new List<AgentStep>();
+        await agent.AskAsync("what is in here?", new Progress<AgentStep>(steps.Add));
+
+        Assert.Contains(steps, s => s.Kind == "tool" && s.Text.StartsWith("list_functions(", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A salvaged turn ends on a tool result, which is a conversation caught mid-sentence. DeepSeek
+    /// reads that as a reasoning turn still in progress and demands the reasoning behind the call,
+    /// which does not survive being folded into messages - so the retry was refused outright with a
+    /// 400, a worse failure than the dropped call it was recovering from.
+    /// </summary>
+    [Fact]
+    public async Task ARecoveredTurnIsClosedOffBeforeItIsSentAgain()
+    {
+        var client = new DegradingChatClient();
+        using var agent = new AnalysisAgent(client, new SessionStore(), McpOptions.Default, new ProviderSettings { Model = "test" });
+
+        await agent.AskAsync("what does the entry point do");
+
+        // Nothing is left hanging: the last thing before the retry was asked for is the assistant
+        // speaking, not a tool result waiting for somebody to make something of it.
+        int lastResult = -1;
+        for (int i = 0; i < agent.History.Count; i++)
+        {
+            if (agent.History[i].Contents.OfType<FunctionResultContent>().Any())
+            {
+                lastResult = i;
+            }
+        }
+
+        Assert.True(lastResult >= 0, "the tool result was not kept at all");
+        Assert.Contains(
+            agent.History.Skip(lastResult + 1),
+            m => m.Role == ChatRole.Assistant && m.Text.Length > 0);
+    }
+
+    /// <summary>
     /// A message carries more than its contents. A thinking model's reasoning rides on it, and
     /// DeepSeek refuses the whole request with a 400 when the reasoning behind a tool call does not
     /// come back with the call — so salvaging must hand back the messages themselves and never
@@ -348,16 +407,24 @@ public class AgentTests
     {
         private int _turn;
 
+        /// <summary>Whether the retry request carried the result of the call that really ran.</summary>
         public bool SecondRequestSawTheToolResult { get; private set; }
+
+        private void Notice(IEnumerable<ChatMessage> messages)
+        {
+            if (_turn > 0)
+            {
+                SecondRequestSawTheToolResult |= messages
+                    .SelectMany(m => m.Contents)
+                    .OfType<FunctionResultContent>()
+                    .Any(r => r.Result?.ToString() == "the listing");
+            }
+        }
 
         public Task<ChatResponse> GetResponseAsync(
             IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
         {
-            SecondRequestSawTheToolResult = messages
-                .SelectMany(m => m.Contents)
-                .OfType<FunctionResultContent>()
-                .Any(r => r.Result?.ToString() == "the listing");
-
+            Notice(messages);
             return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "it sets up the CRT.")));
         }
 
@@ -366,7 +433,15 @@ public class AgentTests
             ChatOptions? options = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            _turn++;
+            // The retry is streamed too, because that is the transport the session is using.
+            Notice(messages);
+
+            if (_turn++ > 0)
+            {
+                yield return new ChatResponseUpdate(ChatRole.Assistant, "carrying on then");
+                await Task.CompletedTask.ConfigureAwait(false);
+                yield break;
+            }
 
             // A call that really happened, its result, and then the template that did not.
             yield return new ChatResponseUpdate(ChatRole.Assistant, new List<AIContent>

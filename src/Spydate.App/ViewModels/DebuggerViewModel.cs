@@ -204,6 +204,17 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Guarded here as well as by CanExecute, which the button honours and a direct Execute does
+        // not — and the assistant calls it directly. A second start does not replace the first: it
+        // leaves the running process orphaned and begins another, so the analyst who agreed to run
+        // this binary once has two of it, and the panel is showing only one.
+        if (IsDebugging)
+        {
+            Status = "It is already running.";
+            Add("already running — stop it before starting it again");
+            return;
+        }
+
         // Refused rather than attempted. The register context here is CONTEXT_AMD64; a 32-bit process
         // runs under WOW64 and needs Wow64GetThreadContext, and asking for the 64-bit one gives back
         // a structure that is read as registers and is not. Wrong register values in a debugger are

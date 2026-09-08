@@ -52,6 +52,13 @@ public sealed class AnalysisAgent : IDisposable
     private readonly bool _stream;
     private readonly int _maxHistoryChars;
 
+    /// <summary>
+    /// Where to report the turn in progress, while there is one. A field rather than a parameter
+    /// because the tool invoker is wired up once, in the constructor, and has to reach whichever
+    /// turn is running when it fires.
+    /// </summary>
+    private IProgress<AgentStep>? _progress;
+
     /// <param name="earlier">
     /// The end of a conversation somebody had about this binary before, or null. See
     /// <see cref="Earlier"/> for why it is given at all and why it is only the end.
@@ -71,6 +78,19 @@ public sealed class AnalysisAgent : IDisposable
             {
                 invocation.MaximumIterationsPerRequest = settings.MaxToolCalls;
                 invocation.IncludeDetailedErrors = true;
+
+                // Reported here, where the call is actually run, rather than off the stream.
+                //
+                // The stream only carries calls when there is a stream, so an un-streamed turn — a
+                // recovery retry, or the setting turned off — showed nothing at all while it worked.
+                // A turn that reads six functions and steps a debugger is minutes of that, and the
+                // panel had one note on it and no way to tell working from hung. This fires in both
+                // modes because it is not part of either.
+                invocation.FunctionInvoker = (context, cancellationToken) =>
+                {
+                    _progress?.Report(AgentStep.Tool(context.Function.Name, Describe(context.Arguments)));
+                    return context.Function.InvokeAsync(context.Arguments, cancellationToken);
+                };
             })
             .Build();
 
@@ -101,6 +121,7 @@ public sealed class AnalysisAgent : IDisposable
     public async Task<string> AskAsync(string question, IProgress<AgentStep>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
+        _progress = progress;
         _history.Add(new ChatMessage(ChatRole.User, question));
 
         if (Trim() is > 0 and var dropped)
@@ -127,15 +148,10 @@ public sealed class AnalysisAgent : IDisposable
         ChatResponse response;
         var said = new StringBuilder();
 
-        // Whether tool calls were reported as they were made. A retry is never streamed, so after
-        // one they were not - and the block below is what puts them on screen instead. Keyed to what
-        // actually happened rather than to the setting, which is how a recovered turn came to run
-        // twenty tool calls and show none of them.
-        bool live = _stream;
         try
         {
             response = _stream
-                ? await StreamAsync(said, progress, cancellationToken).ConfigureAwait(false)
+                ? await StreamAsync(_history, said, progress, cancellationToken).ConfigureAwait(false)
                 : await _client.GetResponseAsync(_history, _options, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -169,7 +185,7 @@ public sealed class AnalysisAgent : IDisposable
             progress?.Report(AgentStep.Discard());
             progress?.Report(AgentStep.Note(
                 $"— it wrote {(wanted is null ? "a tool call" : wanted)} as text instead of calling it. "
-                + "Keeping what it already did and asking it to carry on. —"));
+                + "Keeping what it already did and carrying on. —"));
 
             // Everything it really did is kept: the calls it made and what they returned. Only the
             // text that turned out to be a template goes.
@@ -180,23 +196,20 @@ public sealed class AnalysisAgent : IDisposable
             // process and loses every breakpoint reached, every module loaded and everywhere it had
             // got to. Recovering from a dropped tool call by destroying the session is not recovery.
             _history.AddRange(Salvage(response.Messages));
+            Close(response, wanted);
 
-            // Nothing is said to the model on this attempt, on purpose: the usual cause is the
-            // streaming parser rather than anything the model did, and telling it off for a mistake
-            // that was not its own is its own kind of confusion. The history now ends with what it
-            // has already learned, so this asks it to carry on rather than to start over.
-            response = await Retry(store, correction: null, cancellationToken).ConfigureAwait(false);
-            live = false;
+            response = await Retry(store, CarryOn, cancellationToken).ConfigureAwait(false);
 
             if (ToolCallMarkup.Present(response.Text))
             {
                 // Twice, un-streamed, means the model really is writing the template as prose. Now
                 // it is worth saying so — it is the only remaining thing that can change the answer.
                 progress?.Report(AgentStep.Note(
-                    "— again with the whole answer in one piece, so it is the model and not the stream; "
+                    "— it did the same again, so it is the model rather than a dropped call; "
                     + "telling it plainly and asking once more —"));
 
                 _history.AddRange(Salvage(response.Messages));
+                Close(response, ToolCallMarkup.NameIn(response.Text));
                 response = await Retry(store, Correction, cancellationToken).ConfigureAwait(false);
             }
 
@@ -211,15 +224,6 @@ public sealed class AnalysisAgent : IDisposable
         // Salvaged only when something went wrong with it. A turn that behaved is added as it came
         // back, rather than rebuilt into equivalent messages for no reason.
         _history.AddRange(degraded ? Salvage(response.Messages) : response.Messages);
-
-        if (!live)
-        {
-            // Nothing could be reported while it ran, so at least say what it did before answering.
-            foreach (var call in response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>())
-            {
-                progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
-            }
-        }
 
         string answer = response.Text;
         progress?.Report(AgentStep.Said(answer));
@@ -282,6 +286,41 @@ public sealed class AnalysisAgent : IDisposable
     }
 
     /// <summary>
+    /// Rounds off a turn that stopped in the middle of itself.
+    ///
+    /// A salvaged turn ends on a tool result, which is a conversation caught mid-sentence: the model
+    /// asked for something, got it, and never said what it made of it. A provider reading that sees
+    /// a reasoning turn still in progress and wants the reasoning that produced the call handed back
+    /// with it — and that does not survive being folded into messages, so the request is refused
+    /// outright. An ordinary finished exchange re-sends without complaint, which is the difference.
+    ///
+    /// So the exchange is closed with what the model actually managed to say before the template.
+    /// That is a real thing it said, not an invention; when it said nothing usable, the placeholder
+    /// records only what is certainly true.
+    /// </summary>
+    private void Close(ChatResponse response, string? wanted)
+    {
+        string prose = ToolCallMarkup.Without(response.Text).Trim();
+        _history.Add(new ChatMessage(
+            ChatRole.Assistant,
+            prose.Length > 0 ? prose : $"(I was about to call {wanted ?? "a tool"}.)"));
+    }
+
+    /// <summary>
+    /// The nudge that goes with the first retry.
+    ///
+    /// Short, and not a telling-off: the usual cause is the call being lost in transit rather than
+    /// anything the model chose, and blaming it for that is its own kind of confusion. It exists
+    /// because the history now ends with a finished exchange, so something has to ask for the next
+    /// thing — and what is wanted is for it to go on from what it has, not to begin again.
+    /// </summary>
+    private const string CarryOn =
+        "That last tool call did not go through — it arrived as text, so nothing ran. Everything "
+        + "before it did run, and its results are above: do not call those again, because they had "
+        + "effects that still stand. A process you started is still running, a breakpoint you set is "
+        + "still set. Carry on from there.";
+
+    /// <summary>
     /// What to say when the model has twice written a call instead of making one.
     ///
     /// The last sentence is the part that earns its place: if it genuinely cannot make the call, the
@@ -322,7 +361,23 @@ public sealed class AnalysisAgent : IDisposable
 
         try
         {
-            return await _client.GetResponseAsync(messages, _options, cancellationToken).ConfigureAwait(false);
+            // The same transport the session is using, not the other one.
+            //
+            // This used to force a whole-answer request, on the theory that a provider which
+            // mis-parses tool calls in pieces will parse them correctly in one. What it actually did
+            // was hand messages that came out of a stream to a request that was not one, and DeepSeek
+            // refuses that outright: the reasoning behind a tool call has to come back with it, and
+            // it does not survive the crossing. Every recovery ended in a 400 - a worse failure than
+            // the dropped call it was recovering from, and one that no amount of salvaging could fix
+            // because salvaging was never the problem.
+            //
+            // Switching transport behind the analyst.s back was the wrong idea anyway. The setting
+            // says how this session talks to its provider; a session that quietly talks another way
+            // when something goes wrong is one whose failures cannot be reasoned about. What makes
+            // this attempt different is the history it carries and, on the second go, the correction.
+            return _stream
+                ? await StreamAsync(messages, new StringBuilder(), _progress, cancellationToken).ConfigureAwait(false)
+                : await _client.GetResponseAsync(messages, _options, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -339,20 +394,15 @@ public sealed class AnalysisAgent : IDisposable
     /// the history is the same shape it would have been un-streamed and the next turn sees finished
     /// messages rather than fragments.
     /// </summary>
-    private async Task<ChatResponse> StreamAsync(StringBuilder said, IProgress<AgentStep>? progress, CancellationToken cancellationToken)
+    private async Task<ChatResponse> StreamAsync(IEnumerable<ChatMessage> messages, StringBuilder said, IProgress<AgentStep>? progress, CancellationToken cancellationToken)
     {
         var updates = new List<ChatResponseUpdate>();
 
         await foreach (var update in _client
-                           .GetStreamingResponseAsync(_history, _options, cancellationToken)
+                           .GetStreamingResponseAsync(messages, _options, cancellationToken)
                            .ConfigureAwait(false))
         {
             updates.Add(update);
-
-            foreach (var call in update.Contents.OfType<FunctionCallContent>())
-            {
-                progress?.Report(AgentStep.Tool(call.Name, Describe(call.Arguments)));
-            }
 
             if (update.Text is { Length: > 0 } delta)
             {
