@@ -47,7 +47,28 @@ public sealed class DebugTools
         }
 
         var debug = _store.Debug!;
-        switch (action.Trim().ToLowerInvariant().Replace('-', '_'))
+        string what = action.Trim().ToLowerInvariant().Replace('-', '_');
+
+        // Asked before acting, because the answer decides whether acting means anything. Moving a
+        // process that is not stopped is what the loop was: the request did nothing, the state was
+        // reported as running anyway, and the only thing left to try was the same request again.
+        if (what is "continue" or "step" or "step_over" or "run_to")
+        {
+            var now = debug.Snapshot();
+            if (now.State != "stopped")
+            {
+                return now.State switch
+                {
+                    "exited" => $"it has exited — {now.Status} Nothing is left to continue; "
+                                + "use start to run it again." + Recent(now),
+                    "running" => "it is running and has not stopped. Continuing does nothing from here — "
+                                 + "either wait, or set a breakpoint somewhere it will reach." + Recent(now),
+                    _ => "nothing is running. Use start." + Recent(now),
+                };
+            }
+        }
+
+        switch (what)
         {
             case "start":
                 if (debug.Start() is { } problem)
@@ -90,11 +111,25 @@ public sealed class DebugTools
         // process runs until it hits something, so returning now would describe the state before the
         // thing that was asked for had happened.
         bool settled = debug.WaitUntilStopped(Settle);
-        return settled
-            ? Describe(debug.Snapshot())
-            : $"still running after {Settle.TotalSeconds:0}s — it has not reached a breakpoint. "
-              + "Set one and ask again, or use debug_run with stop.";
+        if (settled)
+        {
+            return Describe(debug.Snapshot());
+        }
+
+        // What it has been doing goes in even here — especially here. This is the answer that used
+        // to say only "still running", which told an agent nothing except to ask again, while the
+        // log in front of the analyst was saying the module had loaded and the process had gone.
+        var timedOut = debug.Snapshot();
+        return $"still running after {Settle.TotalSeconds:0}s and it has not stopped. Continuing again "
+               + "will not change that: set a breakpoint somewhere it will reach, or use stop."
+               + Recent(timedOut);
     }
+
+    /// <summary>What the process has been doing, when there is anything to say.</summary>
+    private static string Recent(DebugSnapshot snapshot)
+        => snapshot.Recent.Count == 0
+            ? string.Empty
+            : "\n\nwhat it has done:\n" + string.Join("\n", snapshot.Recent.Select(line => $"  {line}"));
 
     [McpServerTool(Name = "debug_break")]
     [Description("Set or clear a breakpoint at a listing address. Works before anything runs, and on a DLL before its host loads it - it goes in when the module arrives.")]
@@ -234,6 +269,8 @@ public sealed class DebugTools
             sb.AppendLine();
             sb.AppendLine("breakpoints: " + string.Join(", ", snapshot.Breakpoints.Select(b => $"0x{b:X}")));
         }
+
+        sb.Append(Recent(snapshot));
 
         return sb.ToString().TrimEnd();
     }

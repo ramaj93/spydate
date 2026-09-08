@@ -1,5 +1,6 @@
 using System.Runtime.Versioning;
 using System.Windows;
+using System.Windows.Threading;
 using Spydate.App.ViewModels;
 using Spydate.Debugger;
 using Spydate.Mcp.Session;
@@ -81,6 +82,10 @@ public sealed class PanelDebugControl : IDebugControl
             Stack = _debugger.Stack.Select(s => (Parse(s.Address), Parse(s.Value))).ToList(),
             Modules = _debugger.Modules.Select(m => (m.Name, Parse(m.Base), m.IsTarget)).ToList(),
             Breakpoints = _debugger.BreakpointAddresses.Order().ToList(),
+
+            // The tail of the panel log. Enough to carry a module load, a breakpoint and an exit;
+            // not so much that a long run buries the answer to the question actually asked.
+            Recent = _debugger.Log.TakeLast(12).ToList(),
         });
 
         return snapshot;
@@ -90,10 +95,9 @@ public sealed class PanelDebugControl : IDebugControl
 
     public bool WaitUntilStopped(TimeSpan timeout)
     {
-        // Polled rather than awaited on an event, and never on the UI thread: the debug loop reports
-        // through the dispatcher, so blocking that thread here would stop the very notification being
-        // waited for from ever arriving.
+        var dispatcher = Application.Current?.Dispatcher;
         var deadline = DateTime.UtcNow + timeout;
+
         while (DateTime.UtcNow < deadline)
         {
             if (_debugger.State is DebugState.Stopped or DebugState.Exited or DebugState.NotStarted)
@@ -101,7 +105,20 @@ public sealed class PanelDebugControl : IDebugControl
                 return true;
             }
 
-            Thread.Sleep(25);
+            // On the UI thread the wait has to let the dispatcher run rather than sleep through it.
+            // The debug loop reports every stop by posting to that dispatcher, so a plain sleep here
+            // blocks the one thing that could ever end the wait, and it times out having watched a
+            // state that could not change. This used to carry a comment asserting it never ran on
+            // the UI thread, which nothing arranged and nothing checked.
+            if (dispatcher is not null && dispatcher.CheckAccess())
+            {
+                dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+                Thread.Sleep(10);
+            }
+            else
+            {
+                Thread.Sleep(25);
+            }
         }
 
         return false;

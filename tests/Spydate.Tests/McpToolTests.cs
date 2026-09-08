@@ -410,9 +410,79 @@ public sealed class DebugToolTests
     }
 
     /// <summary>A debugger that records what it was told to do and reports a fixed stop.</summary>
+    /// <summary>
+    /// The loop that got reported: the process had run, loaded the DLL and exited, and the agent
+    /// went on asking it to continue. Each request did nothing, came back saying "still running",
+    /// and left asking again as the only thing to try.
+    /// </summary>
+    [Fact]
+    public void ContinuingAProcessThatHasExitedSaysSoInsteadOfInvitingAnotherGo()
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "exited", Status = "Exited with code 3221225477 (0xC0000005)." };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        foreach (string action in new[] { "continue", "step", "step_over" })
+        {
+            string answer = tools.Run(action);
+
+            Assert.Contains("exited", answer, StringComparison.Ordinal);
+            Assert.Contains("0xC0000005", answer, StringComparison.Ordinal);
+            Assert.Contains("start", answer, StringComparison.Ordinal);
+        }
+
+        // And it did not touch the debugger at all, rather than asking it to do something it cannot.
+        Assert.Empty(stub.Done);
+    }
+
+    [Fact]
+    public void AProcessStillRunningIsNotAskedToContinueEither()
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "running", Status = "Running." };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        Assert.Contains("has not stopped", tools.Run("continue"), StringComparison.Ordinal);
+        Assert.Empty(stub.Done);
+    }
+
+    /// <summary>
+    /// What actually happened, not just what state it ended in. The module arriving, the breakpoint
+    /// firing and the exit were all in front of the analyst and none of it reached the agent.
+    /// </summary>
+    [Fact]
+    public void TheSnapshotCarriesWhatTheProcessHasBeenDoing()
+    {
+        using var store = Open();
+        var stub = new StubDebug
+        {
+            Recent =
+            [
+                "10:38:11  dcsxpdf.dll loaded at 0x7FFA21F70000 (file says 0x180000000); 1 breakpoint armed",
+                "10:38:12  breakpoint at 0x1800040C0",
+            ],
+        };
+
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string state = tools.State();
+
+        Assert.Contains("dcsxpdf.dll loaded", state, StringComparison.Ordinal);
+        Assert.Contains("breakpoint at 0x1800040C0", state, StringComparison.Ordinal);
+    }
+
     private sealed class StubDebug : IDebugControl
     {
         public List<string> Done { get; } = [];
+
+        public string State { get; init; } = "stopped";
+
+        public string Status { get; init; } = "Stopped at 0x140001000.";
+
+        public IReadOnlyList<string> Recent { get; init; } = [];
 
         public string? Start()
         {
@@ -438,8 +508,9 @@ public sealed class DebugToolTests
 
         public DebugSnapshot Snapshot() => new()
         {
-            State = "stopped",
-            Status = "Stopped at 0x140001000.",
+            State = State,
+            Status = Status,
+            Recent = Recent,
             Address = 0x140001000,
             TargetLoaded = true,
             Registers = [("rax", 1), ("rbx", 2), ("rcx", 3), ("rdx", 4), ("rip", 0x140001000)],

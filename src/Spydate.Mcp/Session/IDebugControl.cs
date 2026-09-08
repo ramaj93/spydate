@@ -26,6 +26,16 @@ public sealed record DebugSnapshot
 
     /// <summary>Breakpoints by static address — the ones in the listing.</summary>
     public IReadOnlyList<ulong> Breakpoints { get; init; } = [];
+
+    /// <summary>
+    /// The last things the debuggee did, oldest first — modules loading, breakpoints being hit,
+    /// exceptions, how it ended.
+    ///
+    /// Without it a snapshot is a state and nothing else, and everything that actually happened
+    /// between two questions is invisible: the module arriving, the breakpoint firing, the access
+    /// violation. The panel had all of it in front of the analyst the whole time.
+    /// </summary>
+    public IReadOnlyList<string> Recent { get; init; } = [];
 }
 
 /// <summary>

@@ -301,9 +301,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
+    // The three below all guard, and none of them used to. CanExecute disables the buttons, but
+    // RelayCommand.Execute does not consult it, so anything calling the command directly - the
+    // assistant does - walked straight past it and set the state back to Running on a process that
+    // had already exited. That erased the exit code and left every later question answered "still
+    // running", which is the loop an agent cannot get out of by trying harder.
     [RelayCommand(CanExecute = nameof(IsStopped))]
     private void Continue()
     {
+        if (!IsStopped)
+        {
+            return;
+        }
+
         Registers.Clear();
         _session?.Continue();
         State = DebugState.Running;
@@ -314,6 +324,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(IsStopped))]
     private void StepInstruction()
     {
+        if (!IsStopped)
+        {
+            return;
+        }
+
         Registers.Clear();
         _session?.StepInstruction();
         State = DebugState.Running;
@@ -323,6 +338,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(IsStopped))]
     private void StepOver()
     {
+        if (!IsStopped)
+        {
+            return;
+        }
+
         Registers.Clear();
         _session?.StepOver();
         State = DebugState.Running;
