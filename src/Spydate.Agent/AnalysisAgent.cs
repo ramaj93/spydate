@@ -227,6 +227,7 @@ public sealed class AnalysisAgent : IDisposable
     }
 
     /// <summary>
+    /// <summary>
     /// A failed turn with everything real about it kept and only the template dropped.
     ///
     /// What is real is the calls it made and the results they returned — work that has already
@@ -238,43 +239,46 @@ public sealed class AnalysisAgent : IDisposable
     /// call without its result rejects the whole request, and the tool loop can stop between the two
     /// when it runs out of iterations.
     /// </summary>
-    private static IEnumerable<ChatMessage> Salvage(IList<ChatMessage> messages)
+    public static IEnumerable<ChatMessage> Salvage(IList<ChatMessage> messages)
     {
+        // Messages are kept or dropped whole, and never rebuilt.
+        //
+        // A message carries more than the contents it is made of. Providers hang their own fields on
+        // it, and a thinking model's reasoning is one of them: DeepSeek requires the reasoning that
+        // produced a tool call to be handed back along with the call, and refuses the whole request
+        // with a 400 when it is not. Taking a message apart and constructing an equivalent one drops
+        // every such field on the floor — so this decides about messages and edits none of them.
+        //
+        // The cost is the sentence that shared a message with the template, which is a mid-thought
+        // like "now I will look at the caller" and no loss at all.
         var answered = messages
             .SelectMany(m => m.Contents)
             .OfType<FunctionResultContent>()
             .Select(r => r.CallId)
             .ToHashSet(StringComparer.Ordinal);
 
+        var kept = new List<ChatMessage>();
+        var survived = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var message in messages)
         {
-            var kept = new List<AIContent>();
-            foreach (var content in message.Contents)
+            // The template goes, and so does a call nothing answered — the pair is matched or it is
+            // nothing, and the tool loop can stop between the two.
+            if (message.Contents.OfType<TextContent>().Any(t => ToolCallMarkup.Present(t.Text))
+                || message.Contents.OfType<FunctionCallContent>().Any(c => !answered.Contains(c.CallId)))
             {
-                switch (content)
-                {
-                    case FunctionCallContent call when !answered.Contains(call.CallId):
-                        break;
-
-                    case TextContent text:
-                        if (ToolCallMarkup.Without(text.Text).Trim() is { Length: > 0 } prose)
-                        {
-                            kept.Add(new TextContent(prose));
-                        }
-
-                        break;
-
-                    default:
-                        kept.Add(content);
-                        break;
-                }
+                continue;
             }
 
-            if (kept.Count > 0)
+            kept.Add(message);
+            foreach (var call in message.Contents.OfType<FunctionCallContent>())
             {
-                yield return new ChatMessage(message.Role, kept);
+                survived.Add(call.CallId);
             }
         }
+
+        // And a result whose call did not survive is exactly as broken as a call with no result.
+        return kept.Where(m => m.Contents.OfType<FunctionResultContent>().All(r => survived.Contains(r.CallId)));
     }
 
     /// <summary>

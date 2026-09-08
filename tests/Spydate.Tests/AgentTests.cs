@@ -292,6 +292,55 @@ public class AgentTests
         // The second request saw the first attempt is work, so it asks it to carry on rather than
         // handing it the bare question again.
         Assert.True(client.SecondRequestSawTheToolResult, "the retry did not carry the work forward");
+
+    }
+
+    /// <summary>
+    /// A message carries more than its contents. A thinking model's reasoning rides on it, and
+    /// DeepSeek refuses the whole request with a 400 when the reasoning behind a tool call does not
+    /// come back with the call — so salvaging must hand back the messages themselves and never
+    /// equivalent ones built from their parts.
+    /// </summary>
+    [Fact]
+    public void SalvagingKeepsTheMessagesThemselvesRatherThanCopiesOfThem()
+    {
+        var call = new ChatMessage(ChatRole.Assistant, new List<AIContent>
+        {
+            new FunctionCallContent("call-1", "read_function", new Dictionary<string, object?> { ["target"] = "entry" }),
+        })
+        {
+            RawRepresentation = "reasoning: read the entry point first",
+        };
+
+        var result = new ChatMessage(ChatRole.Tool, new List<AIContent> { new FunctionResultContent("call-1", "the listing") });
+        var template = new ChatMessage(ChatRole.Assistant, "Now the caller.\n\n<｜｜DSML｜｜tool_calls>");
+
+        var kept = AnalysisAgent.Salvage([call, result, template]).ToList();
+
+        Assert.Equal(2, kept.Count);
+        Assert.Same(call, kept[0]);
+        Assert.Same(result, kept[1]);
+        Assert.Equal("reasoning: read the entry point first", kept[0].RawRepresentation);
+    }
+
+    [Fact]
+    public void DroppingAMessageTakesItsCallsWithItAndTheResultsThatAnsweredThem()
+    {
+        // The template shared a message with the call, so the call goes too — and the result that
+        // answered it is then as broken as a call with no result. Providers reject either.
+        var both = new ChatMessage(ChatRole.Assistant, new List<AIContent>
+        {
+            new FunctionCallContent("call-1", "xrefs", null),
+            new TextContent("looking now.\n\n<invoke name=\"debug_memory\">"),
+        });
+
+        var answer = new ChatMessage(ChatRole.Tool, new List<AIContent> { new FunctionResultContent("call-1", "sites") });
+        var fine = new ChatMessage(ChatRole.Assistant, "an ordinary sentence");
+
+        var kept = AnalysisAgent.Salvage([both, answer, fine]).ToList();
+
+        Assert.Single(kept);
+        Assert.Same(fine, kept[0]);
     }
 
     /// <summary>Streams a real tool call, then a leaked template; answers plainly the second time.</summary>
