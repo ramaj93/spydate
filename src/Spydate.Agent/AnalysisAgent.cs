@@ -4,6 +4,7 @@ using System.Text;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol.Server;
 using Spydate.Agent.Providers;
+using Spydate.Agent.Text;
 using Spydate.Core.Project;
 using Spydate.Mcp;
 using Spydate.Mcp.Session;
@@ -25,6 +26,9 @@ public sealed record AgentStep(string Kind, string Text)
     public static AgentStep Said(string text) => new("said", text);
 
     public static AgentStep Problem(string text) => new("problem", text);
+
+    /// <summary>Throw away the answer being written: it turned out to be markup, not prose.</summary>
+    public static AgentStep Discard() => new("discard", string.Empty);
 }
 
 /// <summary>
@@ -148,6 +152,30 @@ public sealed class AnalysisAgent : IDisposable
             }
         }
 
+        // A tool call written out as prose instead of made. Nothing ran, the turn ended mid-thought,
+        // and the answer is a chat template — see ToolCallMarkup. It is worth one more attempt
+        // rather than one shrug, because the cause is nearly always the streaming parser and there
+        // is a way round it that costs a single extra request.
+        if (_stream && ToolCallMarkup.Present(response.Text))
+        {
+            string? wanted = ToolCallMarkup.NameIn(response.Text);
+            progress?.Report(AgentStep.Discard());
+            progress?.Report(AgentStep.Note(
+                $"— it wrote {(wanted is null ? "a tool call" : wanted)} out as text instead of calling it, "
+                + "which runs nothing; asking again without streaming —"));
+
+            // The bad turn is not kept. Leaving it in would teach the next turn that writing the
+            // template out is how tools are called here, which is the failure, not a record of it.
+            response = await Retry(store, cancellationToken).ConfigureAwait(false);
+
+            if (ToolCallMarkup.Present(response.Text))
+            {
+                progress?.Report(AgentStep.Note(
+                    "— it did it again without streaming, so this is the model rather than the stream. "
+                    + "Turn off \"Show the answer as it is written\" in Configure, or use another model. —"));
+            }
+        }
+
         _history.AddRange(response.Messages);
 
         if (!_stream)
@@ -162,6 +190,35 @@ public sealed class AnalysisAgent : IDisposable
         string answer = response.Text;
         progress?.Report(AgentStep.Said(answer));
         return answer;
+    }
+
+    /// <summary>
+    /// The same turn again, in one piece.
+    ///
+    /// Un-streamed on purpose: a provider that parses its own tool calls correctly when it answers
+    /// whole may not when it answers in fragments, and that is the difference being worked around.
+    /// The history is untouched — the question is still the last thing in it, and the answer that
+    /// failed was never added — so this asks exactly what was asked the first time.
+    /// </summary>
+    private async Task<ChatResponse> Retry(AnnotationStore? store, CancellationToken cancellationToken)
+    {
+        var wasSource = store?.Source ?? AnnotationSource.User;
+        if (store is not null)
+        {
+            store.Source = AnnotationSource.Agent;
+        }
+
+        try
+        {
+            return await _client.GetResponseAsync(_history, _options, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (store is not null)
+            {
+                store.Source = wasSource;
+            }
+        }
     }
 
     /// <summary>

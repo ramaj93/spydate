@@ -135,57 +135,8 @@ public static class ChatLog
         return string.Join("\n\n", kept);
     }
 
-    /// <summary>
-    /// A message with any leaked tool-call template cut off the end of it.
-    ///
-    /// A model that fails to call a tool properly writes its own template out as prose instead, and
-    /// the panel stores what it displayed, so that markup ends up in the log. Handing it back is the
-    /// worst possible use of it: it is a picture of the failure, and putting it in the prompt as an
-    /// example of what an assistant says here invites the same failure again.
-    ///
-    /// Cut rather than picked apart, because a model only ever starts emitting one of these at the
-    /// end of a message — whatever prose came first is kept, and everything from the first sentinel
-    /// goes. The list is sentinels rather than a grammar: providers each have their own shape, they
-    /// change, and none of them occurs in a sentence about a binary.
-    /// </summary>
-    public static string WithoutMarkup(string? text)
-    {
-        if (text is null or { Length: 0 })
-        {
-            return string.Empty;
-        }
-
-        int cut = -1;
-        foreach (string marker in Sentinels)
-        {
-            int at = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (at >= 0 && (cut < 0 || at < cut))
-            {
-                cut = at;
-            }
-        }
-
-        if (cut < 0)
-        {
-            return text;
-        }
-
-        // The fullwidth bar sits inside an opening tag — "<｜｜DSML｜｜tool_calls>" — so the angle
-        // bracket in front of it belongs to the markup as well, and cutting on the bar alone leaves
-        // it dangling on the end of the prose.
-        string head = text[..cut].TrimEnd();
-        return head.EndsWith('<') ? head[..^1].TrimEnd() : head;
-    }
-
-    private static readonly string[] Sentinels =
-    [
-        "｜",           // the fullwidth bar these are built out of: <｜tool▁calls▁begin｜>
-        "<|",
-        "<tool_call", "</tool_call",
-        "<function_call", "</function_call",
-        "<invoke", "</invoke",
-        "<parameter", "</parameter",
-    ];
+    /// <summary>Kept for callers; the rule itself lives in ToolCallMarkup, which the agent shares.</summary>
+    public static string WithoutMarkup(string? text) => Text.ToolCallMarkup.Without(text);
 
     /// <summary>
     /// Writes the conversation, or deletes the file when there is nothing left to remember. Never

@@ -168,6 +168,19 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
                         Add("note", step.Text);
                         break;
 
+                    case "discard":
+                        // The markup already streamed onto the screen, so it has to come off again.
+                        // Leaving it and appending the retry underneath would show two answers to
+                        // one question, the first of which is a template nobody wants to read.
+                        if (_answer is { } spoiled)
+                        {
+                            Discarding?.Invoke(this, EventArgs.Empty);
+                            Transcript.Remove(spoiled);
+                            _answer = null;
+                        }
+
+                        break;
+
                     case "delta" when _answer is not null:
                         _answer.Append(step.Text);
                         Advanced();
@@ -414,6 +427,9 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
     /// <summary>Raised whenever the line being written into grows, so the view can redraw it.</summary>
     public event EventHandler? Advancing;
+
+    /// <summary>Raised when the line being written is thrown away, so the view can un-draw it.</summary>
+    public event EventHandler? Discarding;
 
     /// <summary>Raised when a turn ends, so the view can render the finished answer properly.</summary>
     public event EventHandler? TurnFinished;

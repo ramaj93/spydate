@@ -375,3 +375,46 @@ public sealed class ChatLogTests
         }
     }
 }
+
+/// <summary>
+/// A tool call the model wrote out as prose instead of making. Nothing runs, the turn ends
+/// mid-thought, and it reads as the model being stupid rather than as a call dropped in transit.
+/// </summary>
+public sealed class ToolCallMarkupTests
+{
+    [Theory]
+    [InlineData("<｜｜DSML｜｜tool_calls>")]
+    [InlineData("<|tool_call|>")]
+    [InlineData("<invoke name=\"debug_state\">")]
+    [InlineData("<function_call>")]
+    [InlineData("</parameter>")]
+    public void EachProvidersShapeIsRecognised(string markup)
+        => Assert.True(ToolCallMarkup.Present($"I will check that.\n\n{markup}"), markup);
+
+    [Theory]
+    [InlineData("sub_140001000 copies a GString and returns it.")]
+    [InlineData("The comparison is a < b, and the flag at bit 6 is ZF.")]
+    [InlineData("It calls operator new<T> and then frees it.")]
+    public void OrdinaryProseAboutABinaryIsNot(string text)
+        => Assert.False(ToolCallMarkup.Present(text), text);
+
+    [Fact]
+    public void TheToolItMeantToCallIsReadBackSoTheNoteCanSayWhich()
+    {
+        Assert.Equal("debug_state", ToolCallMarkup.NameIn(
+            "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"debug_state\">\n</｜｜DSML｜｜tool_calls>"));
+
+        Assert.Equal("find_strings", ToolCallMarkup.NameIn("<invoke name='find_strings'>"));
+        Assert.Null(ToolCallMarkup.NameIn("nothing here at all"));
+    }
+
+    [Fact]
+    public void TheProseBeforeTheMarkupIsKeptAndTheMarkupIsNot()
+    {
+        Assert.Equal(
+            "I want to verify the GString candidate.",
+            ToolCallMarkup.Without("I want to verify the GString candidate.\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_function\">"));
+
+        Assert.Equal(string.Empty, ToolCallMarkup.Without("<invoke name=\"xrefs\"></invoke>"));
+    }
+}

@@ -37,6 +37,7 @@ public partial class MainWindow : FluentWindow
         // Not CollectionChanged: an answer streams into a line that is already in the list, so the
         // transcript grows without the collection changing at all.
         _viewModel.Assistant.Advancing += (_, _) => RedrawStreamingLine();
+        _viewModel.Assistant.Discarding += (_, _) => DiscardStreamingLine();
         _viewModel.Assistant.TurnFinished += (_, _) => FinishStreamingLine();
 
         // A restored conversation is loaded while the Output tab is the one showing, so the
@@ -248,6 +249,16 @@ public partial class MainWindow : FluentWindow
         RemoveLastBlocks(_streamingBlocks);
         _streamingBlocks = Add(MarkdownFlow.Plain(line.Text), line);
         ScrollAssistantToEnd();
+    }
+
+    /// <summary>
+    /// The line being written turned out to be a tool call the model wrote instead of made, so it
+    /// comes off the screen before the retry is drawn underneath.
+    /// </summary>
+    private void DiscardStreamingLine()
+    {
+        RemoveLastBlocks(_streamingBlocks);
+        _streamingBlocks = 0;
     }
 
     /// <summary>The turn ended: draw the answer properly, now that all of it is known.</summary>
