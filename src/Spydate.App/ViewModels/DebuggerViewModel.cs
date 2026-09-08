@@ -132,6 +132,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         WorkingDirectory = string.Empty;
     }
 
+    /// <summary>
+    /// Opens the run configuration. Modal, and owned by the window, so it cannot be lost behind it.
+    /// </summary>
+    [RelayCommand]
+    private void ConfigureRun()
+    {
+        var window = new Views.RunConfigWindow(this) { Owner = Application.Current?.MainWindow };
+        window.ShowDialog();
+    }
+
     /// <summary>Registers as of the last stop. Empty while it is running, because they would be a guess.</summary>
     public ObservableCollection<RegisterRow> Registers { get; } = new();
 

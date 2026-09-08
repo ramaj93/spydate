@@ -932,6 +932,68 @@
         </Setter>
     </Style>
 
+    <!-- A toolbar action drawn as an icon. Square, so a row of them reads as a row rather than as
+         words of different lengths, and dimmed when it cannot be used: a debugger's toolbar spends
+         most of its life with half its buttons inapplicable, and greyed-out is the answer to "why
+         did nothing happen". -->
+    <Style x:Key="IconButton" TargetType="{x:Type Button}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{DynamicResource Text.Secondary}" />
+        <Setter Property="Width" Value="26" />
+        <Setter Property="Height" Value="22" />
+        <Setter Property="Margin" Value="1,0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type Button}">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="3"
+                            SnapsToDevicePixels="True">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Control.Hover.Background}" />
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Bd" Property="Opacity" Value="0.35" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- A tab that lives on a toolbar rather than in a TabControl, so the actions and the choice of
+         pane share one row and the panes below get the whole of the height. RadioButtons because
+         that is what a set of mutually exclusive choices is; the tab appearance is only a template. -->
+    <Style x:Key="StripTab" TargetType="{x:Type RadioButton}">
+        <Setter Property="Foreground" Value="{DynamicResource Text.Secondary}" />
+        <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
+        <Setter Property="FontSize" Value="{DynamicResource App.FontSize}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type RadioButton}">
+                    <Border x:Name="Bd" Background="Transparent" Padding="9,3" Margin="1,0"
+                            BorderBrush="Transparent" BorderThickness="0,0,0,2"
+                            SnapsToDevicePixels="True">
+                        <ContentPresenter VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Side tabs, for a pane that has more in it than fits side by side. TabStripPlacement is not
          used: the theme this sits on ignores it and lays the strip out along the top regardless, so
          the arrangement is written down here rather than asked for. -->

@@ -1,0 +1,60 @@
+<Window x:Class="Spydate.App.Views.RunConfigWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Run configuration"
+        Width="560" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" ShowInTaskbar="False"
+        Background="{DynamicResource Panel.Background}"
+        Foreground="{DynamicResource Text.Primary}">
+
+    <!-- What to run and how, which is set once per binary and then never touched again. It sat
+         across the top of the debug panel taking a row from the things that change every time
+         execution stops. -->
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Grid.Row="0" Grid.Column="0" Text="Host" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <TextBox Grid.Row="0" Grid.Column="1" Margin="0,0,0,8"
+                 Text="{Binding Host, UpdateSourceTrigger=LostFocus}"
+                 Tag="none — the binary starts itself"
+                 AutomationProperties.Name="Host program" />
+        <StackPanel Grid.Row="0" Grid.Column="2" Orientation="Horizontal" Margin="6,0,0,8">
+            <Button Content="…" Width="28" Command="{Binding ChooseHostCommand}"
+                    AutomationProperties.Name="Choose host program" />
+            <Button Content="Clear" Width="52" Margin="4,0,0,0" Command="{Binding ClearHostCommand}"
+                    AutomationProperties.Name="Clear host program" />
+        </StackPanel>
+
+        <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
+                   Foreground="{DynamicResource Text.Tertiary}"
+                   Text="A DLL is not a program and cannot be started on its own. Name whatever loads it, and its breakpoints go in when the module arrives." />
+
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Arguments" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+                 Text="{Binding Arguments, UpdateSourceTrigger=LostFocus}"
+                 AutomationProperties.Name="Arguments" />
+
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="Folder" VerticalAlignment="Center" Margin="0,0,10,14" />
+        <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,14"
+                 Text="{Binding WorkingDirectory, UpdateSourceTrigger=LostFocus}"
+                 Tag="the host's own folder"
+                 AutomationProperties.Name="Working directory" />
+
+        <!-- Close, not OK. Every box here is written straight through to where it is remembered as
+             soon as it loses focus, so there is nothing left to accept. -->
+        <Button Grid.Row="4" Grid.Column="2" Content="Close" Width="80" IsDefault="True" IsCancel="True"
+                HorizontalAlignment="Right" />
+    </Grid>
+</Window>
