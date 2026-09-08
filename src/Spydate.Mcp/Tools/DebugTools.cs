@@ -24,7 +24,17 @@ namespace Spydate.Mcp.Tools;
 public sealed class DebugTools
 {
     private const int MaxRead = 4096;
+
+    /// <summary>How long to let an action land before reporting where it got.</summary>
     private static readonly TimeSpan Settle = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// How long "wait" waits. Longer, because it exists for the case the settle cannot cover: real
+    /// programs take their time reaching the code being watched, and a DLL under a host is not
+    /// loaded until the host gets round to it — which was over a minute in the run this came from.
+    /// Short enough that it returns inside an MCP client's own call timeout, and repeatable.
+    /// </summary>
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
 
     private readonly SessionStore _store;
     private readonly McpOptions _options;
@@ -36,9 +46,9 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_run")]
-    [Description("Start, stop or move a debugged process: start, stop, continue, step, step_over, run_to. Reports where it ended up.")]
+    [Description("Move a debugged process: start, stop, continue, step, step_over, run_to, wait. \"wait\" watches for the next breakpoint without moving it - a DLL is not reached until its host loads it. Reports where it got.")]
     public string Run(
-        [Description("start, stop, continue, step, step_over, or run_to.")] string action,
+        [Description("One of the actions above.")] string action,
         [Description("Address, sub_XXXX or a name. Only for run_to.")] string? target = null)
     {
         if (Refusal() is { } refused)
@@ -62,7 +72,8 @@ public sealed class DebugTools
                     "exited" => $"it has exited — {now.Status} Nothing is left to continue; "
                                 + "use start to run it again." + Recent(now),
                     "running" => "it is running and has not stopped. Continuing does nothing from here — "
-                                 + "either wait, or set a breakpoint somewhere it will reach." + Recent(now),
+                                 + "use wait to be there when it does stop, or set a breakpoint somewhere "
+                                 + "it will reach." + Recent(now),
                     _ => "nothing is running. Use start." + Recent(now),
                 };
             }
@@ -103,15 +114,21 @@ public sealed class DebugTools
                 debug.RunTo(to);
                 break;
 
+            case "wait":
+                // Asks the process for nothing at all. It is the only way to be present when a
+                // breakpoint is finally reached, rather than having been told ten seconds earlier
+                // that it had not been reached yet.
+                break;
+
             default:
-                return $"no such action \"{action}\". Use start, stop, continue, step, step_over or run_to.";
+                return $"no such action \"{action}\". Use start, stop, continue, step, step_over, run_to or wait.";
         }
 
         // Waited for rather than reported straight away: the debug loop is on its own thread and the
         // process runs until it hits something, so returning now would describe the state before the
         // thing that was asked for had happened.
-        bool settled = debug.WaitUntilStopped(Settle);
-        if (settled)
+        var patience = what == "wait" ? Patience : Settle;
+        if (debug.WaitUntilStopped(patience))
         {
             return Describe(debug.Snapshot());
         }
@@ -120,8 +137,9 @@ public sealed class DebugTools
         // to say only "still running", which told an agent nothing except to ask again, while the
         // log in front of the analyst was saying the module had loaded and the process had gone.
         var timedOut = debug.Snapshot();
-        return $"still running after {Settle.TotalSeconds:0}s and it has not stopped. Continuing again "
-               + "will not change that: set a breakpoint somewhere it will reach, or use stop."
+        return $"still running after {patience.TotalSeconds:0}s and it has not stopped. It may stop "
+               + "later — a breakpoint in a DLL cannot be reached until its host loads the module. "
+               + "Use wait to keep waiting, or set a breakpoint somewhere it will reach, or stop."
                + Recent(timedOut);
     }
 
@@ -132,7 +150,7 @@ public sealed class DebugTools
             : "\n\nwhat it has done:\n" + string.Join("\n", snapshot.Recent.Select(line => $"  {line}"));
 
     [McpServerTool(Name = "debug_break")]
-    [Description("Set or clear a breakpoint at a listing address. Works before anything runs, and on a DLL before its host loads it - it goes in when the module arrives.")]
+    [Description("Set or clear a breakpoint at a listing address. Works before anything runs, and on a DLL before its host loads it.")]
     public string Break(
         [Description("Address, sub_XXXX, or an existing name.")] string target,
         [Description("True to set it, false to clear it.")] bool on = true)
@@ -152,7 +170,7 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_state")]
-    [Description("Where a debugged process is: state, where it stopped, registers, flags, stack, loaded modules and breakpoints.")]
+    [Description("Where a debugged process is: state, where it stopped, registers, flags, stack, modules, breakpoints, and what it has done lately.")]
     public string State()
         => Refusal() ?? Describe(_store.Debug!.Snapshot());
 

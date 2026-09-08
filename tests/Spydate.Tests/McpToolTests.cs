@@ -474,9 +474,56 @@ public sealed class DebugToolTests
         Assert.Contains("breakpoint at 0x1800040C0", state, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A breakpoint reached after the settle window has closed. The DLL under a host in the run this
+    /// came from loaded over a minute in, so the hit lands long after "continue" has answered — and
+    /// there was no action that meant "be there when it does".
+    /// </summary>
+    [Fact]
+    public void WaitingIsHowABreakpointHitLaterIsSeenAtAll()
+    {
+        using var store = Open();
+        var stub = new StubDebug
+        {
+            State = "stopped",
+            Status = "Stopped at 0x1800040C0.",
+            Recent = ["10:38:11  dcsxpdf.dll loaded at 0x7FFA21F70000; 1 breakpoint armed", "10:38:12  breakpoint at 0x1800040C0"],
+        };
+
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Run("wait");
+
+        // Waiting asks the process for nothing; it only reports what it found.
+        Assert.Empty(stub.Done);
+        Assert.Contains("breakpoint at 0x1800040C0", answer, StringComparison.Ordinal);
+        Assert.Contains("stopped", answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryDeadEndPointsAtWaitRatherThanAtTryingTheSameThing()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+
+        // Running and refusing to continue.
+        store.Debug = new StubDebug { State = "running", Status = "Running." };
+        Assert.Contains("wait", tools.Run("continue"), StringComparison.Ordinal);
+
+        // And the timeout, which is the reply an agent gets most often on a real program.
+        store.Debug = new StubDebug { State = "running", Status = "Running.", Settles = false };
+        string timedOut = tools.Run("wait");
+        Assert.Contains("Use wait to keep waiting", timedOut, StringComparison.Ordinal);
+        Assert.Contains("host loads the module", timedOut, StringComparison.Ordinal);
+    }
+
     private sealed class StubDebug : IDebugControl
     {
         public List<string> Done { get; } = [];
+
+        /// <summary>False to stand in for a process that has not stopped inside the window.</summary>
+        public bool Settles { get; init; } = true;
 
         public string State { get; init; } = "stopped";
 
@@ -523,6 +570,6 @@ public sealed class DebugToolTests
         public byte[] ReadMemory(ulong staticVa, int length)
             => "MZ\0\0PE\0\0"u8.ToArray().AsSpan(0, Math.Min(length, 8)).ToArray();
 
-        public bool WaitUntilStopped(TimeSpan timeout) => true;
+        public bool WaitUntilStopped(TimeSpan timeout) => Settles;
     }
 }
