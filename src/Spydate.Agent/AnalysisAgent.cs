@@ -166,13 +166,28 @@ public sealed class AnalysisAgent : IDisposable
 
             // The bad turn is not kept. Leaving it in would teach the next turn that writing the
             // template out is how tools are called here, which is the failure, not a record of it.
-            response = await Retry(store, cancellationToken).ConfigureAwait(false);
+            //
+            // Nothing is said to the model on this attempt, on purpose: the usual cause is the
+            // streaming parser rather than anything the model did, and telling it off for a mistake
+            // that was not its own is its own kind of confusion.
+            response = await Retry(store, correction: null, cancellationToken).ConfigureAwait(false);
+
+            if (ToolCallMarkup.Present(response.Text))
+            {
+                // Twice, un-streamed, means the model really is writing the template as prose. Now
+                // it is worth saying so — it is the only remaining thing that can change the answer.
+                progress?.Report(AgentStep.Note(
+                    "— again with the whole answer in one piece, so it is the model and not the stream; "
+                    + "telling it plainly and asking once more —"));
+
+                response = await Retry(store, Correction, cancellationToken).ConfigureAwait(false);
+            }
 
             if (ToolCallMarkup.Present(response.Text))
             {
                 progress?.Report(AgentStep.Note(
-                    "— it did it again without streaming, so this is the model rather than the stream. "
-                    + "Turn off \"Show the answer as it is written\" in Configure, or use another model. —"));
+                    "— it went on writing the call out instead of making it. Turn off \"Show the answer "
+                    + "as it is written\" in Configure, or try another model. —"));
             }
         }
 
@@ -193,6 +208,22 @@ public sealed class AnalysisAgent : IDisposable
     }
 
     /// <summary>
+    /// What to say when the model has twice written a call instead of making one.
+    ///
+    /// The last sentence is the part that earns its place: if it genuinely cannot make the call, the
+    /// useful outcome is being told in words what it wanted to run, which a person can then do. An
+    /// answer that says "I would have read sub_401000" is worth something; a second template is not.
+    /// </summary>
+    private const string Correction = """
+        Your last reply contained a tool-call template written out as text, so nothing ran. Tools here
+        are called through the API's own function-calling mechanism - you do not write the template
+        yourself, you ask for the call and it is made for you.
+
+        Answer again. Either make the call properly, or, if you cannot, say in plain words which tool
+        you wanted and with what arguments, and why.
+        """;
+
+    /// <summary>
     /// The same turn again, in one piece.
     ///
     /// Un-streamed on purpose: a provider that parses its own tool calls correctly when it answers
@@ -200,7 +231,7 @@ public sealed class AnalysisAgent : IDisposable
     /// The history is untouched — the question is still the last thing in it, and the answer that
     /// failed was never added — so this asks exactly what was asked the first time.
     /// </summary>
-    private async Task<ChatResponse> Retry(AnnotationStore? store, CancellationToken cancellationToken)
+    private async Task<ChatResponse> Retry(AnnotationStore? store, string? correction, CancellationToken cancellationToken)
     {
         var wasSource = store?.Source ?? AnnotationSource.User;
         if (store is not null)
@@ -208,9 +239,16 @@ public sealed class AnalysisAgent : IDisposable
             store.Source = AnnotationSource.Agent;
         }
 
+        // Appended to what is sent, not to what is kept. A correction is about one failed attempt,
+        // and a conversation carrying "you got that wrong" for the rest of the session would go on
+        // shaping answers long after the thing it was about.
+        var messages = correction is null
+            ? _history
+            : _history.Append(new ChatMessage(ChatRole.User, correction)).ToList();
+
         try
         {
-            return await _client.GetResponseAsync(_history, _options, cancellationToken).ConfigureAwait(false);
+            return await _client.GetResponseAsync(messages, _options, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
