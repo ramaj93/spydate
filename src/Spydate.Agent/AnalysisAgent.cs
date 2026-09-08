@@ -126,6 +126,12 @@ public sealed class AnalysisAgent : IDisposable
         // after the silence rather than during it — which is the same as not reporting them.
         ChatResponse response;
         var said = new StringBuilder();
+
+        // Whether tool calls were reported as they were made. A retry is never streamed, so after
+        // one they were not - and the block below is what puts them on screen instead. Keyed to what
+        // actually happened rather than to the setting, which is how a recovered turn came to run
+        // twenty tool calls and show none of them.
+        bool live = _stream;
         try
         {
             response = _stream
@@ -162,7 +168,8 @@ public sealed class AnalysisAgent : IDisposable
             progress?.Report(AgentStep.Discard());
             progress?.Report(AgentStep.Note(
                 $"— it wrote {(wanted is null ? "a tool call" : wanted)} out as text instead of calling it, "
-                + "which runs nothing; asking again without streaming —"));
+                + "which runs nothing; asking again in one piece. Nothing shows until it finishes, "
+                + "which can be a while if it reads several functions. —"));
 
             // The bad turn is not kept. Leaving it in would teach the next turn that writing the
             // template out is how tools are called here, which is the failure, not a record of it.
@@ -171,6 +178,7 @@ public sealed class AnalysisAgent : IDisposable
             // streaming parser rather than anything the model did, and telling it off for a mistake
             // that was not its own is its own kind of confusion.
             response = await Retry(store, correction: null, cancellationToken).ConfigureAwait(false);
+            live = false;
 
             if (ToolCallMarkup.Present(response.Text))
             {
@@ -193,7 +201,7 @@ public sealed class AnalysisAgent : IDisposable
 
         _history.AddRange(response.Messages);
 
-        if (!_stream)
+        if (!live)
         {
             // Nothing could be reported while it ran, so at least say what it did before answering.
             foreach (var call in response.Messages.SelectMany(m => m.Contents).OfType<FunctionCallContent>())

@@ -477,7 +477,22 @@ public sealed class DebugSession : IDisposable
     }
 
     private void Report(string kind, string text, ulong? address = null)
-        => Reported?.Invoke(this, new DebugEvent(kind, text) { Address = address });
+    {
+        // Stopped is true before anybody is told, not after.
+        //
+        // Whoever hears this acts on it immediately — the assistant hears "stopped" and asks to
+        // continue within microseconds — and Post refuses work unless the state already says
+        // stopped. Telling first and setting after left a window in which that command was dropped
+        // on the floor: the loop then waited for a command that would never arrive, the process
+        // never resumed, and the panel showed a session where only Stop could be pressed. A person
+        // clicking a button rarely lost that race. Something reacting in code lost it nearly always.
+        if (kind == "stopped")
+        {
+            State = DebugState.Stopped;
+        }
+
+        Reported?.Invoke(this, new DebugEvent(kind, text) { Address = address });
+    }
 
     private void Loop(string path, string? arguments, string? workingDirectory, TaskCompletionSource<Exception?> ready)
     {
@@ -711,12 +726,28 @@ public sealed class DebugSession : IDisposable
                 return (true, Native.DBG_CONTINUE);
 
             default:
-                // Anything else belongs to the program. It is offered its own handlers first, and
-                // only reported here so the analyst can see it happening.
-                Report("exception", $"0x{e.ExceptionCode:X8} at 0x{ToStatic(e.ExceptionAddress):X}"
-                                    + (e.FirstChance ? " (first chance)" : " (unhandled)"),
-                    ToStatic(e.ExceptionAddress));
-                return (!e.FirstChance, Native.DBG_EXCEPTION_NOT_HANDLED);
+                // Anything else belongs to the program. It is offered its own handlers first, so a
+                // first chance is only news; an unhandled one is where the program dies, and the
+                // loop stops there so it can be looked at.
+                //
+                // That stop is reported as a stop. It used to be reported as "exception" whether or
+                // not it ended the program, and nothing listening treated that as having stopped —
+                // so on a crash the loop sat waiting while the panel went on saying "running", with
+                // Continue greyed out and no way to do anything but stop. An access violation is
+                // the single most interesting place a debugger ever pauses, and it was the one
+                // place the panel could not tell you it had.
+                bool fatal = !e.FirstChance;
+                if (fatal)
+                {
+                    CurrentAddress = e.ExceptionAddress;
+                }
+
+                Report(fatal ? "stopped" : "exception",
+                    $"0x{e.ExceptionCode:X8} at 0x{ToStatic(e.ExceptionAddress):X}"
+                    + (fatal ? " (unhandled — the program would die here)" : " (first chance)"),
+                    Reportable(e.ExceptionAddress));
+
+                return (fatal, Native.DBG_EXCEPTION_NOT_HANDLED);
         }
     }
 

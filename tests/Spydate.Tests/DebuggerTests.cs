@@ -433,5 +433,50 @@ public sealed class DebuggerTests
 
         return false;
     }
+    /// <summary>
+    /// Continuing the instant the stop is announced, which is what anything reacting in code does.
+    /// The state has to already say stopped by then, or Post drops the command and the loop waits
+    /// for one that never comes - a session where nothing works but Stop.
+    /// </summary>
+    [Fact]
+    public void ContinuingTheMomentAStopIsAnnouncedIsNotDropped()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        var exited = new ManualResetEventSlim();
+        int stops = 0;
+
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "exited")
+            {
+                exited.Set();
+                return;
+            }
+
+            if (e.Kind != "stopped")
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref stops);
+
+            // From inside the report, with no pause at all. This is the race: the engine has told
+            // the world it stopped, and the world is answering before the line after the telling.
+            Assert.Equal(DebugState.Stopped, session.State);
+            session.Continue();
+        };
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(25)),
+            "it never exited, so a continue sent the instant the stop was announced was dropped");
+        Assert.True(stops > 0, "it never stopped at all");
+    }
+
 }
 
