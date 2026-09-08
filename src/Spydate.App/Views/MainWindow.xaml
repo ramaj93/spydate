@@ -456,109 +456,117 @@
                                         </Grid>
                                     </Border>
 
+                                    <!-- Registers stay; everything else is one pane behind side
+                                         tabs. Four grids and a log at once was more than the strip
+                                         at the bottom of a window can hold: each got a third of the
+                                         width it needed, and the one being read was never the one
+                                         with room. Registers are the exception because at a stop
+                                         they are what the question is nearly always about. -->
                                     <Grid Grid.Row="2">
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="230" />
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="270" />
-                                            <ColumnDefinition Width="Auto" />
-                                            <ColumnDefinition Width="270" />
+                                            <ColumnDefinition Width="240" />
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
+
                                         <DataGrid Grid.Column="0" ItemsSource="{Binding Registers}" AutoGenerateColumns="False"
                                                   IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
                                                   AutomationProperties.Name="Registers">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="reg" Binding="{Binding Name}" />
                                                 <DataGridTextColumn Header="value" Binding="{Binding Value}"
-
                                                                     FontFamily="{DynamicResource Mono.FontFamily}">
-
                                                     <DataGridTextColumn.CellStyle>
-
                                                         <Style TargetType="DataGridCell">
-
                                                             <Style.Triggers>
-
                                                                 <DataTrigger Binding="{Binding Changed}" Value="True">
-
                                                                     <Setter Property="Foreground" Value="{DynamicResource Debug.Breakpoint}" />
-
                                                                 </DataTrigger>
-
                                                             </Style.Triggers>
-
                                                         </Style>
-
                                                     </DataGridTextColumn.CellStyle>
-
                                                 </DataGridTextColumn>
                                             </DataGrid.Columns>
                                         </DataGrid>
+
                                         <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
-
                                                       Background="{DynamicResource Chrome.Border}" />
 
-                                        <DataGrid Grid.Column="2" ItemsSource="{Binding Stack}" AutoGenerateColumns="False"
+                                        <TabControl Grid.Column="2" Style="{StaticResource SideTabControl}"
+                                                    AutomationProperties.Name="Debug panes">
+                                            <TabItem Header="Stack">
+                                                <DataGrid ItemsSource="{Binding Stack}" AutoGenerateColumns="False"
+                                                          IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                          FontFamily="{DynamicResource Mono.FontFamily}"
+                                                          AutomationProperties.Name="Stack">
+                                                    <DataGrid.Columns>
+                                                        <DataGridTextColumn Header="stack" Binding="{Binding Address}" />
+                                                        <DataGridTextColumn Header="value" Binding="{Binding Value}" />
+                                                    </DataGrid.Columns>
+                                                </DataGrid>
+                                            </TabItem>
 
-                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                            <!-- Which thread stopped is the answer to "why did it not
+                                                 stop where I expected": in a program with several,
+                                                 another one usually got there first. -->
+                                            <TabItem Header="Threads">
+                                                <DataGrid ItemsSource="{Binding Threads}" AutoGenerateColumns="False"
+                                                          IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                          AutomationProperties.Name="Threads">
+                                                    <DataGrid.Columns>
+                                                        <DataGridTextColumn Header="tid" Binding="{Binding Id}">
+                                                            <DataGridTextColumn.CellStyle>
+                                                                <Style TargetType="DataGridCell">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                                                            <Setter Property="Foreground" Value="{DynamicResource Debug.Current}" />
+                                                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </DataGridTextColumn.CellStyle>
+                                                        </DataGridTextColumn>
+                                                        <DataGridTextColumn Header="started at" Binding="{Binding Start}"
+                                                                            FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                    </DataGrid.Columns>
+                                                </DataGrid>
+                                            </TabItem>
 
-                                                  FontFamily="{DynamicResource Mono.FontFamily}"
-
-                                                  AutomationProperties.Name="Stack">
-
-                                            <DataGrid.Columns>
-
-                                                <DataGridTextColumn Header="stack" Binding="{Binding Address}" />
-
-                                                <DataGridTextColumn Header="value" Binding="{Binding Value}" />
-
-                                            </DataGrid.Columns>
-
-                                        </DataGrid>
-
-                                        <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch"
-
-                                                      Background="{DynamicResource Chrome.Border}" />
-
-                                        <!-- Under a host this answers the question the arrangement
-                                             turns on: has the DLL been loaded yet. Until it has, its
-                                             addresses mean nothing and its breakpoints are waiting
-                                             rather than armed, which otherwise looks like nothing
-                                             happening. The target module is first and highlighted. -->
-                                        <DataGrid Grid.Column="4" ItemsSource="{Binding Modules}" AutoGenerateColumns="False"
-                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
-                                                  AutomationProperties.Name="Loaded modules">
-                                            <DataGrid.Columns>
-                                                <DataGridTextColumn Header="module" Binding="{Binding Name}">
-                                                    <DataGridTextColumn.CellStyle>
-                                                        <Style TargetType="DataGridCell">
-                                                            <Style.Triggers>
-                                                                <DataTrigger Binding="{Binding IsTarget}" Value="True">
-                                                                    <Setter Property="Foreground" Value="{DynamicResource Debug.Current}" />
-                                                                    <Setter Property="FontWeight" Value="SemiBold" />
-                                                                </DataTrigger>
-                                                            </Style.Triggers>
+                                            <TabItem Header="Modules">
+                                                <DataGrid ItemsSource="{Binding Modules}" AutoGenerateColumns="False"
+                                                          IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                          AutomationProperties.Name="Loaded modules">
+                                                    <DataGrid.Columns>
+                                                        <DataGridTextColumn Header="module" Binding="{Binding Name}">
+                                                            <DataGridTextColumn.CellStyle>
+                                                                <Style TargetType="DataGridCell">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsTarget}" Value="True">
+                                                                            <Setter Property="Foreground" Value="{DynamicResource Debug.Current}" />
+                                                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </DataGridTextColumn.CellStyle>
+                                                        </DataGridTextColumn>
+                                                        <DataGridTextColumn Header="base" Binding="{Binding Base}"
+                                                                            FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                    </DataGrid.Columns>
+                                                    <DataGrid.RowStyle>
+                                                        <Style TargetType="DataGridRow">
+                                                            <Setter Property="ToolTip" Value="{Binding Path}" />
                                                         </Style>
-                                                    </DataGridTextColumn.CellStyle>
-                                                </DataGridTextColumn>
-                                                <DataGridTextColumn Header="base" Binding="{Binding Base}"
-                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
-                                            </DataGrid.Columns>
-                                            <DataGrid.RowStyle>
-                                                <Style TargetType="DataGridRow">
-                                                    <Setter Property="ToolTip" Value="{Binding Path}" />
-                                                </Style>
-                                            </DataGrid.RowStyle>
-                                        </DataGrid>
+                                                    </DataGrid.RowStyle>
+                                                </DataGrid>
+                                            </TabItem>
 
-                                        <GridSplitter Grid.Column="5" Width="4" HorizontalAlignment="Stretch"
-                                                      Background="{DynamicResource Chrome.Border}" />
-                                        <ListBox Grid.Column="6" ItemsSource="{Binding Log}"
-                                                 FontFamily="{DynamicResource Mono.FontFamily}"
-                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                                 AutomationProperties.Name="Debug log" />
+                                            <TabItem Header="Log">
+                                                <ListBox ItemsSource="{Binding Log}"
+                                                         FontFamily="{DynamicResource Mono.FontFamily}"
+                                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                                         AutomationProperties.Name="Debug log" />
+                                            </TabItem>
+                                        </TabControl>
                                     </Grid>
                                 </Grid>
                             </TabItem>

@@ -40,6 +40,15 @@ public sealed record LoadedModule(string Path, ulong Base)
 }
 
 /// <summary>
+/// A thread in the debuggee.
+///
+/// <paramref name="StartAddress"/> is what it was made to go and do, which before it has run
+/// anywhere is the only thing telling one thread from another — a list of bare ids says nothing
+/// about which is the worker and which is the one waiting on a socket.
+/// </summary>
+public sealed record DebugThread(uint Id, ulong StartAddress);
+
+/// <summary>
 /// A process running under a debug loop.
 ///
 /// Everything that touches the debuggee happens on one thread. That is not tidiness: Windows ties a
@@ -56,6 +65,7 @@ public sealed class DebugSession : IDisposable
     private readonly SemaphoreSlim _resume = new(0, 1);
     private readonly Dictionary<ulong, Breakpoint> _breakpoints = new();
     private readonly Dictionary<ulong, LoadedModule> _modules = new();
+    private readonly Dictionary<uint, DebugThread> _threads = new();
     private readonly CancellationTokenSource _stopping = new();
 
     /// <summary>
@@ -93,6 +103,25 @@ public sealed class DebugSession : IDisposable
 
     /// <summary>What the file says its base is, taken from the caller so this need not parse the PE.</summary>
     public ulong ImageBase { get; private set; }
+
+    /// <summary>
+    /// Every thread alive right now. The one that stopped is <see cref="CurrentThreadId"/>: Windows
+    /// reports a debug event against whichever thread caused it, and that is the thread whose
+    /// registers are read and the thread a step actually steps.
+    /// </summary>
+    public IReadOnlyList<DebugThread> Threads
+    {
+        get
+        {
+            lock (_threads)
+            {
+                return _threads.Values.OrderBy(t => t.Id).ToList();
+            }
+        }
+    }
+
+    /// <summary>Which thread the last event came from, and so which one everything else is about.</summary>
+    public uint CurrentThreadId => _threadId;
 
     /// <summary>Every module loaded right now, in load order.</summary>
     public IReadOnlyList<LoadedModule> Modules
@@ -384,38 +413,8 @@ public sealed class DebugSession : IDisposable
         }
     }
 
-    /// <summary>The registers as they stand. Null unless it is stopped, because otherwise they are a guess.</summary>
-    public IReadOnlyList<(string Name, ulong Value)>? Registers()
-    {
-        if (State != DebugState.Stopped)
-        {
-            return null;
-        }
-
-        using var context = new ThreadContext();
-        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
-        if (thread == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        try
-        {
-            if (!context.Read(thread))
-            {
-                return null;
-            }
-
-            var all = context.General().ToList();
-            all.Add(("rip", context.Rip));
-            all.Add(("rflags", context.EFlags));
-            return all;
-        }
-        finally
-        {
-            Native.CloseHandle(thread);
-        }
-    }
+    /// <summary>The registers as they stand, for the thread that stopped. Null unless it is stopped.</summary>
+    public IReadOnlyList<(string Name, ulong Value)>? Registers() => RegistersOf(_threadId);
 
     /// <summary>
     /// The top of the stack, as address and value pairs. At a breakpoint this is usually the first
@@ -566,7 +565,20 @@ public sealed class DebugSession : IDisposable
             switch (e.dwDebugEventCode)
             {
                 case Native.CREATE_PROCESS_DEBUG_EVENT:
+                    Remember(e.dwThreadId, e.CreateProcessStartAddress);
                     OnModuleLoaded(e.CreateProcessFile, e.CreateProcessImageBase, main: true);
+                    break;
+
+                case Native.CREATE_THREAD_DEBUG_EVENT:
+                    Remember(e.dwThreadId, e.CreateThreadStartAddress);
+                    break;
+
+                case Native.EXIT_THREAD_DEBUG_EVENT:
+                    lock (_threads)
+                    {
+                        _threads.Remove(e.dwThreadId);
+                    }
+
                     break;
 
                 case Native.LOAD_DLL_DEBUG_EVENT:
@@ -614,6 +626,57 @@ public sealed class DebugSession : IDisposable
             }
 
             Native.ContinueDebugEvent(e.dwProcessId, e.dwThreadId, status);
+        }
+    }
+
+    /// <summary>
+    /// Notes a thread. Quiet: a program can make hundreds, and a line each would drown the log that
+    /// the module loads and breakpoints have to be found in. The list is where they are read.
+    /// </summary>
+    private void Remember(uint id, ulong startAddress)
+    {
+        lock (_threads)
+        {
+            _threads[id] = new DebugThread(id, startAddress);
+        }
+    }
+
+    /// <summary>
+    /// The registers of one particular thread, or null.
+    ///
+    /// Every thread is suspended while a debug event is being handled, so any of them can be read at
+    /// a stop — not only the one that stopped. That is the whole point of having the list: a
+    /// breakpoint hit in a worker says nothing about what the other threads were in the middle of.
+    /// </summary>
+    public IReadOnlyList<(string Name, ulong Value)>? RegistersOf(uint threadId)
+    {
+        if (State != DebugState.Stopped)
+        {
+            return null;
+        }
+
+        using var context = new ThreadContext();
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!context.Read(thread))
+            {
+                return null;
+            }
+
+            var all = context.General().ToList();
+            all.Add(("rip", context.Rip));
+            all.Add(("rflags", context.EFlags));
+            return all;
+        }
+        finally
+        {
+            Native.CloseHandle(thread);
         }
     }
 

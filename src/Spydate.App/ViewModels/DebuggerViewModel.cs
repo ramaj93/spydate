@@ -24,6 +24,12 @@ public sealed record StackRow(string Address, string Value);
 public sealed record ModuleRow(string Name, string Base, string Path, bool IsTarget);
 
 /// <summary>
+/// One thread. <paramref name="IsCurrent"/> is the one that stopped — whose registers are on screen,
+/// and the one a step will actually step.
+/// </summary>
+public sealed record ThreadRow(uint Id, string Start, bool IsCurrent);
+
+/// <summary>
 /// The debugger panel: starting the open binary, stopping it, and reading it while it is stopped.
 ///
 /// It holds a <see cref="DebugSession"/> rather than being one. The session reports from its own
@@ -66,6 +72,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Arguments = target?.Arguments ?? string.Empty;
         WorkingDirectory = target?.WorkingDirectory ?? string.Empty;
         Modules.Clear();
+        Threads.Clear();
         OnPropertyChanged(nameof(NeedsHost));
     }
 
@@ -133,6 +140,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>Everything the process has loaded, so it is visible whether the target is among it.</summary>
     public ObservableCollection<ModuleRow> Modules { get; } = new();
+
+    /// <summary>
+    /// Every thread alive, with the one that stopped marked.
+    ///
+    /// Worth having even though a step still follows whichever thread reported the event: in a
+    /// program with several, a breakpoint hit in one says nothing about where the others are, and
+    /// "why did it not stop where I expected" is very often another thread having got there first.
+    /// </summary>
+    public ObservableCollection<ThreadRow> Threads { get; } = new();
 
     /// <summary>
     /// The program to start, when the binary cannot start itself. Empty for an EXE, which is its own
@@ -454,6 +470,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                 case "started":
                 case "module":
                     RefreshModules();
+                    RefreshThreads();
                     break;
 
                 case "stopped":
@@ -461,6 +478,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     ExecutionAddress = e.Address;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";
                     RefreshModules();
+                    RefreshThreads();
                     RefreshRegisters();
                     if (e.Address is { } address)
                     {
@@ -484,6 +502,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     Registers.Clear();
                     Stack.Clear();
                     Modules.Clear();
+        Threads.Clear();
                     Flags = string.Empty;
                     break;
             }
@@ -499,12 +518,24 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// has the DLL been loaded yet. Until it has, its addresses mean nothing and its breakpoints are
     /// waiting rather than armed, and there is otherwise no way to tell that from nothing happening.
     /// </summary>
+    private void RefreshThreads()
+    {
+        uint current = _session?.CurrentThreadId ?? 0;
+
+        Threads.Clear();
+        foreach (var thread in _session?.Threads ?? [])
+        {
+            Threads.Add(new ThreadRow(thread.Id, $"0x{thread.StartAddress:X16}", thread.Id == current));
+        }
+    }
+
     private void RefreshModules()
     {
         var loaded = _session?.Modules ?? [];
         ulong target = _session?.LoadedBase ?? 0;
 
         Modules.Clear();
+        Threads.Clear();
         foreach (var module in loaded.OrderByDescending(m => m.Base == target && target != 0).ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
         {
             Modules.Add(new ModuleRow(
@@ -578,6 +609,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Registers.Clear();
         Stack.Clear();
         Modules.Clear();
+        Threads.Clear();
         Flags = string.Empty;
         NotifyCommands();
     }

@@ -130,6 +130,22 @@ internal static partial class Native
             get { fixed (byte* p = Payload) { return *(ulong*)p; } }
         }
 
+        /// <summary>
+        /// CREATE_THREAD_DEBUG_INFO.lpStartAddress — after hThread and lpThreadLocalBase. What the
+        /// thread was made to go and do, which is the only thing that tells one apart from another
+        /// before it has run anywhere.
+        /// </summary>
+        public ulong CreateThreadStartAddress
+        {
+            get { fixed (byte* p = Payload) { return *(ulong*)(p + 16); } }
+        }
+
+        /// <summary>CREATE_PROCESS_DEBUG_INFO.lpStartAddress, for the thread the process starts on.</summary>
+        public ulong CreateProcessStartAddress
+        {
+            get { fixed (byte* p = Payload) { return *(ulong*)(p + 48); } }
+        }
+
         /// <summary>EXIT_PROCESS_DEBUG_INFO.dwExitCode.</summary>
         public uint ExitCode
         {
