@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Microsoft.Extensions.AI;
 using Spydate.Agent;
 using Spydate.Agent.Providers;
+using Spydate.Agent.Text;
 using Spydate.Agent.Secrets;
 using Spydate.Mcp;
 using Spydate.Mcp.Session;
@@ -257,6 +258,82 @@ public class AgentTests
             }
 
             yield return new ChatResponseUpdate(ChatRole.Assistant, "carrying on then");
+            await Task.CompletedTask.ConfigureAwait(false);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /// <summary>
+    /// The turn degenerated into markup, but not before it had really called tools. Those calls
+    /// happened - in a process that is running - so throwing them away made the retry begin the
+    /// work again, which for a debugging session means starting the binary over and losing
+    /// everywhere it had reached.
+    /// </summary>
+    [Fact]
+    public async Task WorkAlreadyDoneSurvivesARecoveredTurn()
+    {
+        var client = new DegradingChatClient();
+        using var agent = new AnalysisAgent(client, new SessionStore(), McpOptions.Default, new ProviderSettings { Model = "test" });
+
+        await agent.AskAsync("what does the entry point do");
+
+        // The call it really made, and what came back, are both still in the conversation.
+        Assert.Contains(agent.History.SelectMany(m => m.Contents).OfType<FunctionCallContent>(), c => c.Name == "read_function");
+        Assert.Contains(agent.History.SelectMany(m => m.Contents).OfType<FunctionResultContent>(), r => r.Result?.ToString() == "the listing");
+
+        // And the template that ran nothing is not, in any message.
+        Assert.DoesNotContain(agent.History.SelectMany(m => m.Contents).OfType<TextContent>(), t => ToolCallMarkup.Present(t.Text));
+
+        // The second request saw the first attempt is work, so it asks it to carry on rather than
+        // handing it the bare question again.
+        Assert.True(client.SecondRequestSawTheToolResult, "the retry did not carry the work forward");
+    }
+
+    /// <summary>Streams a real tool call, then a leaked template; answers plainly the second time.</summary>
+    private sealed class DegradingChatClient : IChatClient
+    {
+        private int _turn;
+
+        public bool SecondRequestSawTheToolResult { get; private set; }
+
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            SecondRequestSawTheToolResult = messages
+                .SelectMany(m => m.Contents)
+                .OfType<FunctionResultContent>()
+                .Any(r => r.Result?.ToString() == "the listing");
+
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "it sets up the CRT.")));
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            _turn++;
+
+            // A call that really happened, its result, and then the template that did not.
+            yield return new ChatResponseUpdate(ChatRole.Assistant, new List<AIContent>
+            {
+                new FunctionCallContent("call-1", "read_function", new Dictionary<string, object?> { ["target"] = "entry" }),
+            });
+
+            yield return new ChatResponseUpdate(ChatRole.Tool, new List<AIContent>
+            {
+                new FunctionResultContent("call-1", "the listing"),
+            });
+
+            yield return new ChatResponseUpdate(
+                ChatRole.Assistant,
+                "Now I will look at the caller.\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"debug_run\">");
+
             await Task.CompletedTask.ConfigureAwait(false);
         }
 

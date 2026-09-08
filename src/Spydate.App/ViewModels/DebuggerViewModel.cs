@@ -314,7 +314,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        Registers.Clear();
+        Resuming();
         _session?.Continue();
         State = DebugState.Running;
         Status = "Running.";
@@ -329,7 +329,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        Registers.Clear();
+        Resuming();
         _session?.StepInstruction();
         State = DebugState.Running;
         NotifyCommands();
@@ -343,10 +343,25 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        Registers.Clear();
+        Resuming();
         _session?.StepOver();
         State = DebugState.Running;
         NotifyCommands();
+    }
+
+    /// <summary>
+    /// About to run again: forget where it was.
+    ///
+    /// The registers were already cleared — they would be a guess while it runs — but the execution
+    /// address was not, so the marker stayed sitting on the instruction it had stopped at through
+    /// the whole of the next run. Continuing round a loop back to the same breakpoint then looked
+    /// exactly like continuing having done nothing at all.
+    /// </summary>
+    private void Resuming()
+    {
+        Registers.Clear();
+        Stack.Clear();
+        ExecutionAddress = null;
     }
 
     /// <summary>
@@ -364,7 +379,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        Registers.Clear();
+        Resuming();
         _session?.RunTo(staticVa);
         State = DebugState.Running;
         Status = $"Running to 0x{staticVa:X}.";

@@ -162,21 +162,29 @@ public sealed class AnalysisAgent : IDisposable
         // and the answer is a chat template — see ToolCallMarkup. It is worth one more attempt
         // rather than one shrug, because the cause is nearly always the streaming parser and there
         // is a way round it that costs a single extra request.
-        if (_stream && ToolCallMarkup.Present(response.Text))
+        bool degraded = _stream && ToolCallMarkup.Present(response.Text);
+        if (degraded)
         {
             string? wanted = ToolCallMarkup.NameIn(response.Text);
             progress?.Report(AgentStep.Discard());
             progress?.Report(AgentStep.Note(
-                $"— it wrote {(wanted is null ? "a tool call" : wanted)} out as text instead of calling it, "
-                + "which runs nothing; asking again in one piece. Nothing shows until it finishes, "
-                + "which can be a while if it reads several functions. —"));
+                $"— it wrote {(wanted is null ? "a tool call" : wanted)} as text instead of calling it. "
+                + "Keeping what it already did and asking it to carry on. —"));
 
-            // The bad turn is not kept. Leaving it in would teach the next turn that writing the
-            // template out is how tools are called here, which is the failure, not a record of it.
+            // Everything it really did is kept: the calls it made and what they returned. Only the
+            // text that turned out to be a template goes.
             //
+            // Throwing the whole turn away was much worse than it looked. The retry then began the
+            // work again from nothing, and beginning again means re-running whatever the turn had
+            // already done — for a debugging session that is debug_run start, which kills the
+            // process and loses every breakpoint reached, every module loaded and everywhere it had
+            // got to. Recovering from a dropped tool call by destroying the session is not recovery.
+            _history.AddRange(Salvage(response.Messages));
+
             // Nothing is said to the model on this attempt, on purpose: the usual cause is the
             // streaming parser rather than anything the model did, and telling it off for a mistake
-            // that was not its own is its own kind of confusion.
+            // that was not its own is its own kind of confusion. The history now ends with what it
+            // has already learned, so this asks it to carry on rather than to start over.
             response = await Retry(store, correction: null, cancellationToken).ConfigureAwait(false);
             live = false;
 
@@ -188,6 +196,7 @@ public sealed class AnalysisAgent : IDisposable
                     "— again with the whole answer in one piece, so it is the model and not the stream; "
                     + "telling it plainly and asking once more —"));
 
+                _history.AddRange(Salvage(response.Messages));
                 response = await Retry(store, Correction, cancellationToken).ConfigureAwait(false);
             }
 
@@ -199,7 +208,9 @@ public sealed class AnalysisAgent : IDisposable
             }
         }
 
-        _history.AddRange(response.Messages);
+        // Salvaged only when something went wrong with it. A turn that behaved is added as it came
+        // back, rather than rebuilt into equivalent messages for no reason.
+        _history.AddRange(degraded ? Salvage(response.Messages) : response.Messages);
 
         if (!live)
         {
@@ -213,6 +224,57 @@ public sealed class AnalysisAgent : IDisposable
         string answer = response.Text;
         progress?.Report(AgentStep.Said(answer));
         return answer;
+    }
+
+    /// <summary>
+    /// A failed turn with everything real about it kept and only the template dropped.
+    ///
+    /// What is real is the calls it made and the results they returned — work that has already
+    /// happened, in a process that is already running. What is not is the trailing text that turned
+    /// out to be a chat template, which ran nothing and, kept, would teach the next turn that
+    /// writing one out is how tools are called here.
+    ///
+    /// A call with no result goes too. The pair is matched or it is nothing: a provider handed a
+    /// call without its result rejects the whole request, and the tool loop can stop between the two
+    /// when it runs out of iterations.
+    /// </summary>
+    private static IEnumerable<ChatMessage> Salvage(IList<ChatMessage> messages)
+    {
+        var answered = messages
+            .SelectMany(m => m.Contents)
+            .OfType<FunctionResultContent>()
+            .Select(r => r.CallId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var message in messages)
+        {
+            var kept = new List<AIContent>();
+            foreach (var content in message.Contents)
+            {
+                switch (content)
+                {
+                    case FunctionCallContent call when !answered.Contains(call.CallId):
+                        break;
+
+                    case TextContent text:
+                        if (ToolCallMarkup.Without(text.Text).Trim() is { Length: > 0 } prose)
+                        {
+                            kept.Add(new TextContent(prose));
+                        }
+
+                        break;
+
+                    default:
+                        kept.Add(content);
+                        break;
+                }
+            }
+
+            if (kept.Count > 0)
+            {
+                yield return new ChatMessage(message.Role, kept);
+            }
+        }
     }
 
     /// <summary>
