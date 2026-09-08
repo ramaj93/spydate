@@ -262,8 +262,18 @@ public partial class MainWindow : FluentWindow
     /// </summary>
     private void DiscardStreamingLine()
     {
-        RemoveLastBlocks(_streamingBlocks);
+        // The whole document, because scrubbing can change or remove a line anywhere in it, not
+        // only the one at the end. A transcript is a few hundred blocks and this happens once a
+        // turn at most.
+        AssistantTranscript.Document.Blocks.Clear();
         _streamingBlocks = 0;
+
+        foreach (var line in _viewModel.Assistant.Transcript)
+        {
+            Add(Blocks(line), line);
+        }
+
+        ScrollAssistantToEnd();
     }
 
     /// <summary>The turn ended: draw the answer properly, now that all of it is known.</summary>

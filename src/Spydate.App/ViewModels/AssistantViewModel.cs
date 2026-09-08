@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.Input;
 using Spydate.Agent;
 using Spydate.Agent.Providers;
 using Spydate.Agent.Secrets;
+using Spydate.Agent.Text;
 using Spydate.App.Services;
 using Spydate.Mcp;
 using Spydate.Mcp.Session;
@@ -172,13 +173,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
                         // The markup already streamed onto the screen, so it has to come off again.
                         // Leaving it and appending the retry underneath would show two answers to
                         // one question, the first of which is a template nobody wants to read.
-                        if (_answer is { } spoiled)
-                        {
-                            Discarding?.Invoke(this, EventArgs.Empty);
-                            Transcript.Remove(spoiled);
-                            _answer = null;
-                        }
-
+                        Scrub();
                         break;
 
                     case "delta" when _answer is not null:
@@ -220,6 +215,11 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             _answer = null;
             AskCommand.NotifyCanExecuteChanged();
             UpdateStatus();
+
+            // Before the turn is drawn and before it is written down, so neither shows a template.
+            // The recovery scrubs too, but only when it fires - and it cannot fire for a turn that
+            // was never streamed, or for one where the markup was not the last thing said.
+            Scrub();
             TurnFinished?.Invoke(this, EventArgs.Empty);
             Remember();
         }
@@ -423,6 +423,51 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
         _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, _earlier);
         return _agent;
+    }
+
+    /// <summary>
+    /// Takes any leaked tool-call template off the screen, and out of what gets saved.
+    ///
+    /// Every assistant line, not only the one being written. A template can arrive in the middle of
+    /// a turn — the model writes one, then makes a real call, and carries on — and by the time the
+    /// turn ends the line holding it is no longer the current one. Removing only the current line
+    /// therefore left the markup sitting in the transcript, and <see cref="Remember"/> wrote it to
+    /// the log, where it came back on every later open.
+    /// </summary>
+    private void Scrub()
+    {
+        bool changed = false;
+
+        for (int i = Transcript.Count - 1; i >= 0; i--)
+        {
+            var line = Transcript[i];
+            if (line.Kind != "assistant")
+            {
+                continue;
+            }
+
+            string clean = ToolCallMarkup.Without(line.Text).TrimEnd();
+            if (string.Equals(clean, line.Text, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            changed = true;
+            if (clean.Length == 0)
+            {
+                Transcript.RemoveAt(i);
+            }
+            else
+            {
+                line.Text = clean;
+            }
+        }
+
+        if (changed)
+        {
+            _answer = null;
+            Discarding?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     /// <summary>Raised whenever the line being written into grows, so the view can redraw it.</summary>
