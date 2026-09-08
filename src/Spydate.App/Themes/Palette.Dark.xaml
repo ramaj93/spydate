@@ -54,6 +54,12 @@
 
     <!-- Input controls -->
     <SolidColorBrush x:Key="Control.Background" Color="#333337" />
+
+    <!-- What somebody typed, set off from what the assistant said. Lifted a little from the panel
+         rather than accented: a question is not a warning, and a column of bright rectangles down
+         one side of a transcript is harder to read past than the alignment alone. -->
+    <SolidColorBrush x:Key="Chat.You.Background" Color="#37373D" />
+    <SolidColorBrush x:Key="Chat.You.Border" Color="#45454B" />
     <SolidColorBrush x:Key="Control.Border" Color="#464649" />
     <SolidColorBrush x:Key="Control.Hover.Background" Color="#3E3E42" />
     <SolidColorBrush x:Key="Control.Disabled.Background" Color="#2D2D30" />

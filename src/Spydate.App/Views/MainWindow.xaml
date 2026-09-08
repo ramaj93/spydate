@@ -672,7 +672,7 @@
                                                  IsEnabled="{Binding IsIdle}"
                                                  AcceptsReturn="True" TextWrapping="Wrap"
                                                  MaxHeight="120" VerticalScrollBarVisibility="Auto"
-                                                 KeyDown="OnAssistantKeyDown"
+                                                 PreviewKeyDown="OnAssistantKeyDown"
                                                  AutomationProperties.Name="Assistant question" />
                                     </DockPanel>
                                 </Grid>

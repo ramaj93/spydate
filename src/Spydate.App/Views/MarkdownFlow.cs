@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
 using Spydate.Agent.Text;
@@ -55,6 +56,48 @@ internal static class MarkdownFlow
         var paragraph = new System.Windows.Documents.Paragraph { Margin = new Thickness(0, 0, 0, 6) };
         AppendWithLineBreaks(paragraph.Inlines, text);
         yield return paragraph;
+    }
+
+    /// <summary>
+    /// What somebody typed, in a bubble along the right.
+    ///
+    /// Alignment is what actually separates the two voices. A transcript of one column, distinguished
+    /// only by colour, has to be read to be navigated; questions on the right and answers on the left
+    /// can be found by their shape, which is the whole reason every chat interface does this.
+    ///
+    /// It is a Border in a BlockUIContainer rather than a Paragraph, because a Paragraph's background
+    /// spans the whole column whatever its text does — a bubble has to end where the words end. The
+    /// cost is that this text is outside the document's own flow and so cannot be selected with the
+    /// answers around it. That is the right way round: an answer is what gets copied out, and a
+    /// question is the thing the reader typed and already has.
+    /// </summary>
+    public static IEnumerable<Block> Bubble(string text)
+    {
+        var block = new TextBlock
+        {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Resource("Text.Primary") as Brush ?? Brushes.White,
+        };
+
+        var border = new Border
+        {
+            Child = block,
+            Background = Resource("Chat.You.Background") as Brush ?? CodeBackground,
+            BorderBrush = Resource("Chat.You.Border") as Brush ?? Brushes.Gray,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(10, 6, 10, 6),
+            HorizontalAlignment = HorizontalAlignment.Right,
+
+            // Room to be a bubble rather than a full-width band, and a floor so a one-word question
+            // does not shrink to a stub. The document is narrow when the panel is, so this is a
+            // fraction of it rather than a fixed width.
+            MaxWidth = 620,
+            Margin = new Thickness(60, 2, 0, 2),
+        };
+
+        yield return new BlockUIContainer(border) { Margin = new Thickness(0, 4, 0, 6) };
     }
 
     /// <summary>An aside from the panel itself, not from anyone in the conversation.</summary>

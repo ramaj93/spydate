@@ -123,9 +123,14 @@ public partial class MainWindow : FluentWindow
     }
 
     /// <summary>
-    /// Enter asks; Shift+Enter starts a new line, for a question worth more than one. IsDefault on
-    /// the Ask button would fire for any Enter anywhere in the window, which is not what a text box
-    /// wants.
+    /// Enter asks; Shift+Enter starts a new line, for a question worth more than one.
+    ///
+    /// Preview, not KeyDown. A TextBox handles Enter in a class handler, and class handlers run
+    /// before instance ones - so handling it on the way back up meant the newline had already been
+    /// inserted, and Enter both broke the line and sent the question. Tunnelling gets there first.
+    ///
+    /// IsDefault on the button would fire for any Enter anywhere in the window, which is not what a
+    /// text box wants.
     /// </summary>
     private void OnAssistantKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
@@ -287,6 +292,7 @@ public partial class MainWindow : FluentWindow
 
     private static IEnumerable<Block> Blocks(ViewModels.AssistantLine line) => line.Kind switch
     {
+        "you" => MarkdownFlow.Bubble(line.Text),
         "tool" => MarkdownFlow.Tool(line.Text),
         "note" => MarkdownFlow.Note(line.Text),
         "assistant" => MarkdownFlow.Render(line.Text),
@@ -298,12 +304,9 @@ public partial class MainWindow : FluentWindow
         int count = 0;
         foreach (var block in blocks)
         {
-            if (line.IsYou)
-            {
-                block.Foreground = (Brush)FindResource("Accent.Hover");
-                block.FontWeight = FontWeights.SemiBold;
-            }
-            else if (line.IsProblem)
+            // A question draws itself: it is a bubble, and colouring it as well would be saying the
+            // same thing twice in a panel that already has enough going on.
+            if (line.IsProblem)
             {
                 block.Foreground = (Brush)FindResource("Semantic.Error");
             }
