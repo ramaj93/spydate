@@ -113,3 +113,90 @@ public sealed class RecentFilesTests : IDisposable
     public void ReadingAListThatWasNeverWrittenIsNotAnError()
         => Assert.Empty(RecentFiles.Load(Path.Combine(_directory, "nothing-here.json")));
 }
+
+/// <summary>How to run a binary under the debugger, remembered between runs.</summary>
+public sealed class DebugTargetTests
+{
+    private static string Temp() => Path.Combine(Path.GetTempPath(), $"spydate-debug-{Guid.NewGuid():N}.json");
+
+    [Fact]
+    public void AHostComesBackForTheBinaryItWasSetFor()
+    {
+        string path = Temp();
+        try
+        {
+            DebugTargets.Set(@"D:\bin\thing.dll", new DebugTarget
+            {
+                Host = @"D:\bin\host.exe",
+                Arguments = "--load thing.dll",
+                WorkingDirectory = @"D:\bin",
+            }, path);
+
+            var read = DebugTargets.For(@"D:\bin\thing.dll", path);
+
+            Assert.NotNull(read);
+            Assert.Equal(@"D:\bin\host.exe", read!.Host);
+            Assert.Equal("--load thing.dll", read.Arguments);
+            Assert.Equal(@"D:\bin", read.WorkingDirectory);
+
+            // A different binary has its own, and knows nothing of this one.
+            Assert.Null(DebugTargets.For(@"D:\bin\other.dll", path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void TheSameBinaryIsTheSameEntryHoweverThePathWasTyped()
+    {
+        string path = Temp();
+        try
+        {
+            DebugTargets.Set(@"D:\Bin\Thing.dll", new DebugTarget { Host = @"D:\bin\host.exe" }, path);
+            Assert.NotNull(DebugTargets.For(@"d:\bin\thing.dll", path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ClearingEverythingForgetsTheEntryRatherThanStoringAnEmptyOne()
+    {
+        string path = Temp();
+        try
+        {
+            DebugTargets.Set(@"D:\bin\thing.dll", new DebugTarget { Host = @"D:\bin\host.exe" }, path);
+            Assert.NotNull(DebugTargets.For(@"D:\bin\thing.dll", path));
+
+            DebugTargets.Set(@"D:\bin\thing.dll", new DebugTarget(), path);
+
+            Assert.Null(DebugTargets.For(@"D:\bin\thing.dll", path));
+            Assert.False(File.Exists(path), "the file was left behind holding nothing");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ADamagedFileReadsAsNothingRememberedRatherThanThrowing()
+    {
+        string path = Temp();
+        try
+        {
+            File.WriteAllText(path, "{ not json at all");
+
+            Assert.Null(DebugTargets.For(@"D:\bin\thing.dll", path));
+            Assert.Empty(DebugTargets.All(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}

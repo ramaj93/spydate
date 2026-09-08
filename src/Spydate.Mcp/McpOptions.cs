@@ -27,6 +27,21 @@ public sealed record McpOptions
     /// <summary>A binary to open at startup, so the first tool call already has something to read.</summary>
     public string? OpenAtStartup { get; init; }
 
+    /// <summary>
+    /// Whether the agent may run the binary under a debugger. Off, and it takes saying so.
+    ///
+    /// Every other tool here reads a file or edits the one project file beside it. That the write
+    /// surface is exactly the <c>.spydate</c> project is load-bearing rather than incidental, and
+    /// starting a process is the one thing that leaves it entirely: it executes code that the analyst
+    /// chose to examine precisely because they did not trust it. So it is not something a client
+    /// gets by connecting.
+    ///
+    /// The in-app panel turns this on, because there a person answers "run this binary?" before
+    /// anything starts and is watching the window while it does. A headless server has neither, so
+    /// <c>--allow-debug</c> has to be given deliberately by whoever wrote the client's config.
+    /// </summary>
+    public bool AllowDebug { get; init; }
+
     public static McpOptions Default { get; } = new();
 
     /// <summary>
@@ -48,6 +63,10 @@ public sealed record McpOptions
             {
                 case "--read-only":
                     options = options with { ReadOnly = true };
+                    break;
+
+                case "--allow-debug":
+                    options = options with { AllowDebug = true };
                     break;
 
                 case "--root" when next is not null:

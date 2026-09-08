@@ -5,6 +5,7 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
+using Spydate.Core.Project;
 using Spydate.Debugger;
 
 namespace Spydate.App.ViewModels;
@@ -15,6 +16,12 @@ public sealed record RegisterRow(string Name, string Value, bool Changed);
 
 /// <summary>One qword on the stack.</summary>
 public sealed record StackRow(string Address, string Value);
+
+/// <summary>
+/// One module the debuggee has loaded. <paramref name="IsTarget"/> marks the one the listing is
+/// about, which under a host is the whole question — whether the DLL has been loaded yet.
+/// </summary>
+public sealed record ModuleRow(string Name, string Base, string Path, bool IsTarget);
 
 /// <summary>
 /// The debugger panel: starting the open binary, stopping it, and reading it while it is stopped.
@@ -36,11 +43,86 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>Registers as they were at the previous stop, so a change can be pointed at.</summary>
     private IReadOnlyDictionary<string, ulong> _previous = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
-    public DebuggerViewModel(WorkspaceService workspace, Func<string, string, bool>? confirm = null)
+    private readonly IFileDialogService? _dialogs;
+
+    public DebuggerViewModel(WorkspaceService workspace, IFileDialogService? dialogs = null, Func<string, string, bool>? confirm = null)
     {
         _workspace = workspace;
+        _dialogs = dialogs;
         _confirm = confirm ?? DefaultConfirm;
-        workspace.CurrentChanged += (_, _) => StopSession();
+        workspace.CurrentChanged += (_, _) =>
+        {
+            StopSession();
+            RecallTarget();
+        };
+    }
+
+    /// <summary>Reads back the host and arguments last used for the binary now open.</summary>
+    private void RecallTarget()
+    {
+        var target = _workspace.Current?.Image.Path is { Length: > 0 } path ? DebugTargets.For(path) : null;
+
+        Host = target?.Host ?? string.Empty;
+        Arguments = target?.Arguments ?? string.Empty;
+        WorkingDirectory = target?.WorkingDirectory ?? string.Empty;
+        Modules.Clear();
+        OnPropertyChanged(nameof(NeedsHost));
+    }
+
+    /// <summary>
+    /// Remembers how to run this binary. Written on every change rather than on start, because the
+    /// setting most worth keeping is the one somebody typed and then closed the window without using.
+    /// </summary>
+    private void RememberTarget()
+    {
+        if (_workspace.Current?.Image.Path is not { Length: > 0 } path)
+        {
+            return;
+        }
+
+        DebugTargets.Set(path, new DebugTarget
+        {
+            Host = Host.Trim() is { Length: > 0 } host ? host : null,
+            Arguments = Arguments.Trim() is { Length: > 0 } arguments ? arguments : null,
+            WorkingDirectory = WorkingDirectory.Trim() is { Length: > 0 } directory ? directory : null,
+        });
+    }
+
+    partial void OnHostChanged(string value)
+    {
+        RememberTarget();
+        StartCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnArgumentsChanged(string value) => RememberTarget();
+
+    partial void OnWorkingDirectoryChanged(string value) => RememberTarget();
+
+    /// <summary>
+    /// Picks the program that loads this DLL. Its folder becomes the working directory unless one has
+    /// already been set — a host usually wants to run where it lives, and finding out that it did not
+    /// costs a debugging session.
+    /// </summary>
+    [RelayCommand]
+    private void ChooseHost()
+    {
+        if (_dialogs?.OpenPeFile() is not { Length: > 0 } chosen)
+        {
+            return;
+        }
+
+        Host = chosen;
+        if (WorkingDirectory.Trim().Length == 0 && Path.GetDirectoryName(chosen) is { Length: > 0 } folder)
+        {
+            WorkingDirectory = folder;
+        }
+    }
+
+    [RelayCommand]
+    private void ClearHost()
+    {
+        Host = string.Empty;
+        WorkingDirectory = string.Empty;
     }
 
     /// <summary>Registers as of the last stop. Empty while it is running, because they would be a guess.</summary>
@@ -48,6 +130,26 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>The top of the stack as of the last stop.</summary>
     public ObservableCollection<StackRow> Stack { get; } = new();
+
+    /// <summary>Everything the process has loaded, so it is visible whether the target is among it.</summary>
+    public ObservableCollection<ModuleRow> Modules { get; } = new();
+
+    /// <summary>
+    /// The program to start, when the binary cannot start itself. Empty for an EXE, which is its own
+    /// host; required for a DLL, which is a module and not a program.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(NeedsHost))]
+    private string _host = string.Empty;
+
+    [ObservableProperty]
+    private string _arguments = string.Empty;
+
+    [ObservableProperty]
+    private string _workingDirectory = string.Empty;
+
+    /// <summary>Whether the open binary cannot be started without a host being chosen first.</summary>
+    public bool NeedsHost => _workspace.Current?.Image.IsDll == true && Host.Trim().Length == 0;
 
     /// <summary>The processor flags, spelled out. "ZF 1 CF 0" is read; 0x246 is decoded.</summary>
     [ObservableProperty]
@@ -114,11 +216,35 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // A DLL is not a program: CreateProcess refuses it, and the refusal used to arrive after the
+        // confirmation, so it asked whether to run something that could not be run. Something else
+        // has to load it, and that is what the host is for.
+        string? host = Host is { Length: > 0 } chosen ? chosen.Trim() : null;
+        if (binary.Image.IsDll && host is null)
+        {
+            Status = "A DLL needs a host program to load it.";
+            Add($"{binary.DisplayName} is a DLL, so it cannot be started on its own. "
+                + "Choose the program that loads it, and its breakpoints go in when it is loaded.");
+            return;
+        }
+
+        if (host is not null && !File.Exists(host))
+        {
+            Status = "That host program is not there.";
+            Add($"the host {host} does not exist");
+            return;
+        }
+
+        string run = host ?? path;
+
         // Asked every time, not once and remembered. The answer is about this binary, and the cost
         // of getting it wrong is running something hostile on the analyst's own machine.
         if (!_confirm(
                 "Run this binary?",
-                $"{binary.DisplayName} will be started on this machine and will do whatever it does.\n\n"
+                (host is null
+                    ? $"{binary.DisplayName} will be started on this machine and will do whatever it does.\n\n"
+                    : $"{Path.GetFileName(host)} will be started on this machine, so that it loads "
+                      + $"{binary.DisplayName}. Both will do whatever they do.\n\n")
                 + "Everything else in Spydate only reads the file. Debug it in a virtual machine if you "
                 + "do not know what it is.\n\nStart it?"))
         {
@@ -136,10 +262,21 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         try
         {
-            session.Start(path, binary.Image.ImageBase, binary.Image.OptionalHeader.SizeOfImage);
+            // Under a host, the process is somebody else's program and the addresses on screen belong
+            // to a module inside it, so the module has to be named or nothing would translate.
+            session.Start(
+                run,
+                binary.Image.ImageBase,
+                binary.Image.OptionalHeader.SizeOfImage,
+                Arguments is { Length: > 0 } arguments ? arguments : null,
+                WorkingDirectory is { Length: > 0 } directory ? directory : null,
+                host is null ? null : binary.Image.FileName);
+
             State = DebugState.Running;
             Status = "Running.";
-            Add($"started {path}");
+            Add(host is null
+                ? $"started {run}"
+                : $"started {run}, waiting for {binary.Image.FileName} to load");
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException)
         {
@@ -257,10 +394,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
             switch (e.Kind)
             {
+                case "started":
+                case "module":
+                    RefreshModules();
+                    break;
+
                 case "stopped":
                     State = DebugState.Stopped;
                     ExecutionAddress = e.Address;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";
+                    RefreshModules();
                     RefreshRegisters();
                     if (e.Address is { } address)
                     {
@@ -279,6 +422,29 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
             NotifyCommands();
         });
+    }
+
+    /// <summary>
+    /// The loaded modules, target first.
+    ///
+    /// Worth showing because under a host it answers the question the whole arrangement turns on:
+    /// has the DLL been loaded yet. Until it has, its addresses mean nothing and its breakpoints are
+    /// waiting rather than armed, and there is otherwise no way to tell that from nothing happening.
+    /// </summary>
+    private void RefreshModules()
+    {
+        var loaded = _session?.Modules ?? [];
+        ulong target = _session?.LoadedBase ?? 0;
+
+        Modules.Clear();
+        foreach (var module in loaded.OrderByDescending(m => m.Base == target && target != 0).ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            Modules.Add(new ModuleRow(
+                module.Name.Length > 0 ? module.Name : "(unnamed)",
+                $"0x{module.Base:X16}",
+                module.Path,
+                module.Base == target && target != 0));
+        }
     }
 
     private void RefreshRegisters()
