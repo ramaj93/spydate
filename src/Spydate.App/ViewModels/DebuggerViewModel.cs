@@ -292,8 +292,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private void StopDebugging()
     {
         StopSession();
-        Add("stopped");
-        Status = "Not running.";
+        Add("stopped; the process was terminated");
+
+        // Says which of the two ways of not running this is. Stopping kills the debuggee — a
+        // debugged process does not outlive its session — and that is worth stating rather than
+        // leaving it to read the same as never having started one.
+        Status = "Stopped; the process was terminated.";
         NotifyCommands();
     }
 
@@ -422,8 +426,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                 case "exited":
                     State = DebugState.Exited;
                     ExecutionAddress = null;
-                    Status = "It exited.";
+
+                    // The event's own words, which carry the exit code. "It exited." threw away the
+                    // one fact worth having when a process dies — whether it finished or crashed,
+                    // and how.
+                    Status = char.ToUpperInvariant(e.Text[0]) + e.Text[1..] + ".";
+
+                    // All of it, not just the registers. A stack and a module list belonging to a
+                    // process that no longer exists are worse than none: they read as current, and
+                    // anything that goes on to use them is reasoning about a dead process.
                     Registers.Clear();
+                    Stack.Clear();
+                    Modules.Clear();
+                    Flags = string.Empty;
                     break;
             }
 
@@ -515,6 +530,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         State = DebugState.NotStarted;
         Registers.Clear();
+        Stack.Clear();
+        Modules.Clear();
+        Flags = string.Empty;
         NotifyCommands();
     }
 

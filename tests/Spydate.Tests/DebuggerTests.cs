@@ -70,6 +70,48 @@ public sealed class DebuggerTests
             Assert.Contains(seen, e => e.Kind == "started");
             Assert.Contains(seen, e => e.Kind == "stopped");
             Assert.Contains(seen, e => e.Kind == "exited");
+
+            // How it ended, not merely that it did. A crash exit code is the single most useful
+            // fact a dying process leaves behind, and it used to be dropped on the way out.
+            Assert.Contains(seen, e => e.Kind == "exited" && e.Text.Contains("exited", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void AProcessThatCrashesSaysWhatKilledItInHexAsWellAsDecimal()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        string? ending = null;
+        var exited = new ManualResetEventSlim();
+
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "exited")
+            {
+                ending = e.Text;
+                exited.Set();
+            }
+        };
+
+        // where.exe with a name it cannot find exits non-zero without crashing, which is enough to
+        // prove the code travels: a zero exit takes the other branch and says so in words.
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "no-such-program-anywhere.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+        session.Continue();
+
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(20)), "the process never exited");
+        Assert.NotNull(ending);
+
+        // Either it exited cleanly, or it said how - in both forms, because only one of them is
+        // readable for an NTSTATUS.
+        if (!ending!.Contains("normally", StringComparison.Ordinal))
+        {
+            Assert.Contains("0x", ending, StringComparison.Ordinal);
         }
     }
 

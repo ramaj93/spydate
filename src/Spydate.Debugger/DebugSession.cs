@@ -554,7 +554,12 @@ public sealed class DebugSession : IDisposable
                     break;
 
                 case Native.EXIT_PROCESS_DEBUG_EVENT:
-                    Report("exited", $"exited with code {e.ExitCode}");
+                    // In hex as well as decimal, because a crash exit code is an NTSTATUS and only
+                    // one of the two forms is recognisable: 0xC0000005 is an access violation at a
+                    // glance, and 3221225477 is not.
+                    Report("exited", e.ExitCode == 0
+                        ? "exited normally"
+                        : $"exited with code {e.ExitCode} (0x{e.ExitCode:X8})");
                     Native.ContinueDebugEvent(e.dwProcessId, e.dwThreadId, Native.DBG_CONTINUE);
                     return;
 

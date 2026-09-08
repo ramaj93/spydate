@@ -63,9 +63,12 @@ public sealed class PanelDebugControl : IDebugControl
         DebugSnapshot snapshot = null!;
         OnUi(() => snapshot = new DebugSnapshot
         {
+            // "not running" rather than "not started": it is also where a session lands after being
+            // stopped, and claiming nothing was ever started would be a statement about history this
+            // does not have. Which of the two it is, the status line says.
             State = _debugger.State switch
             {
-                DebugState.NotStarted => "not started",
+                DebugState.NotStarted => "not running",
                 DebugState.Running => "running",
                 DebugState.Stopped => "stopped",
                 _ => "exited",
