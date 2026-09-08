@@ -20,10 +20,23 @@ public sealed record DebugEvent(string Kind, string Text)
     public ulong? Address { get; init; }
 }
 
-/// <summary>A breakpoint, and the byte it is standing in for.</summary>
+/// <summary>
+/// A breakpoint, and the byte it is standing in for.
+///
+/// <paramref name="Address"/> is the <em>static</em> address — the one in the listing. It is
+/// translated to where the module actually landed each time it is planted, rather than once when it
+/// is set: a breakpoint is usually set before anything is running, when there is no load address to
+/// translate against, and on a module that may be loaded and unloaded more than once in a run.
+/// </summary>
 public sealed record Breakpoint(ulong Address, byte Original)
 {
     public bool Planted { get; init; }
+}
+
+/// <summary>A module the debuggee has loaded, and where it landed.</summary>
+public sealed record LoadedModule(string Path, ulong Base)
+{
+    public string Name => System.IO.Path.GetFileName(Path);
 }
 
 /// <summary>
@@ -42,7 +55,16 @@ public sealed class DebugSession : IDisposable
     private readonly ConcurrentQueue<Action> _commands = new();
     private readonly SemaphoreSlim _resume = new(0, 1);
     private readonly Dictionary<ulong, Breakpoint> _breakpoints = new();
+    private readonly Dictionary<ulong, LoadedModule> _modules = new();
     private readonly CancellationTokenSource _stopping = new();
+
+    /// <summary>
+    /// The file name of the module whose addresses the listing is about, or null for the process's
+    /// own executable. It is what makes debugging a DLL possible: the thing being run and the thing
+    /// being read are then two different files, and only the second one's load address translates
+    /// the addresses on screen.
+    /// </summary>
+    private string? _target;
 
     private Thread? _loop;
     private IntPtr _process;
@@ -68,6 +90,24 @@ public sealed class DebugSession : IDisposable
 
     /// <summary>What the file says its base is, taken from the caller so this need not parse the PE.</summary>
     public ulong ImageBase { get; private set; }
+
+    /// <summary>Every module loaded right now, in load order.</summary>
+    public IReadOnlyList<LoadedModule> Modules
+    {
+        get
+        {
+            lock (_modules)
+            {
+                return _modules.Values.ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the module the listing is about has been loaded yet. False for a DLL until its host
+    /// gets round to loading it, which is when its breakpoints can first go in.
+    /// </summary>
+    public bool TargetLoaded => LoadedBase != 0;
 
     /// <summary>Where execution is, when it is stopped.</summary>
     public ulong CurrentAddress { get; private set; }
@@ -119,7 +159,20 @@ public sealed class DebugSession : IDisposable
     /// Starts <paramref name="path"/> under the debugger. Nothing runs until this is called, and it
     /// is only ever called because somebody asked for it.
     /// </summary>
-    public void Start(string path, ulong imageBase, uint imageSize, string? arguments = null, string? workingDirectory = null)
+    /// <param name="path">What to run. For a DLL this is the host that loads it, not the DLL.</param>
+    /// <param name="imageBase">The preferred base of the module being read, from its own headers.</param>
+    /// <param name="imageSize">Its size, so the translation knows where it stops applying.</param>
+    /// <param name="module">
+    /// The file name of the module the listing is about. Null means the process's own executable,
+    /// which is the case whenever the thing being run is also the thing being read.
+    /// </param>
+    public void Start(
+        string path,
+        ulong imageBase,
+        uint imageSize,
+        string? arguments = null,
+        string? workingDirectory = null,
+        string? module = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
@@ -130,6 +183,7 @@ public sealed class DebugSession : IDisposable
 
         ImageBase = imageBase;
         ImageSize = imageSize;
+        _target = module is { Length: > 0 } ? System.IO.Path.GetFileName(module) : null;
         var ready = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _loop = new Thread(() => Loop(path, arguments, workingDirectory, ready))
@@ -256,20 +310,21 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     public bool AddBreakpoint(ulong staticVa)
     {
-        ulong runtime = ToRuntime(staticVa);
         lock (_breakpoints)
         {
-            if (_breakpoints.ContainsKey(runtime))
+            if (_breakpoints.ContainsKey(staticVa))
             {
                 return false;
             }
 
-            _breakpoints[runtime] = new Breakpoint(runtime, 0);
+            _breakpoints[staticVa] = new Breakpoint(staticVa, 0);
         }
 
-        if (State == DebugState.Stopped)
+        // Only if the module is actually here. On a DLL that its host has not loaded yet there is
+        // no address to put it at; it goes in when the module arrives.
+        if (State == DebugState.Stopped && TargetLoaded)
         {
-            Post(() => Plant(runtime));
+            Post(() => PlantStatic(staticVa));
         }
 
         return true;
@@ -277,20 +332,20 @@ public sealed class DebugSession : IDisposable
 
     public bool RemoveBreakpoint(ulong staticVa)
     {
-        ulong runtime = ToRuntime(staticVa);
         Breakpoint? existing;
         lock (_breakpoints)
         {
-            if (!_breakpoints.TryGetValue(runtime, out existing))
+            if (!_breakpoints.TryGetValue(staticVa, out existing))
             {
                 return false;
             }
 
-            _breakpoints.Remove(runtime);
+            _breakpoints.Remove(staticVa);
         }
 
         if (existing.Planted && State == DebugState.Stopped)
         {
+            ulong runtime = ToRuntime(staticVa);
             Post(() => WriteByte(runtime, existing.Original));
         }
 
@@ -487,13 +542,15 @@ public sealed class DebugSession : IDisposable
             switch (e.dwDebugEventCode)
             {
                 case Native.CREATE_PROCESS_DEBUG_EVENT:
-                    LoadedBase = e.CreateProcessImageBase;
-                    Report("started", $"running, image at 0x{LoadedBase:X}"
-                                      + (ImageBase != 0 && LoadedBase != ImageBase ? $" (file says 0x{ImageBase:X})" : string.Empty));
+                    OnModuleLoaded(e.CreateProcessFile, e.CreateProcessImageBase, main: true);
                     break;
 
                 case Native.LOAD_DLL_DEBUG_EVENT:
-                    Report("module", $"loaded a module at 0x{e.LoadDllBase:X}");
+                    OnModuleLoaded(e.LoadDllFile, e.LoadDllBase, main: false);
+                    break;
+
+                case Native.UNLOAD_DLL_DEBUG_EVENT:
+                    OnModuleUnloaded(e.UnloadDllBase);
                     break;
 
                 case Native.EXIT_PROCESS_DEBUG_EVENT:
@@ -529,6 +586,92 @@ public sealed class DebugSession : IDisposable
 
             Native.ContinueDebugEvent(e.dwProcessId, e.dwThreadId, status);
         }
+    }
+
+    /// <summary>
+    /// Records a module and, when it is the one the listing is about, fixes the load bias and puts
+    /// the waiting breakpoints in.
+    ///
+    /// The handle is closed here whatever happens. Windows hands the debugger a file handle with
+    /// every one of these events and it is the debugger's to close — a process that loads two
+    /// hundred modules leaks two hundred handles otherwise.
+    /// </summary>
+    private void OnModuleLoaded(IntPtr file, ulong loadBase, bool main)
+    {
+        string? path = Native.PathOf(file);
+        Native.CloseHandle(file);
+
+        if (loadBase == 0)
+        {
+            return;
+        }
+
+        var module = new LoadedModule(path ?? string.Empty, loadBase);
+        lock (_modules)
+        {
+            _modules[loadBase] = module;
+        }
+
+        string name = module.Name.Length > 0 ? module.Name : "an unnamed module";
+        string where = $"at 0x{loadBase:X}"
+                       + (ImageBase != 0 && loadBase != ImageBase ? $" (file says 0x{ImageBase:X})" : string.Empty);
+
+        if (main)
+        {
+            Report("started", $"running {name} {where}");
+        }
+
+        // The main image when nothing else was named, or whichever module was: under a host, the
+        // process's own executable is not the thing being read.
+        bool wanted = _target is null ? main : string.Equals(module.Name, _target, StringComparison.OrdinalIgnoreCase);
+        if (!wanted)
+        {
+            return;
+        }
+
+        LoadedBase = loadBase;
+
+        // Its breakpoints could not go in before this moment, so they go in now rather than waiting
+        // for a stop that may never come. Nothing to do for the main image — the loader break is
+        // still ahead, and planting is what that is for.
+        if (main)
+        {
+            return;
+        }
+
+        PlantAll();
+
+        int waiting;
+        lock (_breakpoints)
+        {
+            waiting = _breakpoints.Count;
+        }
+
+        Report("module", $"{name} loaded {where}"
+                         + (waiting > 0 ? $"; {waiting} breakpoint{(waiting == 1 ? string.Empty : "s")} armed" : string.Empty));
+    }
+
+    /// <summary>
+    /// Drops a module, and if it was the one being read, stops pretending its addresses mean
+    /// anything. A DLL can be freed and loaded again at a different address in one run.
+    /// </summary>
+    private void OnModuleUnloaded(ulong loadBase)
+    {
+        LoadedModule? gone;
+        lock (_modules)
+        {
+            _modules.Remove(loadBase, out gone);
+        }
+
+        if (loadBase != LoadedBase || LoadedBase == 0)
+        {
+            return;
+        }
+
+        LoadedBase = 0;
+        Unplant();
+        Report("module", $"{(gone?.Name is { Length: > 0 } name ? name : "the target module")} was unloaded; "
+                         + "its breakpoints go back in if it is loaded again");
     }
 
     private (bool Stop, uint Status) OnException(Native.DEBUG_EVENT e)
@@ -589,10 +732,13 @@ public sealed class DebugSession : IDisposable
             return true;
         }
 
+        // Looked up by the address in the listing, which is how they are kept: the int3 is at a
+        // runtime address, and the same static address is a different runtime one every run.
+        ulong staticVa = ToStatic(address);
         Breakpoint? hit;
         lock (_breakpoints)
         {
-            _breakpoints.TryGetValue(address, out hit);
+            _breakpoints.TryGetValue(staticVa, out hit);
         }
 
         if (hit is null)
@@ -644,11 +790,42 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private ulong? Reportable(ulong runtimeVa) => InsideImage(runtimeVa) ? ToStatic(runtimeVa) : null;
 
+    /// <summary>
+    /// Puts in every breakpoint whose module is loaded. Called at the loader break and again each
+    /// time the module the listing is about is loaded, which for a DLL is the only moment its
+    /// addresses mean anything — and can happen more than once in a run.
+    /// </summary>
     private void PlantAll()
     {
+        if (!TargetLoaded)
+        {
+            return;
+        }
+
         foreach (var breakpoint in Breakpoints)
         {
-            Plant(breakpoint.Address);
+            PlantStatic(breakpoint.Address);
+        }
+    }
+
+    /// <summary>Plants the breakpoint held for a static address, at wherever that is right now.</summary>
+    private bool PlantStatic(ulong staticVa) => Plant(ToRuntime(staticVa));
+
+    /// <summary>
+    /// Forgets where every breakpoint was, without forgetting the breakpoints.
+    ///
+    /// Used when the module goes away. The bytes they saved belong to a mapping that no longer
+    /// exists, and writing one back later would put a byte from the last load into whatever occupies
+    /// that address now.
+    /// </summary>
+    private void Unplant()
+    {
+        lock (_breakpoints)
+        {
+            foreach (ulong address in _breakpoints.Keys.ToList())
+            {
+                _breakpoints[address] = _breakpoints[address] with { Original = 0, Planted = false };
+            }
         }
     }
 
@@ -667,7 +844,24 @@ public sealed class DebugSession : IDisposable
 
         if (existing[0] == 0xCC)
         {
-            return true;   // already broken here, by us or by the program itself
+            // Already an int3. Either ours from an earlier plant, in which case the byte it replaced
+            // is recorded and must not be overwritten with 0xCC; or the program's own, in which case
+            // 0xCC is genuinely what belongs here and is what has to go back when this is hit or
+            // removed. Recording nothing left Original at zero, and restoring it wrote a zero byte
+            // over the program's instruction — a debugger corrupting the thing it is watching.
+            if (!temporary)
+            {
+                ulong at = ToStatic(address);
+                lock (_breakpoints)
+                {
+                    if (_breakpoints.TryGetValue(at, out var already) && !already.Planted)
+                    {
+                        _breakpoints[at] = already with { Original = 0xCC, Planted = true };
+                    }
+                }
+            }
+
+            return true;
         }
 
         if (temporary)
@@ -676,11 +870,14 @@ public sealed class DebugSession : IDisposable
         }
         else
         {
+            // Recorded against the address in the listing, which is the key they are kept under;
+            // what was read is the byte at wherever that address is in this particular run.
+            ulong staticVa = ToStatic(address);
             lock (_breakpoints)
             {
-                if (_breakpoints.TryGetValue(address, out var breakpoint))
+                if (_breakpoints.TryGetValue(staticVa, out var breakpoint))
                 {
-                    _breakpoints[address] = breakpoint with { Original = existing[0], Planted = true };
+                    _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
                 }
             }
         }

@@ -107,6 +107,29 @@ internal static partial class Native
             get { fixed (byte* p = Payload) { return *(ulong*)(p + 8); } }
         }
 
+        /// <summary>
+        /// LOAD_DLL_DEBUG_INFO.hFile, the first field. It is the only reliable way to find out which
+        /// module was loaded: the event carries a name pointer as well, but it is optional, is often
+        /// null, and points into the debuggee. This handle is owned by the debugger and must be
+        /// closed, or every module a long run loads is leaked.
+        /// </summary>
+        public IntPtr LoadDllFile
+        {
+            get { fixed (byte* p = Payload) { return *(IntPtr*)p; } }
+        }
+
+        /// <summary>CREATE_PROCESS_DEBUG_INFO.hFile, the first field. Also the debugger's to close.</summary>
+        public IntPtr CreateProcessFile
+        {
+            get { fixed (byte* p = Payload) { return *(IntPtr*)p; } }
+        }
+
+        /// <summary>UNLOAD_DLL_DEBUG_INFO.lpBaseOfDll, its only field.</summary>
+        public ulong UnloadDllBase
+        {
+            get { fixed (byte* p = Payload) { return *(ulong*)p; } }
+        }
+
         /// <summary>EXIT_PROCESS_DEBUG_INFO.dwExitCode.</summary>
         public uint ExitCode
         {
@@ -150,6 +173,56 @@ internal static partial class Native
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool CloseHandle(IntPtr hObject);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    internal static unsafe partial uint GetFinalPathNameByHandle(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    /// <summary>
+    /// The path a module was loaded from, or null. Takes the handle the debug event carried and does
+    /// not close it — the caller does, because it has to be closed whether or not this succeeds.
+    ///
+    /// The returned path is the normalised one, so it arrives with a <c>\\?\</c> prefix that no
+    /// other part of the program would recognise. It is stripped here rather than everywhere else.
+    /// </summary>
+    internal static unsafe string? PathOf(IntPtr file)
+    {
+        if (file == IntPtr.Zero || file == new IntPtr(-1))
+        {
+            return null;
+        }
+
+        const int max = 32768;
+        char* buffer = stackalloc char[512];
+        uint length = GetFinalPathNameByHandle(file, buffer, 512, 0);
+
+        if (length is 0 or > max)
+        {
+            return null;
+        }
+
+        string path = length <= 512
+            ? new string(buffer, 0, (int)length)
+            : LongPath(file, length);
+
+        if (path.Length == 0)
+        {
+            return null;
+        }
+
+        return path.StartsWith(@"\\?\UNC\", StringComparison.Ordinal) ? @"\\" + path[8..]
+            : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
+            : path;
+    }
+
+    private static unsafe string LongPath(IntPtr file, uint length)
+    {
+        char[] big = new char[length + 1];
+        fixed (char* p = big)
+        {
+            uint written = GetFinalPathNameByHandle(file, p, (uint)big.Length, 0);
+            return written == 0 || written >= big.Length ? string.Empty : new string(p, 0, (int)written);
+        }
+    }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
