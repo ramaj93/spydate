@@ -78,6 +78,9 @@ public sealed class DebugSession : IDisposable
     private ulong? _temporary;
     private byte _temporaryOriginal;
 
+    /// <summary>A step was asked for, as opposed to the trap flag being set to get off a breakpoint.</summary>
+    private bool _stepping;
+
     private bool _sawInitialBreak;
 
     /// <summary>Raised on the debug loop's thread. Consumers marshal for themselves.</summary>
@@ -201,7 +204,7 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
-    public void Continue() => Post(() => { });
+    public void Continue() => Post(() => _stepping = false);
 
     /// <summary>One instruction, then stop again. Into a call, not over it.</summary>
     public void StepInstruction() => Post(() => Trap());
@@ -285,9 +288,15 @@ public sealed class DebugSession : IDisposable
     private static bool IsCall(Iced.Intel.Instruction instruction)
         => instruction.FlowControl is Iced.Intel.FlowControl.Call or Iced.Intel.FlowControl.IndirectCall;
 
-    /// <summary>Asks the processor to fault after the next instruction.</summary>
+    /// <summary>
+    /// Asks the processor to fault after the next instruction, and remembers that somebody wanted
+    /// that fault. The trap flag alone cannot say so: getting off a breakpoint sets it too, and the
+    /// two are told apart nowhere else.
+    /// </summary>
     private void Trap()
     {
+        _stepping = true;
+
         using var context = new ThreadContext();
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
         if (thread == IntPtr.Zero)
@@ -713,16 +722,31 @@ public sealed class DebugSession : IDisposable
                 return (HitBreakpoint(e.ExceptionAddress), Native.DBG_CONTINUE);
 
             case Native.EXCEPTION_SINGLE_STEP:
-                // Either a step the user asked for, or the one taken to get off a breakpoint.
+                // A step somebody asked for, or the one taken to get off a breakpoint — and both at
+                // once whenever the step was asked for while sitting on one, which is the common
+                // case and the one this used to get wrong.
+                //
+                // Re-arming has to happen first. But it also consumed the step and carried on, so
+                // stepping off a breakpoint silently became continuing: the instruction ran, the
+                // int3 went back, and execution went on to wherever it next stopped. For a function
+                // called four hundred times that is the same breakpoint a moment later — which
+                // looks precisely like a debugger whose instruction pointer refuses to move.
                 if (_reArm is { } address)
                 {
                     _reArm = null;
                     Plant(address);
-                    return (false, Native.DBG_CONTINUE);
+
+                    if (!_stepping)
+                    {
+                        return (false, Native.DBG_CONTINUE);
+                    }
                 }
 
+                // Whether it came straight here or by way of a re-arm, one instruction has run and
+                // a step was asked for, so this is where it stops.
+                _stepping = false;
                 CurrentAddress = e.ExceptionAddress;
-                Report("stopped", $"stepped to 0x{ToStatic(e.ExceptionAddress):X}", ToStatic(e.ExceptionAddress));
+                Report("stopped", $"stepped to 0x{ToStatic(e.ExceptionAddress):X}", Reportable(e.ExceptionAddress));
                 return (true, Native.DBG_CONTINUE);
 
             default:

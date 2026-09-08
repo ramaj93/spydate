@@ -434,6 +434,49 @@ public sealed class DebuggerTests
         return false;
     }
     /// <summary>
+    /// Stepping while sitting on a breakpoint, which is where stepping is nearly always done.
+    ///
+    /// Getting off a breakpoint uses the trap flag too, and the handler treated the resulting
+    /// single-step as its own - so it re-armed, carried on, and the step became a continue. The
+    /// existing step test never saw it because it steps from the loader break, where nothing is
+    /// re-armed.
+    /// </summary>
+    [Fact]
+    public void SteppingOffABreakpointMovesOneInstructionRatherThanRunningOn()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        // A breakpoint on the very next instruction, so it is reached at once and stepped off.
+        ulong at = session.Registers()!.Single(r => r.Name == "rip").Value;
+        var decoded = Iced.Intel.Decoder.Create(64, new Iced.Intel.ByteArrayCodeReader(session.ReadMemory(at, 16)), at);
+        ulong next = decoded.Decode().NextIP;
+
+        Assert.True(session.AddBreakpoint(next), "the breakpoint was not taken");
+        session.Continue();
+        Assert.True(Wait(() => session.State == DebugState.Stopped && session.CurrentAddress == next),
+            "never stopped on the breakpoint");
+
+        session.StepInstruction();
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped after the step");
+
+        ulong after = session.Registers()!.Single(r => r.Name == "rip").Value;
+
+        // One instruction on, and specifically not back where it started: running on would have
+        // carried it away entirely, and a swallowed step would have left it where it was.
+        Assert.NotEqual(next, after);
+        Assert.Equal(next, session.ToRuntime(next));
+
+        session.Stop();
+    }
+
+    /// <summary>
     /// Continuing the instant the stop is announced, which is what anything reacting in code does.
     /// The state has to already say stopped by then, or Post drops the command and the loop waits
     /// for one that never comes - a session where nothing works but Stop.
