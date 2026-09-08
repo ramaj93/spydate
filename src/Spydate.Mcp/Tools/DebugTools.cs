@@ -118,6 +118,23 @@ public sealed class DebugTools
                 // Asks the process for nothing at all. It is the only way to be present when a
                 // breakpoint is finally reached, rather than having been told ten seconds earlier
                 // that it had not been reached yet.
+                //
+                // The next stop, so a process that is already stopped is not something to wait on:
+                // there will be no next one until something lets it run, and returning the state it
+                // already had looked exactly like having waited and found nothing changed.
+                var idle = debug.Snapshot();
+                if (idle.State != "running")
+                {
+                    return idle.State switch
+                    {
+                        "stopped" => $"it is already stopped — {idle.Status} Nothing further happens "
+                                     + "until you continue or step." + Recent(idle),
+                        "exited" => $"it has exited — {idle.Status} There is nothing left to wait for."
+                                    + Recent(idle),
+                        _ => "nothing is running, so there is nothing to wait for. Use start." + Recent(idle),
+                    };
+                }
+
                 break;
 
             default:

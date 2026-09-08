@@ -483,10 +483,14 @@ public sealed class DebugToolTests
     public void WaitingIsHowABreakpointHitLaterIsSeenAtAll()
     {
         using var store = Open();
+        // Running when asked, and stopped by the time the wait comes back — which is the only
+        // arrangement in which waiting means anything.
         var stub = new StubDebug
         {
-            State = "stopped",
+            State = "running",
             Status = "Stopped at 0x1800040C0.",
+            BecomesOnWait = "stopped",
+            At = 0x1800040C0,
             Recent = ["10:38:11  dcsxpdf.dll loaded at 0x7FFA21F70000; 1 breakpoint armed", "10:38:12  breakpoint at 0x1800040C0"],
         };
 
@@ -498,7 +502,40 @@ public sealed class DebugToolTests
         // Waiting asks the process for nothing; it only reports what it found.
         Assert.Empty(stub.Done);
         Assert.Contains("breakpoint at 0x1800040C0", answer, StringComparison.Ordinal);
-        Assert.Contains("stopped", answer, StringComparison.Ordinal);
+        Assert.Contains("stopped at 0x1800040C0", answer, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Waiting means the next stop. Asked while it is already stopped there is no next one — nothing
+    /// happens until something lets it run — and returning the state it already had read exactly
+    /// like having waited and found nothing had changed.
+    /// </summary>
+    [Fact]
+    public void WaitingWhileAlreadyStoppedSaysSoRatherThanLookingLikeItWaited()
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "stopped", Status = "Stopped at 0x1800040C0." };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Run("wait");
+
+        Assert.Contains("already stopped", answer, StringComparison.Ordinal);
+        Assert.Contains("continue or step", answer, StringComparison.Ordinal);
+        Assert.Empty(stub.Done);
+    }
+
+    [Fact]
+    public void WaitingOnSomethingThatHasGoneSaysThereIsNothingToWaitFor()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+
+        store.Debug = new StubDebug { State = "exited", Status = "Exited with code 0 (normally)." };
+        Assert.Contains("nothing left to wait for", tools.Run("wait"), StringComparison.Ordinal);
+
+        store.Debug = new StubDebug { State = "not running", Status = "Not running." };
+        Assert.Contains("nothing to wait for", tools.Run("wait"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -525,7 +562,13 @@ public sealed class DebugToolTests
         /// <summary>False to stand in for a process that has not stopped inside the window.</summary>
         public bool Settles { get; init; } = true;
 
-        public string State { get; init; } = "stopped";
+        public string State { get; set; } = "stopped";
+
+        /// <summary>What it becomes once a wait comes back, for a process that stops while waited on.</summary>
+        public string? BecomesOnWait { get; init; }
+
+        /// <summary>Where it is stopped.</summary>
+        public ulong At { get; init; } = 0x140001000;
 
         public string Status { get; init; } = "Stopped at 0x140001000.";
 
@@ -558,7 +601,7 @@ public sealed class DebugToolTests
             State = State,
             Status = Status,
             Recent = Recent,
-            Address = 0x140001000,
+            Address = At,
             TargetLoaded = true,
             Registers = [("rax", 1), ("rbx", 2), ("rcx", 3), ("rdx", 4), ("rip", 0x140001000)],
             Flags = "CF 0  PF 1  AF 0  ZF 1  SF 0  TF 0  IF 1  DF 0  OF 0",
@@ -570,6 +613,14 @@ public sealed class DebugToolTests
         public byte[] ReadMemory(ulong staticVa, int length)
             => "MZ\0\0PE\0\0"u8.ToArray().AsSpan(0, Math.Min(length, 8)).ToArray();
 
-        public bool WaitUntilStopped(TimeSpan timeout) => Settles;
+        public bool WaitUntilStopped(TimeSpan timeout)
+        {
+            if (BecomesOnWait is { } next)
+            {
+                State = next;
+            }
+
+            return Settles;
+        }
     }
 }
