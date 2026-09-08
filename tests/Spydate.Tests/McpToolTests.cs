@@ -293,3 +293,165 @@ public class McpToolTests
         .Where(l => l.StartsWith("0x", StringComparison.Ordinal))
         .ToList();
 }
+
+/// <summary>
+/// The one part of the surface that runs code rather than reading a file. What is tested here is
+/// mostly that it refuses to: an agent gets a debugger only when the host both allows it and has one.
+/// </summary>
+public sealed class DebugToolTests
+{
+    private static SessionStore Open(string binary = Corpus.NotepadX64)
+    {
+        var analysis = Corpus.Analysed(binary);
+        var store = new SessionStore();
+        store.Set(new BinarySession(binary, Corpus.Image(binary), analysis, null,
+            new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero)));
+        return store;
+    }
+
+    [Fact]
+    public void DebuggingIsOffUnlessItWasAskedFor()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default);
+
+        // Every one of them, not just the one that starts a process: state and memory are about a
+        // process that this must not have caused to exist.
+        foreach (string answer in new[]
+                 {
+                     tools.Run("start"),
+                     tools.State(),
+                     tools.Break("0x140001000"),
+                     tools.Memory("0x140001000"),
+                 })
+        {
+            Assert.Contains("--allow-debug", answer, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void AllowingItIsNotEnoughIfTheHostHasNoDebugger()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+
+        // The stdio server is exactly this case: the flag can be given, and there is still nothing
+        // there to drive, so it says so rather than quietly starting one of its own.
+        Assert.Contains("no debugger", tools.Run("start"), StringComparison.Ordinal);
+        Assert.Contains("no debugger", tools.State(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheFlagHasToBeGivenOnTheCommandLineToBeOn()
+    {
+        Assert.False(McpOptions.Default.AllowDebug);
+        Assert.False(McpOptions.Parse([]).AllowDebug);
+        Assert.False(McpOptions.Parse(["--read-only"]).AllowDebug);
+        Assert.True(McpOptions.Parse(["--allow-debug"]).AllowDebug);
+    }
+
+    [Fact]
+    public void AnActionNobodyDefinedIsRefusedByName()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true }) ;
+        store.Debug = new StubDebug();
+
+        string answer = tools.Run("detonate");
+
+        Assert.Contains("no such action", answer, StringComparison.Ordinal);
+        Assert.Contains("step_over", answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunToWithoutSomewhereToRunToSaysSoRatherThanRunning()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        Assert.Contains("needs an address", tools.Run("run_to"), StringComparison.Ordinal);
+        Assert.Empty(stub.Done);
+    }
+
+    [Fact]
+    public void EachActionDrivesTheHostsOwnDebuggerAndReportsWhereItGot()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        tools.Run("continue");
+        tools.Run("step");
+        tools.Run("step_over");
+
+        Assert.Equal(new[] { "continue", "step", "step_over" }, stub.Done);
+
+        // And what comes back is the state after it settled, not the state when it was asked.
+        string state = tools.State();
+        Assert.Contains("stopped at 0x140001000", state, StringComparison.Ordinal);
+        Assert.Contains("rax=", state, StringComparison.Ordinal);
+        Assert.Contains("ZF 1", state, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MemoryComesBackAsHexAndAscii()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = new StubDebug();
+
+        string dump = tools.Memory("0x140001000", 8);
+
+        Assert.Contains("4D 5A", dump, StringComparison.Ordinal);
+        Assert.Contains("MZ", dump, StringComparison.Ordinal);
+    }
+
+    /// <summary>A debugger that records what it was told to do and reports a fixed stop.</summary>
+    private sealed class StubDebug : IDebugControl
+    {
+        public List<string> Done { get; } = [];
+
+        public string? Start()
+        {
+            Done.Add("start");
+            return null;
+        }
+
+        public void Stop() => Done.Add("stop");
+
+        public void Continue() => Done.Add("continue");
+
+        public void StepInstruction() => Done.Add("step");
+
+        public void StepOver() => Done.Add("step_over");
+
+        public void RunTo(ulong staticVa) => Done.Add($"run_to:{staticVa:X}");
+
+        public bool SetBreakpoint(ulong staticVa, bool on)
+        {
+            Done.Add($"break:{staticVa:X}:{on}");
+            return on;
+        }
+
+        public DebugSnapshot Snapshot() => new()
+        {
+            State = "stopped",
+            Status = "Stopped at 0x140001000.",
+            Address = 0x140001000,
+            TargetLoaded = true,
+            Registers = [("rax", 1), ("rbx", 2), ("rcx", 3), ("rdx", 4), ("rip", 0x140001000)],
+            Flags = "CF 0  PF 1  AF 0  ZF 1  SF 0  TF 0  IF 1  DF 0  OF 0",
+            Stack = [(0x1000, 0xDEAD)],
+            Modules = [("notepad.exe", 0x140000000, true)],
+            Breakpoints = [0x140001000],
+        };
+
+        public byte[] ReadMemory(ulong staticVa, int length)
+            => "MZ\0\0PE\0\0"u8.ToArray().AsSpan(0, Math.Min(length, 8)).ToArray();
+
+        public bool WaitUntilStopped(TimeSpan timeout) => true;
+    }
+}

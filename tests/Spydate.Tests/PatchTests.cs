@@ -776,6 +776,16 @@ public sealed class McpPatchToolTests
         Assert.DoesNotContain(names, n => n.Contains("save_patched", StringComparison.Ordinal)
                                           || n.Contains("write_binary", StringComparison.Ordinal)
                                           || n.Contains("apply_patch", StringComparison.Ordinal));
+
+        // The debug tools are the one exception to "everything here reads a file or edits the
+        // project beside it", and they are not a quiet one: every one of them refuses unless the
+        // host both allows debugging and has a debugger to drive. Checked here, next to the property
+        // they are an exception to, so that widening the exception fails in the same place.
+        var store = new SessionStore();
+        var debug = new Spydate.Mcp.Tools.DebugTools(store, McpOptions.Default);
+
+        Assert.Contains(names, n => n.StartsWith("debug_", StringComparison.Ordinal));
+        Assert.Contains("--allow-debug", debug.Run("start"), StringComparison.Ordinal);
     }
 
     [Fact]

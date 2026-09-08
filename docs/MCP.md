@@ -84,8 +84,12 @@ everything and read this file" — and no server can stop a model reading what i
 What the server does instead is confine what a persuaded one can do:
 
 - **The write surface is exactly one file, the `.spydate` project.** The agent can annotate. It
-  cannot write bytes, patch the binary, or run anything. This is load-bearing, not incidental — see
-  DECISIONS.md before adding a tool that changes it.
+  cannot write bytes or patch the binary. This is load-bearing, not incidental — see DECISIONS.md
+  before adding a tool that changes it.
+- **Running it is the one exception, and off by default.** `debug_run`, `debug_break`, `debug_state`
+  and `debug_memory` need both `--allow-debug` and a host that has a debugger to drive. The stdio
+  server has none, so the flag alone enables nothing there; the assistant panel in the window does,
+  and drives the same debugger you are watching. Everything else here reads a file.
 - String output is length-capped, so a kilobyte-long run cannot flood a response.
 - Every list says what it did not show, so an agent cannot mistake a page for the whole.
 

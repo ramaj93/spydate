@@ -12,6 +12,13 @@ public sealed class SessionStore : IDisposable
     /// <summary>The open binary, or null. Tools say so rather than throwing.</summary>
     public BinarySession? Current => _current;
 
+    /// <summary>
+    /// The debugger the tools drive, when the host offers one. Null in the stdio server, which has
+    /// nobody watching the window and nobody to answer "run this binary?" — see
+    /// <see cref="IDebugControl"/>.
+    /// </summary>
+    public IDebugControl? Debug { get; set; }
+
     /// <summary>Replaces whatever was open. The previous session is disposed once nothing is using it.</summary>
     public async Task<BinarySession> OpenAsync(Func<BinarySession> open, CancellationToken cancellationToken)
     {

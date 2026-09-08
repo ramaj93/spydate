@@ -228,30 +228,8 @@ public sealed class CodeTools
 
     private static string More(int count) => count > Listed ? $", +{count - Listed} more" : string.Empty;
 
-    private static string Hex(ulong va, ReadOnlySpan<byte> bytes)
-    {
-        var sb = new StringBuilder();
-        for (int offset = 0; offset < bytes.Length; offset += 16)
-        {
-            int run = Math.Min(16, bytes.Length - offset);
-            sb.Append(CultureInfo.InvariantCulture, $"0x{va + (ulong)offset:X}  ");
-            for (int i = 0; i < 16; i++)
-            {
-                sb.Append(i < run ? bytes[offset + i].ToString("X2", CultureInfo.InvariantCulture) : "  ").Append(' ');
-            }
-
-            sb.Append(' ');
-            for (int i = 0; i < run; i++)
-            {
-                byte b = bytes[offset + i];
-                sb.Append(b is >= 0x20 and < 0x7F ? (char)b : '.');
-            }
-
-            sb.Append('\n');
-        }
-
-        return sb.ToString();
-    }
+    /// <summary>Lifted into HexDump, so the debugger's memory reads render identically to these.</summary>
+    private static string Hex(ulong va, ReadOnlySpan<byte> bytes) => HexDump.Render(bytes, va);
 
     /// <summary>
     /// Words read as pointers, each named when it lands somewhere known. A vtable becomes a list of

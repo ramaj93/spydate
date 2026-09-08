@@ -54,6 +54,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private readonly WorkspaceService _workspace;
     private readonly ISecretStore _secrets;
     private readonly IFileDialogService _dialogs;
+    private readonly DebuggerViewModel _debugger;
     private Views.ProviderSettingsWindow? _providerDialog;
     private AssistantLine? _answer;
     private AnalysisAgent? _agent;
@@ -63,11 +64,12 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     /// <summary>The end of the conversation restored for this binary, or null when there was none.</summary>
     private string? _earlier;
 
-    public AssistantViewModel(WorkspaceService workspace, ISecretStore secrets, IFileDialogService dialogs)
+    public AssistantViewModel(WorkspaceService workspace, ISecretStore secrets, IFileDialogService dialogs, DebuggerViewModel debugger)
     {
         _workspace = workspace;
         _secrets = secrets;
         _dialogs = dialogs;
+        _debugger = debugger;
         Settings = AgentSettings.Load();
 
         // A different binary is a different conversation: the old one refers to addresses that mean
@@ -398,7 +400,15 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             patches: binary.Patches));
 
         var provider = Settings.ToProviderSettings();
-        _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, McpOptions.Default, provider, _earlier);
+        // The window's own debugger, not one of its own. Two processes of the same untrusted binary,
+        // with separate breakpoints and only one of them visible, would be worse than no debugger at
+        // all — and the analyst approved running it once. Debugging is allowed here for the same
+        // reason: a person answers "run this binary?" and is watching the panel while it runs, which
+        // is exactly what the stdio server has none of.
+        _session.Debug = new PanelDebugControl(_debugger);
+        var options = McpOptions.Default with { AllowDebug = true };
+
+        _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, _earlier);
         return _agent;
     }
 

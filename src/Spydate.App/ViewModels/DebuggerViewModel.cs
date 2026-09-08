@@ -325,6 +325,13 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
+    /// <summary>
+    /// Reads the debuggee's memory at an address from the listing. Empty when nothing is running,
+    /// which is not exceptional — it is the ordinary state.
+    /// </summary>
+    public byte[] ReadMemory(ulong staticVa, int length)
+        => _session is { } session ? session.ReadMemory(session.ToRuntime(staticVa), length) : [];
+
     /// <summary>Runs until execution reaches an address, without keeping a breakpoint there.</summary>
     public void RunTo(ulong staticVa)
     {
