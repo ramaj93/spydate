@@ -52,7 +52,7 @@ public sealed partial class MainViewModel : ObservableObject
                 RunToCursorCommand.NotifyCanExecuteChanged();
             }
         };
-        debugger.StoppedAt += (_, va) => OpenTarget(new DisassemblyTarget(va, NameOf(va)));
+        debugger.StoppedAt += (_, va) => ShowWhereItStopped(va);
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
         RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
@@ -156,6 +156,30 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     private string NameOf(ulong va) => Binary?.Analysis is { } a ? a.NameFor(va) : $"0x{va:X}";
+
+    /// <summary>
+    /// Shows where execution stopped, in the function it stopped inside.
+    ///
+    /// The function containing the address, not the address itself. Opening a document straight at
+    /// a stop address asks the engine for a function starting there, and it makes one — so stepping
+    /// through <c>gstring_resize</c> spawned <c>loc_180005F45</c>, then <c>loc_180005F46</c>, each a
+    /// fabricated overlapping copy of the same code, each in its own tab. The marker did move; it
+    /// moved into a new document every time, so the tab being watched never changed and the whole
+    /// thing looked frozen. It also minted a junk function into the analysis on every single step.
+    ///
+    /// Stopping somewhere no function has been found is still worth showing, and that case opens a
+    /// listing at the address as before — it is the one place where making one is the right answer.
+    /// </summary>
+    private void ShowWhereItStopped(ulong va)
+    {
+        if (Binary?.Analysis is { } analysis && analysis.FunctionContaining(va) is { } function)
+        {
+            OpenTarget(new DisassemblyTarget(function.EntryVa, NameOf(function.EntryVa)));
+            return;
+        }
+
+        OpenTarget(new DisassemblyTarget(va, NameOf(va)));
+    }
 
     /// <summary>Runs until the caret, without leaving a breakpoint behind.</summary>
     [RelayCommand(CanExecute = nameof(CanRunToCursor))]

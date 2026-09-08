@@ -715,7 +715,13 @@ public sealed class DebugSession : IDisposable
                     _sawInitialBreak = true;
                     PlantAll();
                     CurrentAddress = e.ExceptionAddress;
-                    Report("stopped", "stopped at the loader break, before the program's own code", ToStatic(e.ExceptionAddress));
+                    // Reportable, not ToStatic. The loader break is in ntdll — never in the image
+                    // being read — and ToStatic hands back an address it cannot translate unchanged,
+                    // so this reported a runtime address in another module as though it were a place
+                    // in the listing. The window then opened a document for it: a fabricated
+                    // "function" of nought blocks and nought instructions, which is what the analyst
+                    // was left staring at, wondering why the marker never moved.
+                    Report("stopped", "stopped at the loader break, before the program's own code", Reportable(e.ExceptionAddress));
                     return (true, Native.DBG_CONTINUE);
                 }
 

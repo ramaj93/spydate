@@ -434,6 +434,47 @@ public sealed class DebuggerTests
         return false;
     }
     /// <summary>
+    /// The loader break happens in ntdll, never in the image being read. Reported as an address the
+    /// listing knows, the window opens a document for it - a fabricated function of nought blocks
+    /// and nought instructions - and that is what the analyst then watches for a marker that cannot
+    /// move, because there is nothing there to move over.
+    /// </summary>
+    [Fact]
+    public void AStopOutsideTheImageIsNotOfferedAsAPlaceInTheListing()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        DebugEvent? stop = null;
+        var reached = new ManualResetEventSlim();
+
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped" && stop is null)
+            {
+                stop = e;
+                reached.Set();
+            }
+        };
+
+        // A real base and size, so the translation is live and its bounds actually apply.
+        session.Start(Trivial, imageBase: 0x140000000, imageSize: 0x100000, arguments: "where.exe");
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(20)), "never reached the loader break");
+
+        Assert.NotNull(stop);
+        Assert.Contains("loader break", stop!.Text, StringComparison.Ordinal);
+
+        // It says where it is in words, and offers no address at all - because the one it has
+        // belongs to another module and would be read as belonging to this one.
+        Assert.Null(stop.Address);
+
+        session.Stop();
+    }
+
+    /// <summary>
     /// Stepping while sitting on a breakpoint, which is where stepping is nearly always done.
     ///
     /// Getting off a breakpoint uses the trap flag too, and the handler treated the resulting
