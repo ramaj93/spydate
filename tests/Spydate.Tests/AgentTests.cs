@@ -72,11 +72,11 @@ public class AgentTests
 
         using var agent = new AnalysisAgent(fake, Store(Corpus.NotepadX64), McpOptions.Default, new ProviderSettings { Model = "test" });
 
-        var steps = new List<AgentStep>();
-        string answer = await agent.AskAsync("what is in here?", new Progress<AgentStep>(steps.Add));
+        var steps = new Steps();
+        string answer = await agent.AskAsync("what is in here?", steps);
 
         Assert.Equal("there are functions", answer);
-        Assert.Contains(steps, s => s.Kind == "tool" && s.Text.StartsWith("list_functions(", StringComparison.Ordinal));
+        Assert.Contains(steps.All, s => s.Kind == "tool" && s.Text.StartsWith("list_functions(", StringComparison.Ordinal));
 
         // The tool's own output, not a summary of it, went back to the model.
         Assert.Contains(fake.ToolResults, r => r.Contains("0x", StringComparison.Ordinal) && r.Contains("blocks", StringComparison.Ordinal));
@@ -317,10 +317,10 @@ public class AgentTests
             fake, Store(Corpus.NotepadX64), McpOptions.Default,
             new ProviderSettings { Model = "test", Stream = false });
 
-        var steps = new List<AgentStep>();
-        await agent.AskAsync("what is in here?", new Progress<AgentStep>(steps.Add));
+        var steps = new Steps();
+        await agent.AskAsync("what is in here?", steps);
 
-        Assert.Contains(steps, s => s.Kind == "tool" && s.Text.StartsWith("list_functions(", StringComparison.Ordinal));
+        Assert.Contains(steps.All, s => s.Kind == "tool" && s.Text.StartsWith("list_functions(", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -708,6 +708,148 @@ public class AgentTests
         var store = new DpapiSecretStore(Path.GetTempPath());
 
         Assert.Throws<ArgumentException>(() => store.Get(@"..\..\something"));
+    }
+
+    // ------------------------------------------------------------------
+    // Running out of tool calls, which is not the same as being finished
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task SpendingTheWholeToolBudgetIsSaidOutLoudRatherThanJustHappening()
+    {
+        // The loop takes the tools away for its last request, so a well-behaved model answers - and
+        // the answer reads like a conclusion when it is really a model finding its tools gone. The
+        // turn is not broken; what was missing is anyone saying why it ended.
+        var fake = new BudgetChatClient(callsAnyway: false);
+        using var agent = new AnalysisAgent(fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test", MaxToolCalls = 3, Stream = false });
+
+        var steps = new Steps();
+        string answer = await agent.AskAsync("go", steps);
+
+        Assert.Equal("as far as I got", answer);
+        Assert.Contains(steps.All, s => s.Kind == "note" && s.Text.Contains("all 3 tool calls", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ACallMadeAfterTheToolsWereTakenAwayStillEndsInAnAnswer()
+    {
+        // The hard shape: the model asks for a tool it can no longer be given, so nothing runs and
+        // the turn has no answer at all. Before, that reached the panel as silence - the assistant
+        // appearing to quit mid-investigation with no reason given and no Stop having been clicked.
+        var fake = new BudgetChatClient(callsAnyway: true);
+        using var agent = new AnalysisAgent(fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test", MaxToolCalls = 3, Stream = false });
+
+        var steps = new Steps();
+        string answer = await agent.AskAsync("go", steps);
+
+        Assert.Equal("as far as I got", answer);
+        Assert.Contains(steps.All, s => s.Kind == "note" && s.Text.Contains("about to call list_functions", StringComparison.Ordinal));
+
+        // And the turn it was told about is one it was actually asked to sum up, without its tools.
+        Assert.Contains(fake.Asked, m => m.Text.Contains("last of the 3 tool calls", StringComparison.Ordinal));
+        Assert.Contains(0, fake.ToolsOffered);
+    }
+
+    [Fact]
+    public async Task TheHalfPairLeftBehindByTheBudgetDoesNotReachTheNextQuestion()
+    {
+        // A call with no result is what providers reject outright, so leaving one in the history
+        // would not spoil the turn that produced it - it would break the next one, somewhere the
+        // cause is no longer visible.
+        var fake = new BudgetChatClient(callsAnyway: true);
+        using var agent = new AnalysisAgent(fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test", MaxToolCalls = 3, Stream = false });
+
+        await agent.AskAsync("go");
+
+        var answered = agent.History.SelectMany(m => m.Contents).OfType<FunctionResultContent>()
+            .Select(r => r.CallId).ToHashSet(StringComparer.Ordinal);
+        var orphans = agent.History.SelectMany(m => m.Contents).OfType<FunctionCallContent>()
+            .Where(c => !answered.Contains(c.CallId)).ToList();
+
+        Assert.Empty(orphans);
+
+        // And it ends on something said, not on a tool result: a conversation caught mid-exchange is
+        // the shape a thinking model refuses to be handed back.
+        Assert.Equal(ChatRole.Assistant, agent.History[^1].Role);
+        Assert.NotEmpty(agent.History[^1].Text);
+    }
+
+    /// <summary>
+    /// The steps a turn reported, collected as they are reported.
+    ///
+    /// Not <see cref="Progress{T}"/>, which is what the panel uses and is right there: it captures a
+    /// synchronisation context so the UI is updated on the UI thread, and a test has none, so every
+    /// callback is queued to the thread pool instead. The steps then arrive some time after the turn
+    /// they belong to has finished — usually before the assertion that reads them, sometimes not.
+    /// That is a test which passes for reasons unrelated to what it is testing, and it was failing
+    /// about one run in twenty for the same reason. Reporting straight onto the list removes the
+    /// question entirely.
+    /// </summary>
+    private sealed class Steps : IProgress<AgentStep>
+    {
+        private readonly List<AgentStep> _steps = new();
+
+        public IReadOnlyList<AgentStep> All => _steps;
+
+        public void Report(AgentStep value) => _steps.Add(value);
+    }
+
+    /// <summary>
+    /// A model with more to do than the budget allows, so the loop always runs out on it.
+    ///
+    /// <paramref name="callsAnyway"/> is the difference between the two ways that ends. With it off,
+    /// the model does the reasonable thing when the loop takes its tools away for the last request
+    /// and answers in words. With it on it asks for a call regardless — which some do — and the turn
+    /// comes back with no answer and a call that nothing ran. Either way it answers once it is told
+    /// in words that the budget is gone, which is the only thing the wrap-up request adds.
+    /// </summary>
+    private sealed class BudgetChatClient(bool callsAnyway) : IChatClient
+    {
+        private int _turn;
+
+        /// <summary>How many tools each request was offered, so the wrap-up can be shown to have none.</summary>
+        public List<int> ToolsOffered { get; } = new();
+
+        /// <summary>The last messages sent, so the nudge that went with the wrap-up can be read.</summary>
+        public List<ChatMessage> Asked { get; } = new();
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            int tools = options?.Tools?.Count ?? 0;
+            ToolsOffered.Add(tools);
+            Asked.Clear();
+            Asked.AddRange(messages);
+
+            bool told = Asked.Any(m => m.Text.Contains("tool calls allowed in one turn", StringComparison.Ordinal));
+            if (!told && (tools > 0 || callsAnyway))
+            {
+                return Task.FromResult(new ChatResponse(new ChatMessage(
+                    ChatRole.Assistant,
+                    new List<AIContent> { new FunctionCallContent($"c{++_turn}", "list_functions", new Dictionary<string, object?> { ["limit"] = 1 }) })));
+            }
+
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "as far as I got")));
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            foreach (var content in (await GetResponseAsync(messages, options, cancellationToken).ConfigureAwait(false)).Messages[0].Contents)
+            {
+                yield return new ChatResponseUpdate(ChatRole.Assistant, new List<AIContent> { content });
+            }
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
     }
 
     /// <summary>

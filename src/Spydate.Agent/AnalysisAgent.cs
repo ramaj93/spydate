@@ -52,6 +52,9 @@ public sealed class AnalysisAgent : IDisposable
     private readonly bool _stream;
     private readonly int _maxHistoryChars;
 
+    /// <summary>How many round trips the tool loop is allowed before it gives up on this turn.</summary>
+    private readonly int _maxToolCalls;
+
     /// <summary>
     /// Where to report the turn in progress, while there is one. A field rather than a parameter
     /// because the tool invoker is wired up once, in the constructor, and has to reach whichever
@@ -97,6 +100,7 @@ public sealed class AnalysisAgent : IDisposable
         _annotations = store.Current?.Analysis?.Annotations;
         _stream = settings.Stream;
         _maxHistoryChars = settings.MaxHistoryChars;
+        _maxToolCalls = settings.MaxToolCalls;
         _options = new ChatOptions { Tools = ToolsFor(store, options).Cast<AITool>().ToList() };
         _history.Add(new ChatMessage(ChatRole.System, SystemPrompt));
 
@@ -221,16 +225,59 @@ public sealed class AnalysisAgent : IDisposable
             }
         }
 
+        // The other way a turn ends without meaning to: the tool loop is allowed a fixed number of
+        // round trips, and it stops at that number whether or not the work was finished.
+        //
+        // What it does then is quiet rather than loud. The last request is made with the tools taken
+        // away, so the model finds them gone mid-investigation and answers from whatever it happens
+        // to be holding - a short, oddly final paragraph in the middle of a job. Nobody is told: not
+        // the analyst, who sees a turn that stopped for no stated reason and did not look stopped,
+        // and not the model, which is never given the chance to say where it had got to. A session
+        // that reads a few functions and steps a debugger reaches the limit easily.
+        //
+        // So the limit is said out loud. It is a budget, not a failure, and the useful thing to know
+        // about a budget is that it ran out and can be extended.
+        bool rescued = false;
+        if (Used(response) >= _maxToolCalls || Unanswered(response) is not null)
+        {
+            if (Unanswered(response) is { } abandoned)
+            {
+                // Worse: asked for a call after the tools were taken away, so it was never run. The
+                // turn has no answer at all, and the half-pair left behind is exactly what providers
+                // reject - left in place it would break the next question rather than this one.
+                progress?.Report(AgentStep.Note(
+                    $"— that is all {_maxToolCalls} tool calls this turn is allowed, and it was still working "
+                    + $"(it was about to call {abandoned}). Asking it to sum up what it has. —"));
+
+                _history.AddRange(Salvage(response.Messages));
+                Close(response, abandoned);
+                rescued = true;
+
+                // Without tools on purpose. The budget is spent, so the one thing left worth having
+                // is words, and asking with tools still offered invites another call that cannot be
+                // run - which is how a limit meant to bound the work becomes a loop that never ends.
+                response = await Retry(store, OutOfCalls(_maxToolCalls), cancellationToken, WordsOnly).ConfigureAwait(false);
+            }
+            else
+            {
+                // It did answer, but it answered because its tools were taken away rather than
+                // because it was done. Nothing needs re-asking; the answer just needs reading in
+                // that light.
+                progress?.Report(AgentStep.Note(
+                    $"— it used all {_maxToolCalls} tool calls this turn is allowed and answered with what it had. "
+                    + $"Say carry on for another {_maxToolCalls}, or raise the limit in Configure. —"));
+            }
+        }
+
         // Salvaged only when something went wrong with it. A turn that behaved is added as it came
         // back, rather than rebuilt into equivalent messages for no reason.
-        _history.AddRange(degraded ? Salvage(response.Messages) : response.Messages);
+        _history.AddRange(degraded || rescued ? Salvage(response.Messages) : response.Messages);
 
         string answer = response.Text;
         progress?.Report(AgentStep.Said(answer));
         return answer;
     }
 
-    /// <summary>
     /// <summary>
     /// A failed turn with everything real about it kept and only the template dropped.
     ///
@@ -284,6 +331,49 @@ public sealed class AnalysisAgent : IDisposable
         // And a result whose call did not survive is exactly as broken as a call with no result.
         return kept.Where(m => m.Contents.OfType<FunctionResultContent>().All(r => survived.Contains(r.CallId)));
     }
+
+    /// <summary>How many tools the turn actually ran, which is how much of the budget it spent.</summary>
+    private static int Used(ChatResponse response)
+        => response.Messages.SelectMany(m => m.Contents).OfType<FunctionResultContent>().Count();
+
+    /// <summary>
+    /// The name of a call nothing ran, or null when every call the turn made was answered.
+    ///
+    /// This is what a turn looks like when the model asks for a tool after the loop has taken the
+    /// tools away: the call is in the transcript, no result ever follows it, and the turn has no
+    /// answer. It is also a half-pair, which providers reject outright — so noticing it is not only
+    /// about explaining this turn, it is what keeps it out of the next one.
+    /// </summary>
+    private static string? Unanswered(ChatResponse response)
+    {
+        var answered = response.Messages
+            .SelectMany(m => m.Contents)
+            .OfType<FunctionResultContent>()
+            .Select(r => r.CallId)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return response.Messages
+            .SelectMany(m => m.Contents)
+            .OfType<FunctionCallContent>()
+            .FirstOrDefault(c => !answered.Contains(c.CallId))?.Name;
+    }
+
+    /// <summary>Nothing to call with, which is what makes the wrap-up request certain to end.</summary>
+    private static readonly ChatOptions WordsOnly = new();
+
+    /// <summary>
+    /// What to say when the budget is spent.
+    ///
+    /// It says the work stands, because it does — a process is still running, a breakpoint is still
+    /// set — and the failure being avoided is a model that reads "you ran out" as "start again".
+    /// And it says how to get more, because the person reading the answer is the one who can grant
+    /// it, and an answer that ends in a dead end is worth much less than one that ends in a choice.
+    /// </summary>
+    private static string OutOfCalls(int budget) =>
+        $"That was the last of the {budget} tool calls allowed in one turn, so nothing further can run "
+        + "before you answer. Everything above did run and still stands. Say what you found and what "
+        + "you would do next, in words — whoever asked can reply \"carry on\" to give you a fresh "
+        + "budget with all of this still in front of you. Do not start over.";
 
     /// <summary>
     /// Rounds off a turn that stopped in the middle of itself.
@@ -344,7 +434,7 @@ public sealed class AnalysisAgent : IDisposable
     /// The history is untouched — the question is still the last thing in it, and the answer that
     /// failed was never added — so this asks exactly what was asked the first time.
     /// </summary>
-    private async Task<ChatResponse> Retry(AnnotationStore? store, string? correction, CancellationToken cancellationToken)
+    private async Task<ChatResponse> Retry(AnnotationStore? store, string? correction, CancellationToken cancellationToken, ChatOptions? options = null)
     {
         var wasSource = store?.Source ?? AnnotationSource.User;
         if (store is not null)
@@ -376,8 +466,8 @@ public sealed class AnalysisAgent : IDisposable
             // when something goes wrong is one whose failures cannot be reasoned about. What makes
             // this attempt different is the history it carries and, on the second go, the correction.
             return _stream
-                ? await StreamAsync(messages, new StringBuilder(), _progress, cancellationToken).ConfigureAwait(false)
-                : await _client.GetResponseAsync(messages, _options, cancellationToken).ConfigureAwait(false);
+                ? await StreamAsync(messages, new StringBuilder(), _progress, cancellationToken, options).ConfigureAwait(false)
+                : await _client.GetResponseAsync(messages, options ?? _options, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -394,12 +484,12 @@ public sealed class AnalysisAgent : IDisposable
     /// the history is the same shape it would have been un-streamed and the next turn sees finished
     /// messages rather than fragments.
     /// </summary>
-    private async Task<ChatResponse> StreamAsync(IEnumerable<ChatMessage> messages, StringBuilder said, IProgress<AgentStep>? progress, CancellationToken cancellationToken)
+    private async Task<ChatResponse> StreamAsync(IEnumerable<ChatMessage> messages, StringBuilder said, IProgress<AgentStep>? progress, CancellationToken cancellationToken, ChatOptions? options = null)
     {
         var updates = new List<ChatResponseUpdate>();
 
         await foreach (var update in _client
-                           .GetStreamingResponseAsync(messages, _options, cancellationToken)
+                           .GetStreamingResponseAsync(messages, options ?? _options, cancellationToken)
                            .ConfigureAwait(false))
         {
             updates.Add(update);
