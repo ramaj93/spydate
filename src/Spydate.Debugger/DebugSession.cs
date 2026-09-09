@@ -123,6 +123,33 @@ public sealed class DebugSession : IDisposable
     /// <summary>Which thread the last event came from, and so which one everything else is about.</summary>
     public uint CurrentThreadId => _threadId;
 
+    /// <summary>
+    /// The thread being looked at and stepped. Defaults to whichever one stopped.
+    ///
+    /// Windows decides which thread reports an event; it does not decide which one an analyst is
+    /// interested in. A breakpoint hit on a worker leaves the thread you were following exactly
+    /// where it was, and until this existed there was no way to go back to it.
+    /// </summary>
+    public uint SelectedThreadId
+    {
+        get
+        {
+            // A thread that has since exited is not a thread to step. Falling back to whichever one
+            // stopped is the only sane answer, and silently stepping a dead id is not one.
+            lock (_threads)
+            {
+                return _selected != 0 && _threads.ContainsKey(_selected) ? _selected : _threadId;
+            }
+        }
+
+        set => _selected = value;
+    }
+
+    private uint _selected;
+
+    /// <summary>Threads this suspended for a step, so exactly those are resumed afterwards.</summary>
+    private readonly List<uint> _held = new();
+
     /// <summary>Every module loaded right now, in load order.</summary>
     public IReadOnlyList<LoadedModule> Modules
     {
@@ -233,7 +260,12 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
-    public void Continue() => Post(() => _stepping = false);
+    /// <summary>Lets it run on, and lets go of anything a step was holding.</summary>
+    public void Continue() => Post(() =>
+    {
+        _stepping = false;
+        ReleaseOthers();
+    });
 
     /// <summary>One instruction, then stop again. Into a call, not over it.</summary>
     public void StepInstruction() => Post(() => Trap());
@@ -325,9 +357,10 @@ public sealed class DebugSession : IDisposable
     private void Trap()
     {
         _stepping = true;
+        uint stepping = SelectedThreadId;
 
         using var context = new ThreadContext();
-        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, stepping);
         if (thread == IntPtr.Zero)
         {
             return;
@@ -340,6 +373,64 @@ public sealed class DebugSession : IDisposable
         }
 
         Native.CloseHandle(thread);
+
+        // Every other thread is held for the duration of the step.
+        //
+        // Continuing lets the whole process run, and one instruction is long enough for another
+        // thread to reach a breakpoint, take a fault, or simply move — so a step would report from
+        // somewhere else entirely and the thread being followed would not have moved at all. Holding
+        // the others makes "step" mean what it says: this thread, one instruction.
+        HoldOthers(stepping);
+    }
+
+    /// <summary>
+    /// Suspends every thread but one, remembering which so they can be let go again.
+    ///
+    /// A suspend count, not a flag: a thread the debuggee itself suspended must not be resumed by
+    /// us, so only the ones actually stopped here are recorded and only those are started again.
+    /// </summary>
+    private void HoldOthers(uint except)
+    {
+        _held.Clear();
+
+        foreach (var thread in Threads)
+        {
+            if (thread.Id == except)
+            {
+                continue;
+            }
+
+            var handle = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, thread.Id);
+            if (handle == IntPtr.Zero)
+            {
+                continue;
+            }
+
+            if (Native.SuspendThread(handle) != uint.MaxValue)
+            {
+                _held.Add(thread.Id);
+            }
+
+            Native.CloseHandle(handle);
+        }
+    }
+
+    /// <summary>Lets go of everything <see cref="HoldOthers"/> took, and nothing else.</summary>
+    private void ReleaseOthers()
+    {
+        foreach (uint id in _held)
+        {
+            var handle = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, id);
+            if (handle == IntPtr.Zero)
+            {
+                continue;
+            }
+
+            Native.ResumeThread(handle);
+            Native.CloseHandle(handle);
+        }
+
+        _held.Clear();
     }
 
     /// <summary>
@@ -448,6 +539,7 @@ public sealed class DebugSession : IDisposable
     public void Stop()
     {
         _stopping.Cancel();
+        ReleaseOthers();
         if (_process != IntPtr.Zero)
         {
             Native.TerminateProcess(_process, 0);
@@ -579,6 +671,7 @@ public sealed class DebugSession : IDisposable
                         _threads.Remove(e.dwThreadId);
                     }
 
+                    _held.Remove(e.dwThreadId);
                     break;
 
                 case Native.LOAD_DLL_DEBUG_EVENT:
@@ -814,6 +907,10 @@ public sealed class DebugSession : IDisposable
                 // Whether it came straight here or by way of a re-arm, one instruction has run and
                 // a step was asked for, so this is where it stops.
                 _stepping = false;
+
+                // The step is over, so whatever was held for it goes free. Before the stop is
+                // reported, because what is reported next is a session that can be continued.
+                ReleaseOthers();
                 CurrentAddress = e.ExceptionAddress;
                 Report("stopped", $"stepped to 0x{ToStatic(e.ExceptionAddress):X}", Reportable(e.ExceptionAddress));
                 return (true, Native.DBG_CONTINUE);

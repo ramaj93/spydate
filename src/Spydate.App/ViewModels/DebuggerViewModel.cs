@@ -531,12 +531,43 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private void RefreshThreads()
     {
         uint current = _session?.CurrentThreadId ?? 0;
+        uint chosen = _session?.SelectedThreadId ?? 0;
 
         Threads.Clear();
         foreach (var thread in _session?.Threads ?? [])
         {
-            Threads.Add(new ThreadRow(thread.Id, $"0x{thread.StartAddress:X16}", thread.Id == current));
+            var row = new ThreadRow(thread.Id, $"0x{thread.StartAddress:X16}", thread.Id == current);
+            Threads.Add(row);
+
+            if (thread.Id == chosen)
+            {
+                _quiet = true;
+                SelectedThread = row;
+                _quiet = false;
+            }
         }
+    }
+
+    /// <summary>
+    /// Which thread is being looked at. Setting it changes what the registers show and what a step
+    /// will step — the two have to be the same thread, or the registers are describing one thread
+    /// while the buttons act on another.
+    /// </summary>
+    [ObservableProperty]
+    private ThreadRow? _selectedThread;
+
+    /// <summary>True while the selection is being set from the debuggee rather than by a person.</summary>
+    private bool _quiet;
+
+    partial void OnSelectedThreadChanged(ThreadRow? value)
+    {
+        if (_quiet || value is null || _session is null)
+        {
+            return;
+        }
+
+        _session.SelectedThreadId = value.Id;
+        RefreshRegisters();
     }
 
     private void RefreshModules()
@@ -558,7 +589,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private void RefreshRegisters()
     {
-        var current = _session?.Registers() ?? [];
+        // The thread being looked at, which is the stopped one until somebody picks another. Every
+        // thread is suspended at a stop, so any of them can be read.
+        var current = (_session is { } session ? session.RegistersOf(session.SelectedThreadId) : null) ?? [];
 
         Registers.Clear();
         foreach (var (name, value) in current)

@@ -266,4 +266,10 @@ internal static partial class Native
     internal static unsafe partial bool SetThreadContext(IntPtr hThread, byte* lpContext);
 
     internal const uint THREAD_ALL_ACCESS = 0x1FFFFF;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint SuspendThread(IntPtr hThread);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial uint ResumeThread(IntPtr hThread);
 }

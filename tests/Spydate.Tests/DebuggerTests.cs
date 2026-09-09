@@ -434,6 +434,60 @@ public sealed class DebuggerTests
         return false;
     }
     /// <summary>
+    /// Stepping a thread the analyst picked, rather than whichever one Windows last reported.
+    ///
+    /// Continuing lets the whole process run, and one instruction is long enough for another thread
+    /// to move - so the others are held for the duration and let go afterwards. Nothing else in the
+    /// session may be left suspended once the step is over, or continuing afterwards runs a program
+    /// with most of it frozen.
+    /// </summary>
+    [Fact]
+    public void SteppingFollowsTheChosenThreadAndLetsTheRestGoAfterwards()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
+
+        // Whichever one reported, until something says otherwise.
+        Assert.NotEqual(0u, session.CurrentThreadId);
+        Assert.Equal(session.CurrentThreadId, session.SelectedThreadId);
+
+        ulong before = session.RegistersOf(session.SelectedThreadId)!.Single(r => r.Name == "rip").Value;
+        session.StepInstruction();
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped after the step");
+
+        Assert.NotEqual(before, session.RegistersOf(session.SelectedThreadId)!.Single(r => r.Name == "rip").Value);
+
+        // And it runs on afterwards, which it could not if anything were still held.
+        var exited = new ManualResetEventSlim();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "exited")
+            {
+                exited.Set();
+            }
+        };
+
+        session.Continue();
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(20)), "it never finished, so a thread was left suspended");
+    }
+
+    [Fact]
+    public void AThreadThatHasGoneIsNotTheOneStepped()
+    {
+        using var session = new DebugSession();
+
+        // Nothing running, so no thread of that id exists and the choice cannot stand.
+        session.SelectedThreadId = 999999;
+        Assert.Equal(session.CurrentThreadId, session.SelectedThreadId);
+    }
+
+    /// <summary>
     /// The loader break happens in ntdll, never in the image being read. Reported as an address the
     /// listing knows, the window opens a document for it - a fabricated function of nought blocks
     /// and nought instructions - and that is what the analyst then watches for a marker that cannot

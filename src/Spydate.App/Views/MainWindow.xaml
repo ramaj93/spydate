@@ -481,6 +481,9 @@
 
                                             <DataGrid Grid.Column="0" ItemsSource="{Binding Threads}" AutoGenerateColumns="False"
                                                       IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                      SelectedItem="{Binding SelectedThread, Mode=TwoWay}"
+                                                      SelectionMode="Single" SelectionUnit="FullRow"
+                                                      ToolTip="Pick a thread to read its registers and to step it"
                                                       AutomationProperties.Name="Threads">
                                                 <DataGrid.Columns>
                                                     <DataGridTextColumn Header="tid" Binding="{Binding Id}">
