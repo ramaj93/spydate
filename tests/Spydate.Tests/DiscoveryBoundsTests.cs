@@ -43,6 +43,81 @@ public class DiscoveryBoundsTests
     }
 
     [Fact]
+    public void AJumpToAFunctionOfItsOwnIsATailCallAndNotPartOfThisOne()
+    {
+        // mov rcx, [rcx+0x80] ; jmp +0x20   — the shape of every vtable forwarder there is.
+        var code = new byte[]
+        {
+            0x48, 0x8B, 0x89, 0x80, 0x00, 0x00, 0x00,  // mov rcx, [rcx+0x80]
+            0xEB, 0x18,                                // jmp 0x140001021
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,  // padding
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+            0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+            0xCC, 0xCC,
+            0x48, 0x83, 0xEC, 0x28,                    // 0x140001021: sub rsp, 0x28   (the callee)
+            0x48, 0x83, 0xC4, 0x28,                    // add rsp, 0x28
+            0xC3,                                      // ret
+        };
+
+        ulong callee = Entry + 0x21;
+
+        var thunk = Discover(code, new DiscoveryOptions { IsFunctionStart = va => va == callee });
+        var absorbed = Discover(code);
+
+        // Two instructions, one block: what the thunk actually is.
+        Assert.Equal(2, thunk.InstructionCount);
+        Assert.Single(thunk.Blocks);
+
+        // The callee is a callee, not a piece of this function. Recording it is what keeps it
+        // reachable — it is the only thing that says the two are connected at all.
+        Assert.Contains(callee, thunk.CallTargets);
+        Assert.Contains(thunk.Notes, n => n.Contains("Tail call", StringComparison.Ordinal));
+
+        // Followed, it swallows the callee whole, which is what used to happen: a two-instruction
+        // forwarder returned as the body of the method it forwards to, under the forwarder's name.
+        Assert.True(absorbed.InstructionCount > thunk.InstructionCount);
+        Assert.Contains(absorbed.Instructions, i => i.Va == callee);
+    }
+
+    [Fact]
+    public void AJumpToSomewhereNoFunctionBeginsIsStillJustAJump()
+    {
+        // The same bytes. Nothing claims the target, so it is an ordinary branch inside this
+        // function and following it is the only right thing to do — a rule that cut every jump
+        // would take the back edge out of every loop.
+        var code = new byte[]
+        {
+            0x48, 0x85, 0xC9,              // test rcx, rcx
+            0xEB, 0x01,                    // jmp +1
+            0xCC,                          // padding
+            0xC3,                          // ret
+        };
+
+        var followed = Discover(code, new DiscoveryOptions { IsFunctionStart = _ => false });
+
+        Assert.Contains(followed.Instructions, i => i.Va == Entry + 6);
+        Assert.DoesNotContain(followed.Notes, n => n.Contains("Tail call", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AJumpBackToTheFunctionsOwnEntryIsALoopRatherThanACallToItself()
+    {
+        // A tail-recursive function jumps to its own entry, and its own entry is a function start.
+        // Cutting there would lose the loop and leave a function that appears to fall off its end.
+        var code = new byte[]
+        {
+            0x48, 0xFF, 0xC9,              // dec rcx
+            0x75, 0xFB,                    // jne -5  (back to the entry)
+            0xC3,                          // ret
+        };
+
+        var looped = Discover(code, new DiscoveryOptions { IsFunctionStart = va => va == Entry });
+
+        Assert.DoesNotContain(looped.Notes, n => n.Contains("Tail call", StringComparison.Ordinal));
+        Assert.Contains(looped.Instructions, i => i.Va == Entry + 5);
+    }
+
+    [Fact]
     public void IndirectCallToNoReturnSlotEndsThePath()
     {
         // call qword ptr [rip+0x100] ; ret   — the slot is an IAT entry for ExitProcess.

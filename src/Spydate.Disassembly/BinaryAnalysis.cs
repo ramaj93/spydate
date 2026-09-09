@@ -78,6 +78,9 @@ public sealed class BinaryAnalysis
         options ??= DiscoveryOptions.Default;
         _options = options;
         var discoveryOptions = options.IsNoReturn is null ? options with { IsNoReturn = IsNoReturn } : options;
+        discoveryOptions = discoveryOptions.IsFunctionStart is null
+            ? discoveryOptions with { IsFunctionStart = IsFunctionStart }
+            : discoveryOptions;
         _discovery = new FunctionDiscovery(Source, Disassembler, Symbols, discoveryOptions);
         _candidateDiscovery = new FunctionDiscovery(Source, Disassembler, Symbols, discoveryOptions with { MaxInstructionsPerFunction = CandidateInstructionBudget });
         _xrefExtractor = new XrefExtractor(Source);
@@ -639,6 +642,21 @@ public sealed class BinaryAnalysis
         lock (_noReturnGate)
         {
             return _bounds.TryGetValue(va, out ulong end) ? end : null;
+        }
+    }
+
+    /// <summary>
+    /// True when the unwind table says a function begins at <paramref name="va"/>.
+    ///
+    /// Only entries that stand for a whole function count. A chained entry describes a piece of one
+    /// that has been moved elsewhere — a cold path, usually — and a jump into that is a jump within
+    /// the same function, so it must go on being followed.
+    /// </summary>
+    public bool IsFunctionStart(ulong va)
+    {
+        lock (_noReturnGate)
+        {
+            return _bounds.ContainsKey(va);
         }
     }
 

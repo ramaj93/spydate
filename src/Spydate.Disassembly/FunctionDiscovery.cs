@@ -40,6 +40,19 @@ public sealed record DiscoveryOptions
     /// </summary>
     public bool FollowJumpTables { get; init; } = true;
 
+    /// <summary>
+    /// True when an address is where some other function begins — on x64, that it has an unwind
+    /// record of its own.
+    ///
+    /// It is asked about the target of a direct <c>jmp</c>, which is the one branch that can leave a
+    /// function altogether. A compiler emits one for a tail call, and it is indistinguishable from
+    /// an ordinary jump by its bytes: the only thing that separates <c>jmp</c> to a label from
+    /// <c>jmp</c> to a whole other function is whether something else already claims the target.
+    /// The unwind table answers exactly that, and answers it before any of this runs, so the reply
+    /// does not depend on what has been discovered yet.
+    /// </summary>
+    public Func<ulong, bool>? IsFunctionStart { get; init; }
+
     public static DiscoveryOptions Default { get; } = new();
 }
 
@@ -133,8 +146,30 @@ public sealed class FunctionDiscovery
                     case InstructionFlow.UnconditionalBranch:
                         if (ins.BranchTargetVa is { } t)
                         {
-                            leaders.Add(t);
-                            work.Push(t);
+                            // A jump to somewhere another function begins is a tail call, and the
+                            // function it lands in is not part of this one.
+                            //
+                            // Followed, it was: the two-instruction thunk that loads a field and
+                            // jumps to a method came back as that method, seventy-odd blocks of it,
+                            // under the thunk's name and with the thunk's address in the header. The
+                            // body then read as one function whose addresses jumped to a region
+                            // belonging to another - which is exactly how it was described when
+                            // somebody hit it. The callee is discovered separately and says the same
+                            // thing once, where it belongs.
+                            if (t != entryVa && (_options.IsFunctionStart?.Invoke(t) ?? false))
+                            {
+                                if (!callTargets.Contains(t))
+                                {
+                                    callTargets.Add(t);
+                                }
+
+                                notes.Add($"Tail call at 0x{ins.Va:X} to 0x{t:X}, which is a function of its own.");
+                            }
+                            else
+                            {
+                                leaders.Add(t);
+                                work.Push(t);
+                            }
                         }
 
                         goto EndPath;
