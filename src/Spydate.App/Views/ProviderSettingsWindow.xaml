@@ -21,6 +21,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
@@ -71,18 +72,28 @@
                      AutomationProperties.Name="Context size" />
         </DockPanel>
 
-        <CheckBox x:Name="StreamBox" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10"
+        <TextBlock Grid.Row="6" Grid.Column="0" Text="Tool calls" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <DockPanel Grid.Row="6" Grid.Column="1" Margin="0,0,0,8">
+            <TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0,0,0"
+                       Foreground="{DynamicResource Text.Tertiary}"
+                       Text="per question" />
+            <TextBox x:Name="ToolCallsBox" Width="70" HorizontalAlignment="Left"
+                     ToolTip="How much work the assistant may do before it has to answer. It says so when it runs out, and you can tell it to carry on; a debugging session gets through these quickly."
+                     AutomationProperties.Name="Tool calls per question" />
+        </DockPanel>
+
+        <CheckBox x:Name="StreamBox" Grid.Row="7" Grid.Column="1" Margin="0,0,0,10"
                   Content="Show the answer as it is written"
                   ToolTip="Turn this off if the assistant prints its own tool-call markup as text instead of running the tools."
                   AutomationProperties.Name="Stream the answer" />
 
         <!-- The one thing left that a label cannot carry: where the key you are about to paste ends
              up. It is the question somebody has while typing into the box above it. -->
-        <TextBlock Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,12"
+        <TextBlock Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" TextWrapping="Wrap" Margin="0,0,0,12"
                    Foreground="{DynamicResource Text.Tertiary}"
                    Text="The key is encrypted to your Windows account, kept out of these settings, and sent only to the provider above." />
 
-        <StackPanel Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Forget key" Width="92" Margin="0,0,8,0" Click="OnForgetClick" />
             <Button Content="Cancel" Width="80" Margin="0,0,8,0" IsCancel="True" />
             <Button Content="Save" Width="80" IsDefault="True" Click="OnSaveClick" />

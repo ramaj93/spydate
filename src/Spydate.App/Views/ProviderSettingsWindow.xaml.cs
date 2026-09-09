@@ -41,6 +41,7 @@ public partial class ProviderSettingsWindow : Window
 
         StreamBox.IsChecked = settings.Stream;
         ContextBox.Text = (settings.MaxContextTokens / 1000).ToString(System.Globalization.CultureInfo.CurrentCulture);
+        ToolCallsBox.Text = settings.MaxToolCalls.ToString(System.Globalization.CultureInfo.CurrentCulture);
         ProviderBox.ItemsSource = Enum.GetValues<ProviderKind>();
         ProviderBox.SelectedItem = settings.Provider;
         ModelBox.Text = settings.Model.Length > 0 ? settings.Model : ProviderSettings.SuggestedModel(settings.Provider);
@@ -205,6 +206,17 @@ public partial class ProviderSettingsWindow : Window
             return;
         }
 
+        // One is a coherent answer - run one tool, then say something - and the loop needs at least
+        // that. The ceiling is there because the number is a bound on how long a single question can
+        // run, and a bound nobody would ever reach is not one.
+        if (!int.TryParse(ToolCallsBox.Text.Trim(), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.CurrentCulture, out int toolCalls)
+            || toolCalls is < 1 or > 200)
+        {
+            MessageBox.Show(this, "Give the tool calls as a whole number between 1 and 200.", "Assistant provider");
+            return;
+        }
+
         if (KeyBox.Password.Length > 0)
         {
             _secrets.Set(kind.ToString(), KeyBox.Password);
@@ -220,7 +232,7 @@ public partial class ProviderSettingsWindow : Window
             Provider = kind,
             Model = ModelBox.Text.Trim(),
             Endpoint = EndpointBox.Text.Trim() is { Length: > 0 } endpoint ? endpoint : null,
-            MaxToolCalls = Result.MaxToolCalls,
+            MaxToolCalls = toolCalls,
             Stream = StreamBox.IsChecked == true,
             MaxContextTokens = thousands * 1000,
         };

@@ -265,7 +265,7 @@ public sealed class AnalysisAgent : IDisposable
                 // that light.
                 progress?.Report(AgentStep.Note(
                     $"— it used all {_maxToolCalls} tool calls this turn is allowed and answered with what it had. "
-                    + $"Say carry on for another {_maxToolCalls}, or raise the limit in Configure. —"));
+                    + $"Say carry on for another {_maxToolCalls}, or raise \"Tool calls\" in Configure. —"));
             }
         }
 
