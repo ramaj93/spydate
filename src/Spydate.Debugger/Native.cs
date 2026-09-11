@@ -186,6 +186,11 @@ internal static partial class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
+    /// <summary>Breaks into a running process: Windows starts a thread in it that executes an int3.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool DebugBreakProcess(IntPtr hProcess);
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool CloseHandle(IntPtr hObject);

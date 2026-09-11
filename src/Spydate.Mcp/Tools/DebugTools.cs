@@ -46,7 +46,7 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_run")]
-    [Description("Move a debugged process: start, stop, continue, step, step_over, run_to, wait. \"wait\" watches for the next breakpoint without moving it - a DLL is not reached until its host loads it. Reports where it got.")]
+    [Description("Move a debugged process: start, stop, continue, pause, step, step_over, run_to, wait. \"wait\" waits for the next stop without moving it - a DLL runs only once its host loads it. Reports where it got.")]
     public string Run(
         [Description("One of the actions above.")] string action,
         [Description("Address, sub_XXXX or a name. Only for run_to.")] string? target = null,
@@ -73,8 +73,8 @@ public sealed class DebugTools
                     "exited" => $"it has exited — {now.Status} Nothing is left to continue; "
                                 + "use start to run it again." + Recent(now),
                     "running" => "it is running and has not stopped. Continuing does nothing from here — "
-                                 + "use wait to be there when it does stop, or set a breakpoint somewhere "
-                                 + "it will reach." + Recent(now),
+                                 + "use wait to be there when it does stop, pause to stop it where it is, "
+                                 + "or set a breakpoint somewhere it will reach." + Recent(now),
                     _ => "nothing is running. Use start." + Recent(now),
                 };
             }
@@ -120,6 +120,20 @@ public sealed class DebugTools
                 debug.RunTo(to);
                 break;
 
+            case "pause":
+                // The way back from running that does not end the run. Stop was the only one, and it
+                // takes the process with it - every breakpoint reached, every module loaded.
+                var going = debug.Snapshot();
+                if (going.State != "running")
+                {
+                    return going.State == "stopped"
+                        ? $"it is already stopped — {going.Status}" + Recent(going)
+                        : "nothing is running, so there is nothing to pause." + Recent(going);
+                }
+
+                debug.Pause();
+                break;
+
             case "wait":
                 // Asks the process for nothing at all. It is the only way to be present when a
                 // breakpoint is finally reached, rather than having been told ten seconds earlier
@@ -144,7 +158,7 @@ public sealed class DebugTools
                 break;
 
             default:
-                return $"no such action \"{action}\". Use start, stop, continue, step, step_over, run_to or wait.";
+                return $"no such action \"{action}\". Use start, stop, continue, pause, step, step_over, run_to or wait.";
         }
 
         // Waited for rather than reported straight away: the debug loop is on its own thread and the
@@ -168,11 +182,11 @@ public sealed class DebugTools
         {
             return "thread " + parked.Id + " is waiting in the kernel, so its step lands only when that wait "
                    + "ends - the other threads are running so that it can. Use wait to be there when it does, "
-                   + "pick a thread that is not waiting, or stop." + Recent(timedOut);
+                   + "or pause to stop everything where it is." + Recent(timedOut);
         }
         return $"still running after {patience.TotalSeconds:0}s and it has not stopped. It may stop "
                + "later — a breakpoint in a DLL cannot be reached until its host loads the module. "
-               + "Use wait to keep waiting, or set a breakpoint somewhere it will reach, or stop."
+               + "Use wait to keep waiting, pause to stop it where it is, or set a breakpoint somewhere it will reach."
                + Recent(timedOut);
     }
 

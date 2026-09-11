@@ -507,6 +507,94 @@ public sealed class DebuggerTests
         Assert.Equal(session.Stack(), session.StackOf(session.CurrentThreadId));
     }
 
+    /// <summary>
+    /// Pause is the only way back from running that does not end the run. ping keeps going for
+    /// seconds, so it is still running when asked; the process must stop, show a thread worth looking
+    /// at rather than the one Windows started to break in with, and then carry on to its end.
+    /// </summary>
+    [Fact]
+    public void APausedProcessStopsWhereItIsAndCarriesOnAfterwards()
+    {
+        string ping = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ping.exe");
+        if (!Available || !File.Exists(ping))
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        DebugEvent? paused = null;
+        var exited = new ManualResetEventSlim();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped" && e.Text == "paused")
+            {
+                paused = e;
+            }
+            else if (e.Kind == "exited")
+            {
+                exited.Set();
+            }
+        };
+
+        session.Start(ping, imageBase: 0, imageSize: 0, arguments: "-n 5 127.0.0.1");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+        session.Continue();
+        Thread.Sleep(500);
+
+        Assert.True(session.Pause(), "a running process refused to pause");
+        Assert.True(Wait(() => paused is not null && session.State == DebugState.Stopped), "it never paused");
+
+        // The break-in thread reported it; the one shown is another, and it can be read.
+        Assert.NotEqual(session.CurrentThreadId, session.SelectedThreadId);
+        Assert.NotNull(session.RegistersOf(session.SelectedThreadId));
+
+        session.Continue();
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(30)), "it never finished after being paused");
+    }
+
+    /// <summary>
+    /// Setting and clearing a breakpoint at a stop are edits, not instructions to go. Both used to be
+    /// posted, and a posted command is run and then continued - so F9 while stopped let the program
+    /// run on, and a breakpoint cleared while it ran left its int3 behind in the code.
+    /// </summary>
+    [Fact]
+    public void ChangingABreakpointWhileStoppedLeavesItStoppedAndTheCodeAsItWas()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        ulong entry = image.ImageBase + image.EntryPointRva;
+
+        using var session = new DebugSession();
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        // The loader break is before the entry point runs, so what is there now is the program's own.
+        ulong runtime = session.ToRuntime(entry);
+        byte original = session.ReadMemory(runtime, 1)[0];
+        Assert.NotEqual(0xCC, original);
+
+        Assert.True(session.AddBreakpoint(entry));
+        Thread.Sleep(300);
+        Assert.Equal(DebugState.Stopped, session.State);
+        Assert.Equal(0xCC, session.ReadMemory(runtime, 1)[0]);
+
+        Assert.True(session.RemoveBreakpoint(entry));
+        Thread.Sleep(300);
+        Assert.Equal(DebugState.Stopped, session.State);
+        Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
+    }
+
+    [Fact]
+    public void NothingRunningCannotBePaused()
+    {
+        using var session = new DebugSession();
+        Assert.False(session.Pause());
+    }
+
     [Fact]
     public void AThreadThatHasGoneIsNotTheOneStepped()
     {

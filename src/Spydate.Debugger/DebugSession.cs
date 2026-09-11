@@ -92,6 +92,23 @@ public sealed class DebugSession : IDisposable
     /// <summary>The thread a step was asked of, until it has taken it. Null when nothing is stepping.</summary>
     private uint? _stepThread;
 
+    /// <summary>Where the step began, and whether its thread was waiting in the kernel then.</summary>
+    private ulong _stepFrom;
+
+    private bool _stepWasWaiting;
+
+    /// <summary>A pause has been asked for and its break-in has not arrived yet.</summary>
+    private volatile bool _pausing;
+
+    /// <summary>The process's first thread, which is what a pause shows when nobody has picked one.</summary>
+    private uint _mainThread;
+
+    /// <summary>
+    /// Shown in place of the thread that reported, for the current stop only. A pause is reported by
+    /// a thread Windows started to break in with, which is not worth looking at.
+    /// </summary>
+    private uint _stand;
+
     private bool _sawInitialBreak;
 
     /// <summary>Raised on the debug loop's thread. Consumers marshal for themselves.</summary>
@@ -139,7 +156,9 @@ public sealed class DebugSession : IDisposable
             // stopped is the only sane answer, and silently stepping a dead id is not one.
             lock (_threads)
             {
-                return _selected != 0 && _threads.ContainsKey(_selected) ? _selected : _threadId;
+                return _selected != 0 && _threads.ContainsKey(_selected) ? _selected
+                    : _stand != 0 && _threads.ContainsKey(_stand) ? _stand
+                    : _threadId;
             }
         }
 
@@ -268,6 +287,30 @@ public sealed class DebugSession : IDisposable
         ReleaseOthers();
     });
 
+    /// <summary>
+    /// Stops a running process wherever it happens to be. Returns false unless it was running.
+    ///
+    /// The one way back from running that does not end the run. Before this, a step that never
+    /// landed - a thread waiting on something that did not come - left Stop as the only way out, and
+    /// Stop kills the process along with every breakpoint reached and module loaded on the way.
+    /// </summary>
+    public bool Pause()
+    {
+        if (State != DebugState.Running || _process == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        _pausing = true;
+        if (!Native.DebugBreakProcess(_process))
+        {
+            _pausing = false;
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>One instruction, then stop again. Into a call, not over it.</summary>
     public void StepInstruction() => Post(() => Trap());
 
@@ -359,6 +402,7 @@ public sealed class DebugSession : IDisposable
     {
         uint stepping = SelectedThreadId;
         _stepThread = stepping;
+        _stepWasWaiting = false;
 
         using var context = new ThreadContext();
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, stepping);
@@ -369,6 +413,7 @@ public sealed class DebugSession : IDisposable
 
         if (context.Read(thread))
         {
+            _stepFrom = context.Rip;
             context.SetTrapFlag(true);
             context.Write(thread);
         }
@@ -388,6 +433,7 @@ public sealed class DebugSession : IDisposable
         // process that could not move. So the others run, and the step lands when the wait is over.
         if (IsWaitingInKernel(stepping))
         {
+            _stepWasWaiting = true;
             Report("note", $"thread {stepping} is waiting in the kernel; the others are left running so the wait "
                            + "can end, and the step lands when it returns");
             return;
@@ -495,9 +541,14 @@ public sealed class DebugSession : IDisposable
 
         // Only if the module is actually here. On a DLL that its host has not loaded yet there is
         // no address to put it at; it goes in when the module arrives.
-        if (State == DebugState.Stopped && TargetLoaded)
+        //
+        // Written straight in rather than posted. Post means "do this, then continue", so setting a
+        // breakpoint while stopped let the program run on; and while it ran, one set did nothing
+        // until something else happened to plant it. Writing a byte needs the process handle, not
+        // the debug loop's thread.
+        if (TargetLoaded && _process != IntPtr.Zero)
         {
-            Post(() => PlantStatic(staticVa));
+            PlantStatic(staticVa);
         }
 
         return true;
@@ -516,10 +567,13 @@ public sealed class DebugSession : IDisposable
             _breakpoints.Remove(staticVa);
         }
 
-        if (existing.Planted && State == DebugState.Stopped)
+        // The byte goes back whenever there is one to put back, running or not, and without resuming
+        // anything. Posted, removing a breakpoint while stopped let the program run; removed while it
+        // ran, it only left the table - the int3 stayed in the code with nothing left that knew what
+        // it had replaced.
+        if (existing.Planted && _process != IntPtr.Zero)
         {
-            ulong runtime = ToRuntime(staticVa);
-            Post(() => WriteByte(runtime, existing.Original));
+            WriteByte(ToRuntime(staticVa), existing.Original);
         }
 
         return true;
@@ -706,12 +760,14 @@ public sealed class DebugSession : IDisposable
             }
 
             _threadId = e.dwThreadId;
+            _stand = 0;
             uint status = Native.DBG_CONTINUE;
             bool stop = false;
 
             switch (e.dwDebugEventCode)
             {
                 case Native.CREATE_PROCESS_DEBUG_EVENT:
+                    _mainThread = e.dwThreadId;
                     Remember(e.dwThreadId, e.CreateProcessStartAddress);
                     OnModuleLoaded(e.CreateProcessFile, e.CreateProcessImageBase, main: true);
                     break;
@@ -956,7 +1012,20 @@ public sealed class DebugSession : IDisposable
                 if (_reArm is { } armed && armed.Thread == _threadId)
                 {
                     _reArm = null;
-                    Plant(armed.Address);
+
+                    // Only if it is still wanted. Removed while its thread was stepping off it, it came
+                    // back anyway: an int3 nothing knew about, which the next pass through reported as
+                    // not ours, and which had already cost the instruction its first byte.
+                    bool wanted;
+                    lock (_breakpoints)
+                    {
+                        wanted = _breakpoints.ContainsKey(ToStatic(armed.Address));
+                    }
+
+                    if (wanted)
+                    {
+                        Plant(armed.Address);
+                    }
                 }
 
                 if (_stepThread != _threadId)
@@ -973,7 +1042,12 @@ public sealed class DebugSession : IDisposable
                 // reported, because what is reported next is a session that can be continued.
                 ReleaseOthers();
                 CurrentAddress = e.ExceptionAddress;
-                Report("stopped", $"stepped to 0x{ToStatic(e.ExceptionAddress):X}", Reportable(e.ExceptionAddress));
+                // A waiting thread that lands where it began has not run an instruction: this is the
+                // moment it came back from the kernel, about to run the next one. "Stepped to" the
+                // address it was already at read as a step that had done nothing.
+                Report("stopped", _stepWasWaiting && e.ExceptionAddress == _stepFrom
+                    ? $"thread {_threadId} came back from the kernel at 0x{ToStatic(e.ExceptionAddress):X}; its next instruction is there"
+                    : $"stepped to 0x{ToStatic(e.ExceptionAddress):X}", Reportable(e.ExceptionAddress));
                 return (true, Native.DBG_CONTINUE);
 
             default:
@@ -1031,7 +1105,30 @@ public sealed class DebugSession : IDisposable
 
         if (hit is null)
         {
-            Report("exception", $"a breakpoint instruction at 0x{ToStatic(address):X} that we did not plant", ToStatic(address));
+            // Not ours: the pause that was asked for, which Windows delivers as an int3 on a thread it
+            // starts for the purpose, or one the program has of its own - a __debugbreak, an assert.
+            // Either way it is a stop, and is said to be one. Reported as an "exception" it stopped
+            // the loop while the panel went on saying running, with nothing to press but Stop.
+            //
+            // The int3 is real code here rather than one of ours over something else, so RIP stays
+            // where it is, past it, instead of being wound back onto it.
+            _stepThread = null;
+            ReleaseOthers();
+            CurrentAddress = address;
+
+            if (_pausing)
+            {
+                _pausing = false;
+                lock (_threads)
+                {
+                    _stand = _threads.ContainsKey(_mainThread) ? _mainThread : 0;
+                }
+
+                Report("stopped", "paused");
+                return true;
+            }
+
+            Report("stopped", $"a breakpoint instruction at 0x{ToStatic(address):X} that we did not plant", Reportable(address));
             return true;
         }
 
@@ -1167,10 +1264,14 @@ public sealed class DebugSession : IDisposable
             ulong staticVa = ToStatic(address);
             lock (_breakpoints)
             {
-                if (_breakpoints.TryGetValue(staticVa, out var breakpoint))
+                if (!_breakpoints.TryGetValue(staticVa, out var breakpoint))
                 {
-                    _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
+                    // Nothing to record the byte against, so nothing may replace it. An int3 whose
+                    // original is kept nowhere is a byte of the program lost for good.
+                    return false;
                 }
+
+                _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
             }
         }
 

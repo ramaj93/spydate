@@ -150,6 +150,8 @@
                     <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
                     <Separator />
                     <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
+                    <MenuItem Header="_Pause" Command="{Binding Debugger.PauseCommand}"
+                              ToolTip="Stops it where it is, without ending it" />
                     <MenuItem Header="Step _over" InputGestureText="F10" Command="{Binding Debugger.StepOverCommand}"
                               ToolTip="Runs a call to completion instead of stepping into it" />
                     <MenuItem Header="Step one _instruction" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}" />
@@ -410,6 +412,12 @@
                                                 <ui:SymbolIcon Symbol="FastForward20" />
                                             </Button>
                                             <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
+                                                    Command="{Binding PauseCommand}"
+                                                    ToolTip="Pause - stop it where it is, without ending it"
+                                                    AutomationProperties.Name="Pause">
+                                                <ui:SymbolIcon Symbol="Pause20" />
+                                            </Button>
+                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
                                                     Command="{Binding StepOverCommand}"
                                                     ToolTip="Step over (F10)"
                                                     AutomationProperties.Name="Step over">
@@ -498,10 +506,10 @@
                                                             </Style>
                                                         </DataGridTextColumn.CellStyle>
                                                     </DataGridTextColumn>
-                                                    <DataGridTextColumn Header="started at" Binding="{Binding Start}"
-                                                                        FontFamily="{DynamicResource Mono.FontFamily}" />
                                                     <DataGridTextColumn Header="state" Binding="{Binding Doing}"
                                                                         Foreground="{DynamicResource Text.Tertiary}" />
+                                                    <DataGridTextColumn Header="started at" Binding="{Binding Start}"
+                                                                        FontFamily="{DynamicResource Mono.FontFamily}" />
                                                 </DataGrid.Columns>
                                             </DataGrid>
 

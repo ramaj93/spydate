@@ -660,6 +660,47 @@ public sealed class DebugToolTests
         Assert.Empty(stub.Done);
     }
 
+    [Fact]
+    public void PausingARunningProcessStopsItWhereItIs()
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "running", Status = "Paused.", BecomesOnWait = "stopped" };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Run("pause");
+
+        Assert.Equal(["pause"], stub.Done);
+        Assert.StartsWith("stopped", answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PausingWhatIsNotRunningAsksNothingOfIt()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+
+        var stopped = new StubDebug();
+        store.Debug = stopped;
+        Assert.Contains("already stopped", tools.Run("pause"), StringComparison.Ordinal);
+        Assert.Empty(stopped.Done);
+
+        var idle = new StubDebug { State = "not running", Status = "Not running." };
+        store.Debug = idle;
+        Assert.Contains("nothing to pause", tools.Run("pause"), StringComparison.Ordinal);
+        Assert.Empty(idle.Done);
+    }
+
+    [Fact]
+    public void ARunningProcessThatCannotBeContinuedPointsAtPause()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = new StubDebug { State = "running", Status = "Running." };
+
+        Assert.Contains("pause to stop it where it is", tools.Run("continue"), StringComparison.Ordinal);
+    }
+
     private sealed class StubDebug : IDebugControl
     {
         public List<string> Done { get; } = [];
@@ -709,6 +750,8 @@ public sealed class DebugToolTests
         public void Stop() => Done.Add("stop");
 
         public void Continue() => Done.Add("continue");
+
+        public void Pause() => Done.Add("pause");
 
         public void StepInstruction() => Done.Add("step");
 

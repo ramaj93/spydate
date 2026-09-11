@@ -38,6 +38,8 @@ public sealed class PanelDebugControl : IDebugControl
 
     public void Continue() => OnUi(() => _debugger.ContinueCommand.Execute(null));
 
+    public void Pause() => OnUi(() => _debugger.PauseCommand.Execute(null));
+
     public void StepInstruction() => OnUi(() => _debugger.StepInstructionCommand.Execute(null));
 
     public void StepOver() => OnUi(() => _debugger.StepOverCommand.Execute(null));

@@ -216,6 +216,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     public bool IsStopped => State == DebugState.Stopped;
 
+    public bool IsRunning => State == DebugState.Running;
+
     /// <summary>Raised when a breakpoint is set or cleared, so listings can redraw their markers.</summary>
     public event EventHandler? BreakpointsChanged;
 
@@ -360,6 +362,21 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         State = DebugState.Running;
         Status = "Running.";
         NotifyCommands();
+    }
+
+    /// <summary>
+    /// Stops it where it is, without ending it. Guarded like the others, because the assistant calls
+    /// the command directly and a pause asked of a stopped process would be answered by nothing.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(IsRunning))]
+    private void Pause()
+    {
+        if (!IsRunning || _session is not { } session)
+        {
+            return;
+        }
+
+        Add(session.Pause() ? "pausing" : "could not pause it");
     }
 
     [RelayCommand(CanExecute = nameof(IsStopped))]
@@ -685,6 +702,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         StartCommand.NotifyCanExecuteChanged();
         StopDebuggingCommand.NotifyCanExecuteChanged();
         ContinueCommand.NotifyCanExecuteChanged();
+        PauseCommand.NotifyCanExecuteChanged();
         StepInstructionCommand.NotifyCanExecuteChanged();
         StepOverCommand.NotifyCanExecuteChanged();
     }

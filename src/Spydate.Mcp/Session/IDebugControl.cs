@@ -79,6 +79,9 @@ public interface IDebugControl
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     void Continue();
 
+    /// <summary>Stops it where it is, without ending it. Does nothing unless it is running.</summary>
+    void Pause();
+
     /// <summary>One instruction, into a call.</summary>
     void StepInstruction();
 
