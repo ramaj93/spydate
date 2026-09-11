@@ -675,6 +675,80 @@ public sealed class DebuggerTests
         Assert.NotEqual(before, session.InstructionPointerOf(session.CurrentThreadId)!.Value);
     }
 
+    /// <summary>
+    /// A breakpoint in 32-bit code: hit it, step off it, and go on to a normal end.
+    ///
+    /// Under WOW64 an int3 is reported as STATUS_WX86_BREAKPOINT and a step as STATUS_WX86_SINGLE_STEP.
+    /// Neither was recognised, so a breakpoint was handed back to the program unhandled and killed it.
+    /// The tell is the exit code: the process died with 0x4000001F - the breakpoint itself - instead
+    /// of finishing, which is why a 32-bit binary allowed exactly one resume per launch.
+    /// </summary>
+    [Fact]
+    public void AThirtyTwoBitBreakpointIsHitSteppedAndResumed()
+    {
+        if (!OperatingSystem.IsWindows() || !File.Exists(Trivial32))
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial32);
+        ulong entry = image.ImageBase + image.EntryPointRva;
+
+        using var session = new DebugSession();
+        var said = new List<string>();
+        string ending = string.Empty;
+        var exited = new ManualResetEventSlim();
+        int stops = 0;
+
+        session.Reported += (_, e) =>
+        {
+            lock (said)
+            {
+                said.Add($"{e.Kind}:{e.Text}");
+            }
+
+            if (e.Kind == "stopped")
+            {
+                Interlocked.Increment(ref stops);
+            }
+            else if (e.Kind == "exited")
+            {
+                ending = e.Text;
+                exited.Set();
+            }
+        };
+
+        bool StopAfter(int seen) => Wait(() => Volatile.Read(ref stops) > seen && session.State == DebugState.Stopped);
+
+        session.AddBreakpoint(entry);
+        session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(StopAfter(0), "never reached the loader break");
+
+        // On to the breakpoint, which is in the program's own 32-bit code.
+        int seen = Volatile.Read(ref stops);
+        session.Continue();
+        Assert.True(StopAfter(seen), "the breakpoint was never reached");
+
+        lock (said)
+        {
+            Assert.Contains(said, t => t.StartsWith("stopped:breakpoint at", StringComparison.Ordinal));
+
+            // As a breakpoint, that is - not as an exception the program is left to survive.
+            Assert.DoesNotContain(said, t => t.Contains("4000001F", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // And it steps off it, which needs the 32-bit single step recognised as well.
+        ulong before = session.InstructionPointerOf(session.CurrentThreadId)!.Value;
+        seen = Volatile.Read(ref stops);
+        session.StepInstruction();
+        Assert.True(StopAfter(seen), "never stopped after the step");
+        Assert.NotEqual(before, session.InstructionPointerOf(session.CurrentThreadId)!.Value);
+
+        session.Continue();
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(30)), "it never finished after the breakpoint");
+        Assert.DoesNotContain("4000001F", ending, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>A 32-bit program runs to its end under the debugger, second loader break and all.</summary>
     [Fact]
     public void AThirtyTwoBitProcessRunsToCompletion()

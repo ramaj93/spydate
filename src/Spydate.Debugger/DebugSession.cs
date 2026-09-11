@@ -101,9 +101,6 @@ public sealed class DebugSession : IDisposable
     /// <summary>True when the debuggee is 32-bit code under WOW64. Asked of the process, not the file.</summary>
     private bool _wow64;
 
-    /// <summary>Set once the 32-bit ntdll has broken in, which it does as well as the 64-bit one.</summary>
-    private bool _sawWow64Break;
-
     /// <summary>Set while stepping over a breakpoint, so its byte goes back afterwards.</summary>
     private (ulong Address, uint Thread)? _reArm;
 
@@ -119,6 +116,9 @@ public sealed class DebugSession : IDisposable
     private ulong _stepFrom;
 
     private bool _stepWasWaiting;
+
+    /// <summary>Set once the 32-bit loader has broken in, which it does as well as the 64-bit one.</summary>
+    private bool _sawWow64Break;
 
     /// <summary>A pause has been asked for and its break-in has not arrived yet.</summary>
     private volatile bool _pausing;
@@ -1164,14 +1164,18 @@ public sealed class DebugSession : IDisposable
     {
         switch (e.ExceptionCode)
         {
-            // A WOW64 process breaks in twice: once from the 64-bit ntdll, which is the loader break
-            // handled below, and again from the 32-bit one. The second is nobody's breakpoint and
-            // stopping at it twice says nothing, so it is taken and the program carries on.
-            case Native.EXCEPTION_WX86_BREAKPOINT when !_sawWow64Break:
-                _sawWow64Break = true;
-                return (false, Native.DBG_CONTINUE);
-
+            // The two codes mean one thing, and which arrives says only how wide the code is: an int3
+            // in 32-bit code under WOW64 is reported as STATUS_WX86_BREAKPOINT - the one the debugger
+            // planted as much as the one the loader raises.
+            //
+            // This used to swallow the first of them unconditionally, on the grounds that the 32-bit
+            // loader raises one of its own. It does, but so does every breakpoint after it: those
+            // fell through to the bottom of this switch, were handed back to the program as an
+            // exception nobody had handled, and killed it - the process exited with 0x4000001F, the
+            // breakpoint itself as an exit code. A 32-bit binary allowed exactly one resume per
+            // launch. The loader's break is now told apart by whose it is rather than by being first.
             case Native.EXCEPTION_BREAKPOINT:
+            case Native.EXCEPTION_WX86_BREAKPOINT:
                 // The loader breaks once, before the program's own code runs. It is not one of ours,
                 // and it is the moment the image is finally mapped — so breakpoints go in here.
                 if (!_sawInitialBreak)
@@ -1189,9 +1193,23 @@ public sealed class DebugSession : IDisposable
                     return (true, Native.DBG_CONTINUE);
                 }
 
+                // The 32-bit loader's own break, which arrives after the 64-bit one on a WOW64
+                // process. Nobody planted it and stopping a second time says nothing, so it is taken
+                // and the program carries on - but only once, only when nothing of ours is at that
+                // address, and never when a pause is the thing being waited for.
+                if (e.ExceptionCode == Native.EXCEPTION_WX86_BREAKPOINT
+                    && !_sawWow64Break
+                    && !_pausing
+                    && !Ours(e.ExceptionAddress))
+                {
+                    _sawWow64Break = true;
+                    return (false, Native.DBG_CONTINUE);
+                }
+
                 return (HitBreakpoint(e.ExceptionAddress), Native.DBG_CONTINUE);
 
             case Native.EXCEPTION_SINGLE_STEP:
+            case Native.EXCEPTION_WX86_SINGLE_STEP:
                 // A step somebody asked for, or the one taken to get off a breakpoint — and both at
                 // once whenever the step was asked for while sitting on one, which is the common
                 // case and the one this used to get wrong.
@@ -1271,6 +1289,20 @@ public sealed class DebugSession : IDisposable
                     Reportable(e.ExceptionAddress));
 
                 return (fatal, Native.DBG_EXCEPTION_NOT_HANDLED);
+        }
+    }
+
+    /// <summary>Whether the int3 at a runtime address is one of ours, planted or one-shot.</summary>
+    private bool Ours(ulong runtime)
+    {
+        if (_temporary == runtime)
+        {
+            return true;
+        }
+
+        lock (_breakpoints)
+        {
+            return _breakpoints.ContainsKey(ToStatic(runtime));
         }
     }
 

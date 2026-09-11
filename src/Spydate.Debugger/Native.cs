@@ -33,11 +33,15 @@ internal static partial class Native
     internal const uint EXCEPTION_ACCESS_VIOLATION = 0xC0000005;
 
     /// <summary>
-    /// A 32-bit process breaking in. A WOW64 process raises this from its 32-bit ntdll in addition to
-    /// the ordinary loader break the 64-bit one raises, so a debugger that knows only the latter sees
-    /// the second as an int3 nobody planted.
+    /// A breakpoint in 32-bit code. Under WOW64 this is how <em>every</em> int3 is reported - the one
+    /// the debugger planted as much as one the program has of its own - and not, as this once said, a
+    /// greeting from the 32-bit loader. A debugger that does not know it hands each breakpoint back
+    /// to the program unhandled, and the program dies of it with this as its exit code.
     /// </summary>
     internal const uint EXCEPTION_WX86_BREAKPOINT = 0x4000001F;
+
+    /// <summary>The trap flag going off in 32-bit code. Every 32-bit step arrives as this.</summary>
+    internal const uint EXCEPTION_WX86_SINGLE_STEP = 0x4000001E;
 
     /// <summary>CONTEXT_AMD64 | CONTROL | INTEGER | SEGMENTS | FLOATING_POINT.</summary>
     internal const uint CONTEXT_AMD64_FULL = 0x0010000B;
