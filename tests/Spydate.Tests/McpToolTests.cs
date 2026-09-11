@@ -555,6 +555,111 @@ public sealed class DebugToolTests
         Assert.Contains("host loads the module", timedOut, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------------------------
+    // Threads, which the agent could not see at all
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void TheStateNamesEveryThreadAndWhoseRegistersTheseAre()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = new StubDebug();
+
+        string state = tools.State();
+
+        Assert.Contains("threads: 1368 (stopped it, shown), 4412", state, StringComparison.Ordinal);
+        Assert.Contains("registers of thread 1368:", state, StringComparison.Ordinal);
+        Assert.Contains("stack of thread 1368:", state, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SteppingAChosenThreadPicksItBeforeMovingIt()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Run("step", thread: 4412);
+
+        // Picked first, then stepped: the other order steps whichever thread was shown before.
+        Assert.Equal(["select:4412", "step"], stub.Done);
+        Assert.Contains("registers of thread 4412:", answer, StringComparison.Ordinal);
+
+        // And the stop is still said to be the other thread's, so rip below is not read as it.
+        Assert.Contains("in thread 1368", answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LookingAtAThreadMovesNothing()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string state = tools.State(thread: 4412);
+
+        Assert.Equal(["select:4412"], stub.Done);
+        Assert.Contains("1368 (stopped it), 4412 (shown)", state, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AThreadWaitingInTheKernelIsMarkedAsSuch()
+    {
+        using var store = Open();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = new StubDebug();
+
+        Assert.Contains("5852 (waiting in the kernel)", tools.State(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Most threads at any stop are parked in a wait. Stepping one lands only when the wait ends, and
+    /// the general timeout answer - a DLL not loaded yet - pointed somewhere unrelated.
+    /// </summary>
+    [Fact]
+    public void SteppingAThreadThatIsWaitingSaysWhyItHasNotLanded()
+    {
+        using var store = Open();
+        var stub = new StubDebug { Settles = false };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Run("step", thread: 5852);
+
+        Assert.Contains("thread 5852 is waiting in the kernel", answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("host loads the module", answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AThreadThatIsNotThereIsRefusedWithTheOnesThatAre()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Run("step", thread: 9);
+
+        Assert.Contains("no thread 9", answer, StringComparison.Ordinal);
+        Assert.Contains("1368, 4412", answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("step", stub.Done);
+    }
+
+    [Fact]
+    public void AThreadCannotBePickedWhileTheProcessRuns()
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "running", Status = "Running." };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        Assert.Contains("only be picked while it is stopped", tools.State(thread: 4412), StringComparison.Ordinal);
+        Assert.Empty(stub.Done);
+    }
+
     private sealed class StubDebug : IDebugControl
     {
         public List<string> Done { get; } = [];
@@ -573,6 +678,27 @@ public sealed class DebugToolTests
         public string Status { get; init; } = "Stopped at 0x140001000.";
 
         public IReadOnlyList<string> Recent { get; init; } = [];
+
+        public IReadOnlyList<(uint Id, ulong Start, bool Waiting)> Threads { get; init; } =
+            [(1368, 0x7FF600001000, false), (4412, 0x7FFA21F81230, false), (5852, 0x7FFAACE80000, true)];
+
+        /// <summary>The one whose event stopped it.</summary>
+        public uint Current { get; init; } = 1368;
+
+        /// <summary>The one shown and stepped; moves when something is picked.</summary>
+        public uint Selected { get; set; } = 1368;
+
+        public bool SelectThread(uint threadId)
+        {
+            Done.Add($"select:{threadId}");
+            if (!Threads.Any(t => t.Id == threadId))
+            {
+                return false;
+            }
+
+            Selected = threadId;
+            return true;
+        }
 
         public string? Start()
         {
@@ -603,7 +729,10 @@ public sealed class DebugToolTests
             Recent = Recent,
             Address = At,
             TargetLoaded = true,
-            Registers = [("rax", 1), ("rbx", 2), ("rcx", 3), ("rdx", 4), ("rip", 0x140001000)],
+            Threads = Threads,
+            CurrentThread = Current,
+            SelectedThread = Selected,
+            Registers = [("rax", Selected), ("rbx", 2), ("rcx", 3), ("rdx", 4), ("rip", 0x140001000)],
             Flags = "CF 0  PF 1  AF 0  ZF 1  SF 0  TF 0  IF 1  DF 0  OF 0",
             Stack = [(0x1000, 0xDEAD)],
             Modules = [("notepad.exe", 0x140000000, true)],

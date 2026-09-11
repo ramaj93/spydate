@@ -49,7 +49,8 @@ public sealed class DebugTools
     [Description("Move a debugged process: start, stop, continue, step, step_over, run_to, wait. \"wait\" watches for the next breakpoint without moving it - a DLL is not reached until its host loads it. Reports where it got.")]
     public string Run(
         [Description("One of the actions above.")] string action,
-        [Description("Address, sub_XXXX or a name. Only for run_to.")] string? target = null)
+        [Description("Address, sub_XXXX or a name. Only for run_to.")] string? target = null,
+        [Description("Thread to step.")] uint? thread = null)
     {
         if (Refusal() is { } refused)
         {
@@ -77,6 +78,11 @@ public sealed class DebugTools
                     _ => "nothing is running. Use start." + Recent(now),
                 };
             }
+        }
+
+        if (thread is { } picked && Pick(debug, picked) is { } wrong)
+        {
+            return wrong;
         }
 
         switch (what)
@@ -154,6 +160,16 @@ public sealed class DebugTools
         // to say only "still running", which told an agent nothing except to ask again, while the
         // log in front of the analyst was saying the module had loaded and the process had gone.
         var timedOut = debug.Snapshot();
+
+        // A step that has not landed is nearly always this, and the general answer below - about a
+        // DLL not loaded yet - would send it looking in exactly the wrong place.
+        if (what is "step" or "step_over"
+            && timedOut.Threads.FirstOrDefault(t => t.Id == timedOut.SelectedThread) is { Waiting: true } parked)
+        {
+            return "thread " + parked.Id + " is waiting in the kernel, so its step lands only when that wait "
+                   + "ends - the other threads are running so that it can. Use wait to be there when it does, "
+                   + "pick a thread that is not waiting, or stop." + Recent(timedOut);
+        }
         return $"still running after {patience.TotalSeconds:0}s and it has not stopped. It may stop "
                + "later — a breakpoint in a DLL cannot be reached until its host loads the module. "
                + "Use wait to keep waiting, or set a breakpoint somewhere it will reach, or stop."
@@ -187,9 +203,38 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_state")]
-    [Description("Where a debugged process is: state, where it stopped, registers, flags, stack, modules, breakpoints, and what it has done lately.")]
-    public string State()
-        => Refusal() ?? Describe(_store.Debug!.Snapshot());
+    [Description("Where a debugged process is: state, where it stopped, threads, registers, flags, stack, modules, breakpoints, and what it has done lately.")]
+    public string State(
+        [Description("Thread to show.")] uint? thread = null)
+    {
+        if (Refusal() is { } refused)
+        {
+            return refused;
+        }
+
+        var debug = _store.Debug!;
+        return thread is { } picked && Pick(debug, picked) is { } wrong ? wrong : Describe(debug.Snapshot());
+    }
+
+    /// <summary>
+    /// Makes a thread the one shown and stepped, or says why it cannot. Null when it worked.
+    ///
+    /// Only at a stop: a running thread has no registers to show and cannot be single-stepped, and
+    /// picking one then would read as having done something. An id that is not there gets the list
+    /// back, because the likely mistake is a thread that has exited since it was last seen.
+    /// </summary>
+    private static string? Pick(IDebugControl debug, uint threadId)
+    {
+        var now = debug.Snapshot();
+        if (now.State != "stopped")
+        {
+            return $"a thread can only be picked while it is stopped, and it is {now.State}.";
+        }
+
+        return debug.SelectThread(threadId)
+            ? null
+            : $"no thread {threadId}. The threads are {string.Join(", ", now.Threads.Select(t => t.Id))}.";
+    }
 
     [McpServerTool(Name = "debug_memory")]
     [Description("Read the running process's memory at a listing address. Hex and ASCII, up to 4096 bytes.")]
@@ -253,6 +298,32 @@ public sealed class DebugTools
         return resolved.Found ? resolved.Va : null;
     }
 
+    /// <summary>
+    /// What is worth knowing about one thread before choosing it: whether it caused the stop,
+    /// whether it is the one shown, and whether it is parked in the kernel — which decides whether
+    /// stepping it can land at all.
+    /// </summary>
+    private static string Tags((uint Id, ulong Start, bool Waiting) thread, DebugSnapshot snapshot)
+    {
+        var tags = new List<string>(3);
+        if (thread.Id == snapshot.CurrentThread)
+        {
+            tags.Add("stopped it");
+        }
+
+        if (thread.Id == snapshot.SelectedThread)
+        {
+            tags.Add("shown");
+        }
+
+        if (thread.Waiting)
+        {
+            tags.Add("waiting in the kernel");
+        }
+
+        return tags.Count == 0 ? string.Empty : " (" + string.Join(", ", tags) + ")";
+    }
+
     private static string Describe(DebugSnapshot snapshot)
     {
         var sb = new StringBuilder();
@@ -262,11 +333,29 @@ public sealed class DebugTools
             sb.Append($" at 0x{at:X}");
         }
 
+        // Only when it is someone else's address: the stop belongs to the thread that caused it, and
+        // with another one selected, a bare address above that thread's registers reads as its rip.
+        bool elsewhere = snapshot.SelectedThread != 0 && snapshot.SelectedThread != snapshot.CurrentThread;
+        if (elsewhere && snapshot.Address is not null)
+        {
+            sb.Append($" in thread {snapshot.CurrentThread}");
+        }
+
         sb.AppendLine($" — {snapshot.Status}");
+
+        if (snapshot.Threads.Count > 0)
+        {
+            sb.AppendLine("threads: " + string.Join(", ", snapshot.Threads.Select(t => t.Id + Tags(t, snapshot))));
+        }
+
+        // Whose they are, said every time. Registers with no thread named are read as the thread that
+        // stopped, which is exactly wrong the moment another one has been picked.
+        string whose = snapshot.SelectedThread != 0 ? $" of thread {snapshot.SelectedThread}" : string.Empty;
 
         if (snapshot.Registers.Count > 0)
         {
             sb.AppendLine();
+            sb.AppendLine($"registers{whose}:");
             // Four to a line: sixteen registers one per line is sixteen lines of mostly zeroes.
             var names = snapshot.Registers.Select(r => $"{r.Name}={r.Value:X16}").ToList();
             for (int i = 0; i < names.Count; i += 4)
@@ -283,7 +372,7 @@ public sealed class DebugTools
         if (snapshot.Stack.Count > 0)
         {
             sb.AppendLine();
-            sb.AppendLine("stack:");
+            sb.AppendLine($"stack{whose}:");
             foreach (var (address, value) in snapshot.Stack.Take(8))
             {
                 sb.AppendLine($"  {address:X16}  {value:X16}");

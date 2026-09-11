@@ -44,6 +44,13 @@ public sealed class PanelDebugControl : IDebugControl
 
     public void RunTo(ulong staticVa) => OnUi(() => _debugger.RunTo(staticVa));
 
+    public bool SelectThread(uint threadId)
+    {
+        bool found = false;
+        OnUi(() => found = _debugger.SelectThread(threadId));
+        return found;
+    }
+
     public bool SetBreakpoint(ulong staticVa, bool on)
     {
         // Toggle is what the panel offers, so this asks for it only when it would change something —
@@ -77,6 +84,9 @@ public sealed class PanelDebugControl : IDebugControl
             Status = _debugger.Status,
             Address = _debugger.ExecutionAddress,
             TargetLoaded = _debugger.Modules.Any(m => m.IsTarget),
+            Threads = _debugger.Threads.Select(t => (t.Id, Parse(t.Start), t.Waiting)).ToList(),
+            CurrentThread = _debugger.Threads.FirstOrDefault(t => t.IsCurrent)?.Id ?? 0,
+            SelectedThread = _debugger.SelectedThread?.Id ?? 0,
             Registers = _debugger.Registers.Select(r => (r.Name, Parse(r.Value))).ToList(),
             Flags = _debugger.Flags,
             Stack = _debugger.Stack.Select(s => (Parse(s.Address), Parse(s.Value))).ToList(),

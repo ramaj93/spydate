@@ -82,14 +82,15 @@ public sealed class DebugSession : IDisposable
     private uint _threadId;
 
     /// <summary>Set while stepping over a breakpoint, so its byte goes back afterwards.</summary>
-    private ulong? _reArm;
+    private (ulong Address, uint Thread)? _reArm;
 
     /// <summary>A breakpoint that exists to get somewhere once: step-over, or run-to-cursor.</summary>
     private ulong? _temporary;
     private byte _temporaryOriginal;
 
     /// <summary>A step was asked for, as opposed to the trap flag being set to get off a breakpoint.</summary>
-    private bool _stepping;
+    /// <summary>The thread a step was asked of, until it has taken it. Null when nothing is stepping.</summary>
+    private uint? _stepThread;
 
     private bool _sawInitialBreak;
 
@@ -263,7 +264,7 @@ public sealed class DebugSession : IDisposable
     /// <summary>Lets it run on, and lets go of anything a step was holding.</summary>
     public void Continue() => Post(() =>
     {
-        _stepping = false;
+        _stepThread = null;
         ReleaseOthers();
     });
 
@@ -356,8 +357,8 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private void Trap()
     {
-        _stepping = true;
         uint stepping = SelectedThreadId;
+        _stepThread = stepping;
 
         using var context = new ThreadContext();
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, stepping);
@@ -380,6 +381,18 @@ public sealed class DebugSession : IDisposable
         // thread to reach a breakpoint, take a fault, or simply move — so a step would report from
         // somewhere else entirely and the thread being followed would not have moved at all. Holding
         // the others makes "step" mean what it says: this thread, one instruction.
+        //
+        // Except when this thread is waiting in the kernel. It runs its next instruction only once
+        // the wait ends, and what ends it is nearly always another thread - one of the ones about to
+        // be held. Holding them made the step impossible: it never landed, and the debugger sat on a
+        // process that could not move. So the others run, and the step lands when the wait is over.
+        if (IsWaitingInKernel(stepping))
+        {
+            Report("note", $"thread {stepping} is waiting in the kernel; the others are left running so the wait "
+                           + "can end, and the step lands when it returns");
+            return;
+        }
+
         HoldOthers(stepping);
     }
 
@@ -389,9 +402,40 @@ public sealed class DebugSession : IDisposable
     /// A suspend count, not a flag: a thread the debuggee itself suspended must not be resumed by
     /// us, so only the ones actually stopped here are recorded and only those are started again.
     /// </summary>
+    /// <summary>
+    /// True when a thread is parked in a system call: its RIP sits just past a <c>syscall</c>.
+    ///
+    /// Most threads are, at any stop - workers waiting for work, a window waiting for a message. Read
+    /// from the thread itself rather than through <see cref="RegistersOf"/>, because a step asks
+    /// from inside <see cref="Post"/>, where the session already says running though nothing has
+    /// moved yet.
+    /// </summary>
+    public bool IsWaitingInKernel(uint threadId)
+    {
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        ulong rip = 0;
+        using (var context = new ThreadContext())
+        {
+            if (context.Read(thread))
+            {
+                rip = context.Rip;
+            }
+        }
+
+        Native.CloseHandle(thread);
+        return rip >= 2 && ReadMemory(rip - 2, 2) is [0x0F, 0x05];
+    }
+
     private void HoldOthers(uint except)
     {
-        _held.Clear();
+        // Anything still held from before goes free first. Clearing the list without resuming left a
+        // thread suspended twice and resumed once - frozen for the rest of the run.
+        ReleaseOthers();
 
         foreach (var thread in Threads)
         {
@@ -511,14 +555,21 @@ public sealed class DebugSession : IDisposable
     /// The top of the stack, as address and value pairs. At a breakpoint this is usually the first
     /// thing worth looking at: the return address, then whatever the frame is holding.
     /// </summary>
-    public IReadOnlyList<(ulong Address, ulong Value)> Stack(int count = 16)
+    public IReadOnlyList<(ulong Address, ulong Value)> Stack(int count = 16) => StackOf(_threadId, count);
+
+    /// <summary>
+    /// The top of one thread's stack. Every thread has its own, and the one beside a thread's
+    /// registers has to be that thread's: showing the reporting thread's stack under another
+    /// thread's registers put two threads in one picture with nothing to say so.
+    /// </summary>
+    public IReadOnlyList<(ulong Address, ulong Value)> StackOf(uint threadId, int count = 16)
     {
         if (State != DebugState.Stopped)
         {
             return [];
         }
 
-        var registers = Registers();
+        var registers = RegistersOf(threadId);
         ulong rsp = registers?.FirstOrDefault(r => r.Name == "rsp").Value ?? 0;
         if (rsp == 0)
         {
@@ -539,11 +590,15 @@ public sealed class DebugSession : IDisposable
     public void Stop()
     {
         _stopping.Cancel();
-        ReleaseOthers();
+
+        // Ended first, and only then let go. Resuming the held threads of a live process let them
+        // run, and one that was due to trap reported a step after Stop had been pressed.
         if (_process != IntPtr.Zero)
         {
             Native.TerminateProcess(_process, 0);
         }
+
+        ReleaseOthers();
 
         // Let a stopped loop notice it is finished.
         if (_resume.CurrentCount == 0)
@@ -893,20 +948,26 @@ public sealed class DebugSession : IDisposable
                 // int3 went back, and execution went on to wherever it next stopped. For a function
                 // called four hundred times that is the same breakpoint a moment later — which
                 // looks precisely like a debugger whose instruction pointer refuses to move.
-                if (_reArm is { } address)
+                //
+                // Both belong to a thread, and a trap is either only when it comes from that thread.
+                // Taken from anywhere, the thread stepping off its own breakpoint was reported as the
+                // end of a step asked of another - and a step on another thread re-planted the int3
+                // under the first one, which then hit it again without moving.
+                if (_reArm is { } armed && armed.Thread == _threadId)
                 {
                     _reArm = null;
-                    Plant(address);
-
-                    if (!_stepping)
-                    {
-                        return (false, Native.DBG_CONTINUE);
-                    }
+                    Plant(armed.Address);
                 }
 
-                // Whether it came straight here or by way of a re-arm, one instruction has run and
-                // a step was asked for, so this is where it stops.
-                _stepping = false;
+                if (_stepThread != _threadId)
+                {
+                    // Nobody asked this thread to step: a re-arm, or a step abandoned when something
+                    // else stopped first. Nothing to report.
+                    return (false, Native.DBG_CONTINUE);
+                }
+
+                // One instruction has run on the thread that was asked to step, so this is where it stops.
+                _stepThread = null;
 
                 // The step is over, so whatever was held for it goes free. Before the stop is
                 // reported, because what is reported next is a session that can be continued.
@@ -929,6 +990,7 @@ public sealed class DebugSession : IDisposable
                 bool fatal = !e.FirstChance;
                 if (fatal)
                 {
+                    _stepThread = null;
                     CurrentAddress = e.ExceptionAddress;
                 }
 
@@ -978,7 +1040,11 @@ public sealed class DebugSession : IDisposable
 
         // Re-planted after the single step that carries execution off this address; planting it now
         // would break on the instruction we are about to resume.
-        _reArm = address;
+        _reArm = (address, _threadId);
+
+        // A stop from here ends any step still waiting to land. That thread may trap later, and by
+        // then nobody is waiting for it.
+        _stepThread = null;
         CurrentAddress = address;
         Report("stopped", $"breakpoint at 0x{ToStatic(address):X}", Reportable(address));
         return true;

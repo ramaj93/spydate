@@ -477,6 +477,36 @@ public sealed class DebuggerTests
         Assert.True(exited.Wait(TimeSpan.FromSeconds(20)), "it never finished, so a thread was left suspended");
     }
 
+    /// <summary>
+    /// Each thread's stack starts at that thread's own rsp. The stack used to be the reporting
+    /// thread's whichever thread was picked, so the panel showed one thread's registers above
+    /// another's stack.
+    /// </summary>
+    [Fact]
+    public void EveryThreadsStackIsReadFromItsOwnStackPointer()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
+
+        Assert.NotEmpty(session.Threads);
+        foreach (var thread in session.Threads)
+        {
+            ulong rsp = session.RegistersOf(thread.Id)!.Single(r => r.Name == "rsp").Value;
+            var stack = session.StackOf(thread.Id);
+
+            Assert.NotEmpty(stack);
+            Assert.Equal(rsp, stack[0].Address);
+        }
+
+        Assert.Equal(session.Stack(), session.StackOf(session.CurrentThreadId));
+    }
+
     [Fact]
     public void AThreadThatHasGoneIsNotTheOneStepped()
     {

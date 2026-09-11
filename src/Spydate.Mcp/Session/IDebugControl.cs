@@ -15,6 +15,22 @@ public sealed record DebugSnapshot
     /// <summary>Whether the module the listing is about has been loaded yet.</summary>
     public bool TargetLoaded { get; init; }
 
+    /// <summary>
+    /// Every thread, by id, with where it began and whether it is waiting in the kernel. A waiting
+    /// thread cannot finish a step until whatever it is waiting for happens.
+    /// </summary>
+    public IReadOnlyList<(uint Id, ulong Start, bool Waiting)> Threads { get; init; } = [];
+
+    /// <summary>The thread whose event stopped it. <see cref="Address"/> is where this one is.</summary>
+    public uint CurrentThread { get; init; }
+
+    /// <summary>
+    /// The thread the registers, flags and stack belong to, and the one a step will move. The
+    /// current one until something picks another.
+    /// </summary>
+    public uint SelectedThread { get; init; }
+
+    /// <summary>The selected thread's registers.</summary>
     public IReadOnlyList<(string Name, ulong Value)> Registers { get; init; } = [];
 
     /// <summary>The flags spelled out, because reading them off a hex RFLAGS is arithmetic.</summary>
@@ -74,6 +90,12 @@ public interface IDebugControl
 
     /// <summary>Sets or clears a breakpoint at a static address. Returns whether it is now set.</summary>
     bool SetBreakpoint(ulong staticVa, bool on);
+
+    /// <summary>
+    /// Makes a thread the one looked at and stepped — for the panel as well, since there is one
+    /// debugger and one selection. False when there is no such thread.
+    /// </summary>
+    bool SelectThread(uint threadId);
 
     /// <summary>Everything readable right now.</summary>
     DebugSnapshot Snapshot();

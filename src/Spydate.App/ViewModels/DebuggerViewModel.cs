@@ -27,7 +27,11 @@ public sealed record ModuleRow(string Name, string Base, string Path, bool IsTar
 /// One thread. <paramref name="IsCurrent"/> is the one that stopped — whose registers are on screen,
 /// and the one a step will actually step.
 /// </summary>
-public sealed record ThreadRow(uint Id, string Start, bool IsCurrent);
+public sealed record ThreadRow(uint Id, string Start, bool IsCurrent, bool Waiting)
+{
+    /// <summary>What it is doing, when that decides whether it can be stepped.</summary>
+    public string Doing => Waiting ? "waiting" : string.Empty;
+}
 
 /// <summary>
 /// The debugger panel: starting the open binary, stopping it, and reading it while it is stopped.
@@ -512,7 +516,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     Registers.Clear();
                     Stack.Clear();
                     Modules.Clear();
-        Threads.Clear();
+                    Threads.Clear();
                     Flags = string.Empty;
                     break;
             }
@@ -536,7 +540,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Threads.Clear();
         foreach (var thread in _session?.Threads ?? [])
         {
-            var row = new ThreadRow(thread.Id, $"0x{thread.StartAddress:X16}", thread.Id == current);
+            var row = new ThreadRow(thread.Id, $"0x{thread.StartAddress:X16}", thread.Id == current, _session?.IsWaitingInKernel(thread.Id) ?? false);
             Threads.Add(row);
 
             if (thread.Id == chosen)
@@ -570,13 +574,30 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RefreshRegisters();
     }
 
+    /// <summary>
+    /// Picks a thread by id, as clicking its row would. Returns false when no such thread exists.
+    ///
+    /// Through the row rather than straight to the session, so the panel moves with it: the agent
+    /// and the analyst share one debugger, and a selection only one of them could see is how the
+    /// registers came to describe a thread nobody was looking at.
+    /// </summary>
+    public bool SelectThread(uint threadId)
+    {
+        if (Threads.FirstOrDefault(t => t.Id == threadId) is not { } row)
+        {
+            return false;
+        }
+
+        SelectedThread = row;
+        return true;
+    }
+
     private void RefreshModules()
     {
         var loaded = _session?.Modules ?? [];
         ulong target = _session?.LoadedBase ?? 0;
 
         Modules.Clear();
-        Threads.Clear();
         foreach (var module in loaded.OrderByDescending(m => m.Base == target && target != 0).ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
         {
             Modules.Add(new ModuleRow(
@@ -609,7 +630,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _previous = current.ToDictionary(r => r.Name, r => r.Value, StringComparer.Ordinal);
 
         Stack.Clear();
-        foreach (var (address, value) in _session?.Stack() ?? [])
+        foreach (var (address, value) in _session is { } stopped ? stopped.StackOf(stopped.SelectedThreadId) : [])
         {
             Stack.Add(new StackRow($"0x{address:X16}", $"0x{value:X16}"));
         }

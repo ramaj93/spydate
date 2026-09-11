@@ -500,6 +500,8 @@
                                                     </DataGridTextColumn>
                                                     <DataGridTextColumn Header="started at" Binding="{Binding Start}"
                                                                         FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                    <DataGridTextColumn Header="state" Binding="{Binding Doing}"
+                                                                        Foreground="{DynamicResource Text.Tertiary}" />
                                                 </DataGrid.Columns>
                                             </DataGrid>
 
