@@ -257,18 +257,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Refused rather than attempted. The register context here is CONTEXT_AMD64; a 32-bit process
-        // runs under WOW64 and needs Wow64GetThreadContext, and asking for the 64-bit one gives back
-        // a structure that is read as registers and is not. Wrong register values in a debugger are
-        // worse than no debugger — they are believed.
-        if (!binary.Image.Is64Bit)
-        {
-            Status = "Only 64-bit binaries can be debugged so far.";
-            Add($"{binary.DisplayName} is 32-bit. Reading a WOW64 process's registers needs a different "
-                + "call than this uses, and using the wrong one reports values that look real. Not started.");
-            return;
-        }
-
         // A DLL is not a program: CreateProcess refuses it, and the refusal used to arrive after the
         // confirmation, so it asked whether to run something that could not be run. Something else
         // has to load it, and that is what the host is for.
@@ -572,7 +560,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Threads.Clear();
         foreach (var thread in _session?.Threads ?? [])
         {
-            var row = new ThreadRow(thread.Id, $"0x{thread.StartAddress:X16}", thread.Id == current, _session?.IsWaitingInKernel(thread.Id) ?? false);
+            var row = new ThreadRow(thread.Id, Hex(thread.StartAddress), thread.Id == current, _session?.IsWaitingInKernel(thread.Id) ?? false);
             Threads.Add(row);
 
             if (thread.Id == chosen)
@@ -649,14 +637,14 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Registers.Clear();
         foreach (var (name, value) in current)
         {
-            if (name == "rflags")
+            if (name is "rflags" or "eflags")
             {
                 Flags = DescribeFlags((uint)value);
                 continue;
             }
 
             bool changed = _previous.TryGetValue(name, out ulong was) && was != value;
-            Registers.Add(new RegisterRow(name, $"0x{value:X16}", changed));
+            Registers.Add(new RegisterRow(name, Hex(value), changed));
         }
 
         _previous = current.ToDictionary(r => r.Name, r => r.Value, StringComparer.Ordinal);
@@ -664,9 +652,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Stack.Clear();
         foreach (var (address, value) in _session is { } stopped ? stopped.StackOf(stopped.SelectedThreadId) : [])
         {
-            Stack.Add(new StackRow($"0x{address:X16}", $"0x{value:X16}"));
+            Stack.Add(new StackRow(Hex(address), Hex(value)));
         }
     }
+
+    /// <summary>
+    /// As wide as the machine is. Sixteen digits for a 32-bit value is eight leading zeroes on every
+    /// row, which is the column the eye has to cross to reach the number that matters.
+    /// </summary>
+    private string Hex(ulong value) => _session?.Is32Bit == true ? $"0x{value:X8}" : $"0x{value:X16}";
 
     /// <summary>
     /// The flags that get looked at. A conditional jump is about ZF, SF, OF and CF, and reading them

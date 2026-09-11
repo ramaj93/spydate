@@ -98,6 +98,12 @@ public sealed class DebugSession : IDisposable
     private uint _processId;
     private uint _threadId;
 
+    /// <summary>True when the debuggee is 32-bit code under WOW64. Asked of the process, not the file.</summary>
+    private bool _wow64;
+
+    /// <summary>Set once the 32-bit ntdll has broken in, which it does as well as the 64-bit one.</summary>
+    private bool _sawWow64Break;
+
     /// <summary>Set while stepping over a breakpoint, so its byte goes back afterwards.</summary>
     private (ulong Address, uint Thread)? _reArm;
 
@@ -377,7 +383,7 @@ public sealed class DebugSession : IDisposable
     /// <summary>The instruction at RIP, or null when it cannot be read or decoded.</summary>
     private Iced.Intel.Instruction? Decode()
     {
-        using var context = new ThreadContext();
+        using var context = ThreadContext.For(_wow64);
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, _threadId);
         if (thread == IntPtr.Zero)
         {
@@ -391,13 +397,13 @@ public sealed class DebugSession : IDisposable
                 return null;
             }
 
-            byte[] code = ReadMemory(context.Rip, 16);
+            byte[] code = ReadMemory(context.InstructionPointer, 16);
             if (code.Length == 0)
             {
                 return null;
             }
 
-            var decoder = Iced.Intel.Decoder.Create(64, new Iced.Intel.ByteArrayCodeReader(code), context.Rip);
+            var decoder = Iced.Intel.Decoder.Create(_wow64 ? 32 : 64, new Iced.Intel.ByteArrayCodeReader(code), context.InstructionPointer);
             var instruction = decoder.Decode();
             return instruction.IsInvalid ? null : instruction;
         }
@@ -421,7 +427,7 @@ public sealed class DebugSession : IDisposable
         _stepThread = stepping;
         _stepWasWaiting = false;
 
-        using var context = new ThreadContext();
+        using var context = ThreadContext.For(_wow64);
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, stepping);
         if (thread == IntPtr.Zero)
         {
@@ -430,7 +436,7 @@ public sealed class DebugSession : IDisposable
 
         if (context.Read(thread))
         {
-            _stepFrom = context.Rip;
+            _stepFrom = context.InstructionPointer;
             context.SetTrapFlag(true);
             context.Write(thread);
         }
@@ -482,16 +488,22 @@ public sealed class DebugSession : IDisposable
         }
 
         ulong rip = 0;
-        using (var context = new ThreadContext())
+        using (var context = ThreadContext.For(_wow64))
         {
             if (context.Read(thread))
             {
-                rip = context.Rip;
+                rip = context.InstructionPointer;
             }
         }
 
         Native.CloseHandle(thread);
-        return rip >= 2 && ReadMemory(rip - 2, 2) is [0x0F, 0x05];
+
+        // Only for 64-bit threads. A WOW64 thread enters the kernel through an indirect call, whose
+        // opcode bytes are far too ordinary to match on: a false positive here is the worse failure,
+        // because it stops a step holding the other threads and the step then reports from whichever
+        // one moved. So a 32-bit thread is never called waiting, stepping one that is parked can hang
+        // as it did before this existed, and Pause is the way out.
+        return !_wow64 && rip >= 2 && ReadMemory(rip - 2, 2) is [0x0F, 0x05];
     }
 
     private void HoldOthers(uint except)
@@ -632,7 +644,7 @@ public sealed class DebugSession : IDisposable
 
         foreach (var thread in Threads)
         {
-            ulong rip = RegistersOf(thread.Id)?.FirstOrDefault(r => r.Name == "rip").Value ?? 0;
+            ulong rip = InstructionPointerOf(thread.Id) ?? 0;
             if (rip >= start && rip < end)
             {
                 return $"thread {thread.Id} is stopped inside those bytes; it would resume in the middle "
@@ -771,18 +783,19 @@ public sealed class DebugSession : IDisposable
             return [];
         }
 
-        var registers = RegistersOf(threadId);
-        ulong rsp = registers?.FirstOrDefault(r => r.Name == "rsp").Value ?? 0;
-        if (rsp == 0)
+        if (StackPointerOf(threadId) is not { } sp || sp == 0)
         {
             return [];
         }
 
-        byte[] bytes = ReadMemory(rsp, count * 8);
+        // A word is the machine's, not this program's: a 32-bit stack read eight bytes at a time
+        // shows every other slot as rubbish and half as many frames as are there.
+        int word = Is32Bit ? 4 : 8;
+        byte[] bytes = ReadMemory(sp, count * word);
         var rows = new List<(ulong, ulong)>();
-        for (int i = 0; i + 8 <= bytes.Length; i += 8)
+        for (int i = 0; i + word <= bytes.Length; i += word)
         {
-            rows.Add((rsp + (ulong)i, BitConverter.ToUInt64(bytes, i)));
+            rows.Add((sp + (ulong)i, word == 4 ? BitConverter.ToUInt32(bytes, i) : BitConverter.ToUInt64(bytes, i)));
         }
 
         return rows;
@@ -882,6 +895,10 @@ public sealed class DebugSession : IDisposable
 
         _process = info.hProcess;
         _processId = info.dwProcessId;
+
+        // Asked of the running process rather than taken from the file being read: under a host the
+        // two are different programs, and it is the host's width that decides how a thread is read.
+        _wow64 = Native.IsWow64Process(info.hProcess, out bool wow64) && wow64;
         State = DebugState.Running;
         ready.SetResult(null);
 
@@ -1000,6 +1017,34 @@ public sealed class DebugSession : IDisposable
     /// a stop — not only the one that stopped. That is the whole point of having the list: a
     /// breakpoint hit in a worker says nothing about what the other threads were in the middle of.
     /// </summary>
+    /// <summary>True when the debuggee runs 32-bit code. Decided by the process, not by the file.</summary>
+    public bool Is32Bit => _wow64;
+
+    /// <summary>Where a thread is, whatever its width. Null unless it is stopped and readable.</summary>
+    public ulong? InstructionPointerOf(uint threadId) => Of(threadId, c => c.InstructionPointer);
+
+    /// <summary>The top of a thread's stack, whatever its width.</summary>
+    public ulong? StackPointerOf(uint threadId) => Of(threadId, c => c.StackPointer);
+
+    private ulong? Of(uint threadId, Func<ThreadContext, ulong> read)
+    {
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var context = ThreadContext.For(_wow64);
+            return context.Read(thread) ? read(context) : null;
+        }
+        finally
+        {
+            Native.CloseHandle(thread);
+        }
+    }
+
     public IReadOnlyList<(string Name, ulong Value)>? RegistersOf(uint threadId)
     {
         if (State != DebugState.Stopped)
@@ -1007,7 +1052,7 @@ public sealed class DebugSession : IDisposable
             return null;
         }
 
-        using var context = new ThreadContext();
+        using var context = ThreadContext.For(_wow64);
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
         if (thread == IntPtr.Zero)
         {
@@ -1021,10 +1066,7 @@ public sealed class DebugSession : IDisposable
                 return null;
             }
 
-            var all = context.General().ToList();
-            all.Add(("rip", context.Rip));
-            all.Add(("rflags", context.EFlags));
-            return all;
+            return context.General();
         }
         finally
         {
@@ -1122,6 +1164,13 @@ public sealed class DebugSession : IDisposable
     {
         switch (e.ExceptionCode)
         {
+            // A WOW64 process breaks in twice: once from the 64-bit ntdll, which is the loader break
+            // handled below, and again from the 32-bit one. The second is nobody's breakpoint and
+            // stopping at it twice says nothing, so it is taken and the program carries on.
+            case Native.EXCEPTION_WX86_BREAKPOINT when !_sawWow64Break:
+                _sawWow64Break = true;
+                return (false, Native.DBG_CONTINUE);
+
             case Native.EXCEPTION_BREAKPOINT:
                 // The loader breaks once, before the program's own code runs. It is not one of ours,
                 // and it is the moment the image is finally mapped — so breakpoints go in here.
@@ -1310,10 +1359,10 @@ public sealed class DebugSession : IDisposable
             return;
         }
 
-        using var context = new ThreadContext();
+        using var context = ThreadContext.For(_wow64);
         if (context.Read(thread))
         {
-            context.Rip = address;
+            context.InstructionPointer = address;
             context.SetTrapFlag(thenStep);
             context.Write(thread);
         }

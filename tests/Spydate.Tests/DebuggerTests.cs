@@ -588,6 +588,119 @@ public sealed class DebuggerTests
         Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
     }
 
+    // ------------------------------------------------------------------
+    // 32-bit, which runs under WOW64 and is read with different calls
+    // ------------------------------------------------------------------
+
+    private static readonly string Trivial32 = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.SystemX86), "where.exe");
+
+    /// <summary>
+    /// The registers of a 32-bit thread, which are not the ones the plain call answers with. Asking
+    /// the 64-bit way succeeds on a WOW64 thread and hands back the wow64 layer's own state, so the
+    /// test that matters is not "did it work" but "are these the program's registers": EIP has to be
+    /// inside the 32-bit image, and a 32-bit process's addresses all fit in four bytes.
+    /// </summary>
+    [Fact]
+    public void AThirtyTwoBitThreadIsReadAsThirtyTwoBit()
+    {
+        if (!OperatingSystem.IsWindows() || !File.Exists(Trivial32))
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial32);
+        using var session = new DebugSession();
+        session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        Assert.True(session.Is32Bit, "a SysWOW64 program was not seen as 32-bit");
+
+        var registers = session.Registers();
+        Assert.NotNull(registers);
+        Assert.Contains(registers!, r => r.Name == "eip" && r.Value != 0);
+        Assert.Contains(registers!, r => r.Name == "esp" && r.Value != 0);
+        Assert.DoesNotContain(registers!, r => r.Name == "rip");
+
+        // Nothing in a 32-bit process lives above four gigabytes. The 64-bit call on this thread
+        // answers with values that do, which is how a wrong context gives itself away.
+        Assert.All(registers!, r => Assert.True(r.Value <= uint.MaxValue, $"{r.Name} = 0x{r.Value:X}"));
+    }
+
+    /// <summary>A 32-bit stack is read four bytes at a time, and starts at that thread's own ESP.</summary>
+    [Fact]
+    public void AThirtyTwoBitStackIsReadInFourByteWords()
+    {
+        if (!OperatingSystem.IsWindows() || !File.Exists(Trivial32))
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial32);
+        using var session = new DebugSession();
+        session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong esp = session.StackPointerOf(session.CurrentThreadId)!.Value;
+        var stack = session.StackOf(session.CurrentThreadId);
+
+        Assert.NotEmpty(stack);
+        Assert.Equal(esp, stack[0].Address);
+        Assert.Equal(esp + 4, stack[1].Address);
+        Assert.All(stack, row => Assert.True(row.Value <= uint.MaxValue));
+    }
+
+    /// <summary>
+    /// Stepping a 32-bit thread, which needs the trap flag written back through the WOW64 call. The
+    /// breakpoint byte is the same 0xCC either way; what differs is every call used to read and write
+    /// the thread around it.
+    /// </summary>
+    [Fact]
+    public void AThirtyTwoBitThreadSteps()
+    {
+        if (!OperatingSystem.IsWindows() || !File.Exists(Trivial32))
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial32);
+        using var session = new DebugSession();
+        session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong before = session.InstructionPointerOf(session.CurrentThreadId)!.Value;
+        session.StepInstruction();
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped after the step");
+
+        Assert.NotEqual(before, session.InstructionPointerOf(session.CurrentThreadId)!.Value);
+    }
+
+    /// <summary>A 32-bit program runs to its end under the debugger, second loader break and all.</summary>
+    [Fact]
+    public void AThirtyTwoBitProcessRunsToCompletion()
+    {
+        if (!OperatingSystem.IsWindows() || !File.Exists(Trivial32))
+        {
+            return;
+        }
+
+        using var session = new DebugSession();
+        var exited = new ManualResetEventSlim();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "exited")
+            {
+                exited.Set();
+            }
+        };
+
+        session.Start(Trivial32, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+        session.Continue();
+
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(30)), "it never finished");
+    }
+
     [Fact]
     public void NothingRunningCannotBePaused()
     {

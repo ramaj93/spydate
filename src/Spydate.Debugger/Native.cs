@@ -32,8 +32,18 @@ internal static partial class Native
     internal const uint EXCEPTION_SINGLE_STEP = 0x80000004;
     internal const uint EXCEPTION_ACCESS_VIOLATION = 0xC0000005;
 
+    /// <summary>
+    /// A 32-bit process breaking in. A WOW64 process raises this from its 32-bit ntdll in addition to
+    /// the ordinary loader break the 64-bit one raises, so a debugger that knows only the latter sees
+    /// the second as an int3 nobody planted.
+    /// </summary>
+    internal const uint EXCEPTION_WX86_BREAKPOINT = 0x4000001F;
+
     /// <summary>CONTEXT_AMD64 | CONTROL | INTEGER | SEGMENTS | FLOATING_POINT.</summary>
     internal const uint CONTEXT_AMD64_FULL = 0x0010000B;
+
+    /// <summary>WOW64_CONTEXT_i386 | CONTROL | INTEGER | SEGMENTS | FLOATING_POINT.</summary>
+    internal const uint CONTEXT_WOW64_FULL = 0x0001000F;
 
     /// <summary>The trap flag: set it and the processor faults after one instruction.</summary>
     internal const uint TrapFlag = 0x100;
@@ -269,6 +279,24 @@ internal static partial class Native
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool SetThreadContext(IntPtr hThread, byte* lpContext);
+
+    /// <summary>
+    /// The 32-bit registers of a thread in a WOW64 process. The plain calls answer for such a thread
+    /// with its 64-bit context, which is the wow64 layer's own state rather than the program's, and
+    /// answer it successfully - so asking the wrong one is not refused, it is quietly believed.
+    /// </summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool Wow64GetThreadContext(IntPtr hThread, byte* lpContext);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool Wow64SetThreadContext(IntPtr hThread, byte* lpContext);
+
+    /// <summary>True when the process is 32-bit code running on 64-bit Windows.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool IsWow64Process(IntPtr hProcess, [MarshalAs(UnmanagedType.Bool)] out bool wow64Process);
 
     internal const uint THREAD_ALL_ACCESS = 0x1FFFFF;
 
