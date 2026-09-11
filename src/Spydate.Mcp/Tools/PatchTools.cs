@@ -35,11 +35,12 @@ public sealed class PatchTools
     }
 
     [McpServerTool(Name = "patch")]
-    [Description("Record a byte change at an address, given as an instruction to assemble (\"xor eax, eax; ret\") or as raw bytes (\"bytes: 90 90\"). Replaces whole instructions, padding with NOPs. Recorded in the project only - nothing writes a patched binary.")]
+    [Description("Record a byte change at an address, given as an instruction to assemble (\"xor eax, eax; ret\") or as raw bytes (\"bytes: 90 90\"). Replaces whole instructions, padding with NOPs. Recorded in the project, and written into a stopped process. Nothing writes a patched binary.")]
     public string Patch(
         [Description("Address, sub_XXXX, or an existing name.")] string target,
         [Description("Instruction(s) to assemble, or bytes: followed by hex.")] string instruction,
-        [Description("Why this patch exists. Worth giving: it is what the next reader sees.")] string? comment = null)
+        [Description("Why this patch exists. Worth giving: it is what the next reader sees.")] string? comment = null,
+        [Description("False to try it live only, recording nothing.")] bool keep = true)
     {
         if (_options.ReadOnly)
         {
@@ -55,6 +56,26 @@ public sealed class PatchTools
         if (!resolved.Found)
         {
             return resolved.Problem!;
+        }
+
+        // A hypothesis: into the process, into nothing else. Worth having separately from a recorded
+        // patch because most guesses are wrong, and a project full of reverted guesses is a worse
+        // record than one holding only what turned out to be true.
+        if (!keep)
+        {
+            if (!_options.AllowDebug || _store.Debug is not { } debug)
+            {
+                return "trying a patch live changes a running process, so it needs debugging turned on: "
+                       + "start the server with --allow-debug, or use the assistant panel in the window.";
+            }
+
+            if (debug.TryPatch(resolved.Va, instruction, comment) is { } refused)
+            {
+                return refused;
+            }
+
+            return $"trying 0x{resolved.Va:X} in the running process. Nothing is recorded: "
+                   + "revert_patch takes it back out, patch writes it into the project.";
         }
 
         var proposal = InstructionPatches.Assemble(analysis, resolved.Va, instruction);
@@ -82,7 +103,7 @@ public sealed class PatchTools
     }
 
     [McpServerTool(Name = "list_patches")]
-    [Description("Every recorded patch: where, what it replaces, whether it is switched on, and why.")]
+    [Description("Every patch recorded or tried live: where, what it replaces, whether it is on, and why.")]
     public string ListPatches(
         [Description("Rows to skip, for paging.")] int offset = 0,
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
@@ -92,8 +113,9 @@ public sealed class PatchTools
             return SessionTools.NothingOpen;
         }
 
+        var tried = _store.Debug?.Snapshot().LivePatches ?? [];
         var all = session.Patches.Snapshot();
-        if (all.Count == 0)
+        if (all.Count == 0 && tried.Count == 0)
         {
             return "no patches";
         }
@@ -112,11 +134,28 @@ public sealed class PatchTools
                 patch.Comment ?? string.Empty);
         }
 
-        return $"{page.Count} of {all.Count} patch(es)\n{table.Render()}";
+        string recorded = all.Count == 0
+            ? "no recorded patches"
+            : $"{page.Count} of {all.Count} patch(es)\n{table.Render()}";
+
+        if (tried.Count == 0)
+        {
+            return recorded;
+        }
+
+        // Kept apart, because the difference is the whole point: these are in the process and in no
+        // file, and they are gone when it stops.
+        var live = new TextTable(("address", 18), ("was", 24), ("now", 24), ("why", 60));
+        foreach (var (_, va, was, now, why) in tried)
+        {
+            live.Add($"0x{va:X}", was, now, why ?? string.Empty);
+        }
+
+        return $"{recorded}\n\ntried live, not recorded ({tried.Count}):\n{live.Render()}";
     }
 
     [McpServerTool(Name = "revert_patch")]
-    [Description("Remove a recorded patch, so those bytes go back to what the file says.")]
+    [Description("Remove a patch: the file's bytes go back, in a stopped process too.")]
     public string RevertPatch([Description("Address of the patch, as list_patches shows it.")] string target)
     {
         if (_options.ReadOnly)
@@ -145,6 +184,13 @@ public sealed class PatchTools
         var covering = session.Patches.Covering(rva);
         if (covering is null)
         {
+            // Nothing recorded covers it, so this is the other kind: something tried live and never
+            // written down. Undoing that is the same word to whoever is asking.
+            if (_store.Debug is { } debug && debug.UndoPatch(rva))
+            {
+                return $"took the live patch at 0x{resolved.Va:X} back out; nothing was recorded";
+            }
+
             return $"no patch covers 0x{resolved.Va:X}";
         }
 

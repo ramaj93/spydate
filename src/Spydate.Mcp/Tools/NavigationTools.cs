@@ -25,7 +25,7 @@ public sealed class NavigationTools
     public NavigationTools(SessionStore store) => _store = store;
 
     [McpServerTool(Name = "list_functions")]
-    [Description("List discovered functions. named=\"unnamed\" with sort=\"refs\" is the worklist: what is still called sub_* , most-referenced first. Pages by address with after_va.")]
+    [Description("List discovered functions. named=\"unnamed\" with sort=\"refs\" is the worklist: what is still called sub_* , most-referenced first.")]
     public string ListFunctions(
         [Description("\"unnamed\" (still sub_*), \"named\", or \"all\". Default \"all\".")] string named = "all",
         [Description("\"refs\", \"size\" or \"address\". Default \"address\".")] string sort = "address",
@@ -172,7 +172,7 @@ public sealed class NavigationTools
     }
 
     [McpServerTool(Name = "xrefs")]
-    [Description("Every place that refers to an address, or everything one address refers to. This answers \"who calls this import\" and \"who reads this global\", which is most of reverse engineering.")]
+    [Description("Every place that refers to an address, or everything one address refers to. This answers \"who calls this import\" and \"who reads this global\".")]
     public string Xrefs(
         [Description("Address, sub_XXXX, or a name. For an import use its IAT slot address from list_imports.")] string target,
         [Description("\"to\" (who refers to it) or \"from\" (what it refers to). Default \"to\".")] string direction = "to",

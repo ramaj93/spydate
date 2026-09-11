@@ -754,11 +754,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         if (refused is not null)
         {
             Add($"patch at 0x{binary.Image.RvaToVa(change.Rva):X}: {refused}");
+            return;
         }
-        else
+
+        // Written down, so it has stopped being a hypothesis: the row goes, and the Patches tab has
+        // it now. This is what Keep does by hand, and what happens when the assistant records over
+        // something it was trying.
+        if (on && LivePatches.FirstOrDefault(p => p.Rva == change.Rva) is { } tried)
         {
-            RefreshRegisters();
+            LivePatches.Remove(tried);
+            OnPropertyChanged(nameof(HasLivePatches));
         }
+
+        RefreshRegisters();
     }
 
     /// <summary>
@@ -833,6 +841,22 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         LivePatches.Remove(row);
         OnPropertyChanged(nameof(HasLivePatches));
         Add($"kept the patch at 0x{row.Va:X}; it is in the project now");
+    }
+
+    /// <summary>
+    /// Takes back whichever hypothesis covers an address, for callers working from an address rather
+    /// than a row — the assistant, which sees the same list through its own tools.
+    /// </summary>
+    public bool UndoPatchAt(uint rva)
+    {
+        var row = LivePatches.FirstOrDefault(p => rva >= p.Rva && rva < p.Rva + (uint)(p.Was.Length / 2));
+        if (row is null)
+        {
+            return false;
+        }
+
+        UndoPatch(row);
+        return !LivePatches.Contains(row);
     }
 
     /// <summary>Takes a hypothesis back out of the running process.</summary>

@@ -46,6 +46,20 @@ public sealed class PanelDebugControl : IDebugControl
 
     public void RunTo(ulong staticVa) => OnUi(() => _debugger.RunTo(staticVa));
 
+    public string? TryPatch(ulong va, string instruction, string? comment)
+    {
+        string? problem = "nothing happened";
+        OnUi(() => problem = _debugger.TestPatch(va, instruction, comment));
+        return problem;
+    }
+
+    public bool UndoPatch(uint rva)
+    {
+        bool done = false;
+        OnUi(() => done = _debugger.UndoPatchAt(rva));
+        return done;
+    }
+
     public bool SelectThread(uint threadId)
     {
         bool found = false;
@@ -94,6 +108,7 @@ public sealed class PanelDebugControl : IDebugControl
             Stack = _debugger.Stack.Select(s => (Parse(s.Address), Parse(s.Value))).ToList(),
             Modules = _debugger.Modules.Select(m => (m.Name, Parse(m.Base), m.IsTarget)).ToList(),
             Breakpoints = _debugger.BreakpointAddresses.Order().ToList(),
+            LivePatches = _debugger.LivePatches.Select(p => (p.Rva, p.Va, p.Was, p.Now, p.Comment)).ToList(),
 
             // The tail of the panel log. Enough to carry a module load, a breakpoint and an exit;
             // not so much that a long run buries the answer to the question actually asked.

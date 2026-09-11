@@ -29,7 +29,7 @@ public sealed class StringTools
     public StringTools(SessionStore store) => _store = store;
 
     [McpServerTool(Name = "find_strings")]
-    [Description("Search the strings in the binary. referenced_only=true keeps just the ones some instruction points at, which is nearly always what you want. Pass the address to xrefs to find the code that uses one.")]
+    [Description("Search the strings in the binary. referenced_only=true keeps just the ones some instruction points at, usually what you want. Pass the address to xrefs to find the code that uses one.")]
     public string FindStrings(
         [Description("Substring to look for, case-insensitive. Empty returns the longest strings.")] string query = "",
         [Description("Only strings some instruction refers to. Default false.")] bool referencedOnly = false,

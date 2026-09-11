@@ -40,6 +40,12 @@ public sealed record DebugSnapshot
 
     public IReadOnlyList<(string Name, ulong Base, bool IsTarget)> Modules { get; init; } = [];
 
+    /// <summary>
+    /// Patches that are in the running process but not in the project — hypotheses, tried before
+    /// anyone commits to them. Recording one at the same address is what keeps it.
+    /// </summary>
+    public IReadOnlyList<(uint Rva, ulong Va, string Was, string Now, string? Comment)> LivePatches { get; init; } = [];
+
     /// <summary>Breakpoints by static address — the ones in the listing.</summary>
     public IReadOnlyList<ulong> Breakpoints { get; init; } = [];
 
@@ -102,6 +108,20 @@ public interface IDebugControl
 
     /// <summary>Everything readable right now.</summary>
     DebugSnapshot Snapshot();
+
+    /// <summary>
+    /// Assembles an instruction into the running process without recording it. Returns null on
+    /// success, or why not.
+    ///
+    /// The point of it is to be undoable and to leave no trace in the project: a guess about what a
+    /// check does is worth trying before it is worth writing down. It shows up in the window beside
+    /// the analyst's own hypotheses, because an agent quietly changing a running program where
+    /// nobody can see it is the one way this should not work.
+    /// </summary>
+    string? TryPatch(ulong va, string instruction, string? comment);
+
+    /// <summary>Takes a hypothesis back out of the process. False when none covers that address.</summary>
+    bool UndoPatch(uint rva);
 
     /// <summary>Reads the debuggee's memory at a static address. Empty when it cannot be read.</summary>
     byte[] ReadMemory(ulong staticVa, int length);

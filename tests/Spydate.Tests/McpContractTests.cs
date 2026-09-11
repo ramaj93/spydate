@@ -101,6 +101,14 @@ public class McpContractTests
             total += tool.GetCustomAttribute<DescriptionAttribute>()?.Description?.Length ?? 0;
             foreach (var parameter in tool.GetParameters())
             {
+                // A CancellationToken is supplied by the server, never asked of the model: it is not
+                // in the schema the model is sent, so counting it charged the budget for something
+                // nobody pays for.
+                if (parameter.ParameterType == typeof(CancellationToken))
+                {
+                    continue;
+                }
+
                 total += parameter.Name?.Length ?? 0;
                 total += parameter.GetCustomAttribute<DescriptionAttribute>()?.Description?.Length ?? 0;
             }

@@ -556,6 +556,86 @@ public sealed class DebugToolTests
     }
 
     // ------------------------------------------------------------------
+    // Patches tried in the running process and never written down
+    // ------------------------------------------------------------------
+
+    private static ulong EntryOf(SessionStore store)
+        => store.Current!.Image.RvaToVa(store.Current.Image.EntryPointRva);
+
+    /// <summary>
+    /// A hypothesis goes into the process and nowhere else. Most guesses are wrong, and a project
+    /// holding a history of reverted guesses is a worse record than one holding only what was true.
+    /// </summary>
+    [Fact]
+    public void APatchTriedLiveReachesTheProcessAndNotTheProject()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        store.Debug = stub;
+        var tools = new PatchTools(store, McpOptions.Default with { AllowDebug = true });
+        ulong va = EntryOf(store);
+
+        string answer = tools.Patch($"0x{va:X}", "nop", "does this check matter?", keep: false);
+
+        Assert.Contains(stub.Done, d => d.StartsWith("try:", StringComparison.Ordinal));
+        Assert.Contains("Nothing is recorded", answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Current!.Patches.Count);
+    }
+
+    /// <summary>
+    /// Trying one changes a running process, which is the thing this server does not do unless it was
+    /// asked to — the same gate the debug tools are behind, for the same reason.
+    /// </summary>
+    [Fact]
+    public void TryingAPatchLiveNeedsDebuggingTurnedOn()
+    {
+        using var store = Open();
+        var tools = new PatchTools(store, McpOptions.Default);
+        ulong va = EntryOf(store);
+
+        string answer = tools.Patch($"0x{va:X}", "nop", keep: false);
+
+        Assert.Contains("--allow-debug", answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Current!.Patches.Count);
+    }
+
+    /// <summary>
+    /// Undoing is the same word whichever kind it was, so revert_patch answers for both rather than
+    /// saying "no patch covers that" about something it can see in the process.
+    /// </summary>
+    [Fact]
+    public void RevertingTakesBackSomethingOnlyTriedLive()
+    {
+        using var store = Open();
+        var stub = new StubDebug();
+        store.Debug = stub;
+        var tools = new PatchTools(store, McpOptions.Default with { AllowDebug = true });
+        ulong va = EntryOf(store);
+        tools.Patch($"0x{va:X}", "nop", keep: false);
+
+        string answer = tools.RevertPatch($"0x{va:X}");
+
+        Assert.Contains("took the live patch", answer, StringComparison.Ordinal);
+        Assert.Contains(stub.Done, d => d.StartsWith("undo:", StringComparison.Ordinal));
+        Assert.Empty(stub.Tried);
+    }
+
+    [Fact]
+    public void ListingKeepsWhatWasTriedApartFromWhatWasRecorded()
+    {
+        using var store = Open();
+        store.Debug = new StubDebug();
+        var tools = new PatchTools(store, McpOptions.Default with { AllowDebug = true });
+        ulong va = EntryOf(store);
+        tools.Patch($"0x{va:X}", "nop", keep: false);
+
+        string list = tools.ListPatches();
+
+        Assert.Contains("tried live, not recorded", list, StringComparison.Ordinal);
+        Assert.Contains("no recorded patches", list, StringComparison.Ordinal);
+    }
+
+    // ------------------------------------------------------------------
     // Threads, which the agent could not see at all
     // ------------------------------------------------------------------
 
@@ -753,6 +833,40 @@ public sealed class DebugToolTests
 
         public void Pause() => Done.Add("pause");
 
+        /// <summary>Hypotheses the stub is holding, as the window's list would.</summary>
+        public List<(uint Rva, ulong Va, string Was, string Now, string? Comment)> Tried { get; } = [];
+
+        /// <summary>Why a live try fails, when the test wants it to.</summary>
+        public string? TryRefusal { get; init; }
+
+        public string? TryPatch(ulong va, string instruction, string? comment)
+        {
+            Done.Add($"try:{va:X}:{instruction}");
+            if (TryRefusal is { } no)
+            {
+                return no;
+            }
+
+            Tried.Add((0, va, "4831C0", "90909090", comment));
+            return null;
+        }
+
+        /// <summary>
+        /// Takes back the last thing tried. Which patch covers an address is decided in the window,
+        /// not here, so a stub that matched on one would be testing an answer it made up itself.
+        /// </summary>
+        public bool UndoPatch(uint rva)
+        {
+            Done.Add($"undo:{rva:X}");
+            if (Tried.Count == 0)
+            {
+                return false;
+            }
+
+            Tried.RemoveAt(Tried.Count - 1);
+            return true;
+        }
+
         public void StepInstruction() => Done.Add("step");
 
         public void StepOver() => Done.Add("step_over");
@@ -780,6 +894,7 @@ public sealed class DebugToolTests
             Stack = [(0x1000, 0xDEAD)],
             Modules = [("notepad.exe", 0x140000000, true)],
             Breakpoints = [0x140001000],
+            LivePatches = Tried,
         };
 
         public byte[] ReadMemory(ulong staticVa, int length)
