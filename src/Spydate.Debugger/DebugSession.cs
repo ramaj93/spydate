@@ -49,6 +49,16 @@ public sealed record LoadedModule(string Path, ulong Base)
 public sealed record DebugThread(uint Id, ulong StartAddress);
 
 /// <summary>
+/// Bytes to hold over the running module, kept by RVA so they survive it loading at a fresh address.
+///
+/// <paramref name="Original"/> is what the file says is there, which is what a removal puts back —
+/// not read from the process, because by the time one is removed the byte in the process is the
+/// patch, and restoring that would restore nothing. Same length as <paramref name="Bytes"/>, which
+/// is the rule the whole of patching rests on: nothing moves, so no address anyone wrote down shifts.
+/// </summary>
+public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyList<byte> Original);
+
+/// <summary>
 /// A process running under a debug loop.
 ///
 /// Everything that touches the debuggee happens on one thread. That is not tidiness: Windows ties a
@@ -66,6 +76,13 @@ public sealed class DebugSession : IDisposable
     private readonly Dictionary<ulong, Breakpoint> _breakpoints = new();
     private readonly Dictionary<ulong, LoadedModule> _modules = new();
     private readonly Dictionary<uint, DebugThread> _threads = new();
+
+    /// <summary>
+    /// Bytes to keep written over the module, by RVA. Written the moment the module is there and
+    /// again every time it loads, so a debug run behaves like the patched copy without one being
+    /// saved — and a hypothesis can be tried in the running process and taken straight back out.
+    /// </summary>
+    private readonly Dictionary<uint, LivePatch> _patches = new();
     private readonly CancellationTokenSource _stopping = new();
 
     /// <summary>
@@ -527,6 +544,137 @@ public sealed class DebugSession : IDisposable
     /// Adds a breakpoint at a <em>static</em> address — the one in the listing. It is translated for
     /// the run and planted when the process is there to plant it in.
     /// </summary>
+    /// <summary>The live patches currently held, applied or not.</summary>
+    public IReadOnlyList<LivePatch> LivePatches
+    {
+        get
+        {
+            lock (_patches)
+            {
+                return _patches.Values.ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Holds bytes over the module and writes them if it is loaded, or remembers them for when it is.
+    /// Returns null on success, or why it could not be written now.
+    ///
+    /// The write itself is only safe stopped, and only where nothing is standing on the bytes: a
+    /// thread paused inside them would resume half-way through a new instruction, and a breakpoint's
+    /// int3 would be overwritten with no record of it left. Both are refused rather than risked. When
+    /// the module is not loaded yet the patch is only held, and goes in the moment it arrives.
+    /// </summary>
+    public string? SetPatch(LivePatch patch)
+    {
+        ArgumentNullException.ThrowIfNull(patch);
+        if (patch.Bytes.Count != patch.Original.Count || patch.Bytes.Count == 0)
+        {
+            return "a patch must replace as many bytes as it covers";
+        }
+
+        lock (_patches)
+        {
+            _patches[patch.Rva] = patch;
+        }
+
+        if (!TargetLoaded || _process == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        return WriteRange(patch.Rva, patch.Bytes);
+    }
+
+    /// <summary>
+    /// Takes a held patch out, putting the file's own bytes back if the module is loaded. Returns
+    /// null on success, or why it could not be done now — in which case it stays held and applied.
+    /// </summary>
+    public string? ClearPatch(uint rva)
+    {
+        LivePatch? patch;
+        lock (_patches)
+        {
+            patch = _patches.TryGetValue(rva, out var found) ? found : null;
+        }
+
+        if (patch is null)
+        {
+            return null;
+        }
+
+        if (TargetLoaded && _process != IntPtr.Zero && WriteRange(rva, patch.Original) is { } refused)
+        {
+            return refused;
+        }
+
+        lock (_patches)
+        {
+            _patches.Remove(rva);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Writes bytes at an RVA in the loaded module, refusing when it is not a moment to. The caller
+    /// has already decided what goes there; this decides only whether it is safe to put it there now.
+    /// </summary>
+    private string? WriteRange(uint rva, IReadOnlyList<byte> bytes)
+    {
+        if (State == DebugState.Running)
+        {
+            return "it is running — pause it before changing its bytes";
+        }
+
+        ulong start = LoadedBase + rva;
+        ulong end = start + (ulong)bytes.Count;
+
+        foreach (var thread in Threads)
+        {
+            ulong rip = RegistersOf(thread.Id)?.FirstOrDefault(r => r.Name == "rip").Value ?? 0;
+            if (rip >= start && rip < end)
+            {
+                return $"thread {thread.Id} is stopped inside those bytes; it would resume in the middle "
+                       + "of a changed instruction";
+            }
+        }
+
+        lock (_breakpoints)
+        {
+            foreach (var (staticVa, breakpoint) in _breakpoints)
+            {
+                ulong at = ToRuntime(staticVa);
+                if (breakpoint.Planted && at >= start && at < end)
+                {
+                    return $"a breakpoint at 0x{staticVa:X} is inside those bytes; clear it first";
+                }
+            }
+        }
+
+        WriteBytes(start, bytes);
+        return null;
+    }
+
+    /// <summary>
+    /// Writes every held patch into the module. Called before breakpoints are planted, so a
+    /// breakpoint that lands on a patched byte saves the patched byte and restores the patch, not the
+    /// file, when it is hit or lifted.
+    /// </summary>
+    private void WritePatches()
+    {
+        List<LivePatch> patches;
+        lock (_patches)
+        {
+            patches = _patches.Values.ToList();
+        }
+
+        foreach (var patch in patches)
+        {
+            WriteBytes(LoadedBase + patch.Rva, patch.Bytes);
+        }
+    }
+
     public bool AddBreakpoint(ulong staticVa)
     {
         lock (_breakpoints)
@@ -1191,6 +1339,9 @@ public sealed class DebugSession : IDisposable
             return;
         }
 
+        // Patches first, breakpoints on top: see WritePatches for why the order is the whole point.
+        WritePatches();
+
         foreach (var breakpoint in Breakpoints)
         {
             PlantStatic(breakpoint.Address);
@@ -1287,6 +1438,21 @@ public sealed class DebugSession : IDisposable
             if (Native.WriteProcessMemory(_process, address, &b, 1, out _))
             {
                 Native.FlushInstructionCache(_process, address, 1);
+            }
+        }
+    }
+
+    private void WriteBytes(ulong address, IReadOnlyList<byte> bytes)
+    {
+        byte[] buffer = bytes as byte[] ?? bytes.ToArray();
+        unsafe
+        {
+            fixed (byte* p = buffer)
+            {
+                if (Native.WriteProcessMemory(_process, address, p, (nuint)buffer.Length, out _))
+                {
+                    Native.FlushInstructionCache(_process, address, (nuint)buffer.Length);
+                }
             }
         }
     }

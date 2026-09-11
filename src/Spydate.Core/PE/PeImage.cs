@@ -277,6 +277,52 @@ public sealed class PeImage
 
     public ReadOnlyMemory<byte> ReadAtVa(ulong va, int length) => VaToRva(va) is { } rva ? ReadAtRva(rva, length) : ReadOnlyMemory<byte>.Empty;
 
+    /// <summary>
+    /// The RVA of the first relocation that falls within <paramref name="length"/> bytes of
+    /// <paramref name="rva"/>, or null when none does.
+    ///
+    /// It is the one thing that makes a patch written into a running image unsafe. The bytes in the
+    /// file are what the loader started from; where a relocation sits, it has since rewritten them to
+    /// suit the address the image actually landed at. Writing the file's bytes back over that spot
+    /// puts an address from another load into the running one. A NOP-out or a flipped branch never
+    /// covers a relocation; a hand-typed instruction that names an absolute address can. Saving a
+    /// patched <em>copy</em> is unaffected — the file is never relocated — so this bears only on the
+    /// live case. Dir64 relocations span eight bytes, so the window is widened to catch one that
+    /// begins just before the range and reaches into it.
+    /// </summary>
+    public uint? RelocationWithin(uint rva, int length)
+    {
+        if (length <= 0)
+        {
+            return null;
+        }
+
+        // A fix-up patches an 8-byte field at most (Dir64); treat every one as 8 wide and test for a
+        // true overlap of [entry, entry+8) with [rva, rva+length), so one that merely abuts the range
+        // does not count.
+        const ulong widest = 8;
+        ulong start = rva;
+        ulong end = (ulong)rva + (ulong)length;
+
+        foreach (var block in Relocations)
+        {
+            foreach (var entry in block.Entries)
+            {
+                if (entry.Type == RelocationType.Absolute)
+                {
+                    continue;
+                }
+
+                if (entry.Rva < end && entry.Rva + widest > start)
+                {
+                    return entry.Rva;
+                }
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Reads a NUL-terminated ASCII string at an RVA (empty if unmapped).</summary>
     public string ReadAsciiZAtRva(uint rva, int max = 4096)
         => RvaToOffset(rva) is { } offset ? SpanReader.ReadAsciiZAt(_data.Span, (int)offset, max) : string.Empty;

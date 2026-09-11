@@ -30,6 +30,7 @@
         <KeyBinding Key="F2" Command="{Binding RenameSymbolCommand}" />
         <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding EditCommentCommand}" />
         <KeyBinding Key="P" Modifiers="Control" Command="{Binding PatchCommand}" />
+        <KeyBinding Key="P" Modifiers="Control+Shift" Command="{Binding TestPatchLiveCommand}" />
         <KeyBinding Key="F9" Command="{Binding ToggleBreakpointCommand}" />
         <KeyBinding Key="F8" Command="{Binding Debugger.ContinueCommand}" />
         <KeyBinding Key="F10" Command="{Binding Debugger.StepOverCommand}" />
@@ -156,6 +157,9 @@
                               ToolTip="Runs a call to completion instead of stepping into it" />
                     <MenuItem Header="Step one _instruction" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}" />
                     <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding RunToCursorCommand}" />
+                    <Separator />
+                    <MenuItem Header="_Test patch live…" InputGestureText="Ctrl+Shift+P" Command="{Binding TestPatchLiveCommand}"
+                              ToolTip="Assemble an instruction into the running process as a hypothesis, to Keep or Undo" />
                     <Separator />
                     <MenuItem Header="Toggle _breakpoint" InputGestureText="F9" Command="{Binding ToggleBreakpointCommand}"
                               ToolTip="Marks the line the caret is on. Works before anything is running." />
@@ -461,6 +465,10 @@
                                             <RadioButton x:Name="PaneLog" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Log"
                                                          AutomationProperties.Name="Log pane" />
+                                            <RadioButton x:Name="PaneLivePatches" DockPanel.Dock="Left"
+                                                         Style="{StaticResource StripTab}" Content="Live patches"
+                                                         ToolTip="Patches tried in the running process but not yet in the project"
+                                                         AutomationProperties.Name="Live patches pane" />
 
                                             <TextBlock DockPanel.Dock="Right" Text="{Binding Flags}"
                                                        VerticalAlignment="Center" Margin="12,0,6,0"
@@ -578,6 +586,34 @@
                                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                                  Visibility="{Binding IsChecked, ElementName=PaneLog, Converter={StaticResource BoolToVisibility}}"
                                                  AutomationProperties.Name="Debug log" />
+
+                                        <!-- Hypotheses: bytes that are in the process but not the project.
+                                             Keep writes one into the project; Undo takes it back out. -->
+                                        <DataGrid ItemsSource="{Binding LivePatches}" AutoGenerateColumns="False"
+                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  SelectionMode="Single"
+                                                  Visibility="{Binding IsChecked, ElementName=PaneLivePatches, Converter={StaticResource BoolToVisibility}}"
+                                                  AutomationProperties.Name="Live patches">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="address" Binding="{Binding Where}"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                <DataGridTextColumn Header="was" Binding="{Binding Was}"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                <DataGridTextColumn Header="now" Binding="{Binding Now}"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                <DataGridTextColumn Header="why" Binding="{Binding Comment}" Width="*" />
+                                            </DataGrid.Columns>
+                                            <DataGrid.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Keep (write into the project)"
+                                                              Command="{Binding PlacementTarget.DataContext.KeepPatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                    <MenuItem Header="Undo (take out of the process)"
+                                                              Command="{Binding PlacementTarget.DataContext.UndoPatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                </ContextMenu>
+                                            </DataGrid.ContextMenu>
+                                        </DataGrid>
                                     </Grid>
                                 </Grid>
                             </TabItem>

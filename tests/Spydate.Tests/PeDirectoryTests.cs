@@ -167,6 +167,23 @@ public class PeDirectoryTests
     }
 
     [Fact]
+    public void RelocationWithinFindsAFixupAndMissesABareRange()
+    {
+        // Three Dir64 fix-ups at 0x1010, 0x1020, 0x1030.
+        var pe = SyntheticPe.WithRelocationBlock(pageRva: 0x1000, blockSize: 16);
+
+        // A range straddling one is refused, and a Dir64 begins up to seven bytes before the range
+        // and still reaches into it, so the window looks back that far.
+        Assert.Equal(0x1010u, pe.RelocationWithin(0x1010, 4));
+        Assert.Equal(0x1010u, pe.RelocationWithin(0x1014, 4));   // starts 4 into the 8-byte fix-up
+
+        // A gap between fix-ups has none, which is what makes a nop-out or a flipped branch safe.
+        Assert.Null(pe.RelocationWithin(0x1018, 4));
+        Assert.Null(pe.RelocationWithin(0x1040, 8));
+        Assert.Null(pe.RelocationWithin(0x1010, 0));
+    }
+
+    [Fact]
     public void WellFormedRelocationBlockParses()
     {
         var pe = SyntheticPe.WithRelocationBlock(pageRva: 0x1000, blockSize: 16);

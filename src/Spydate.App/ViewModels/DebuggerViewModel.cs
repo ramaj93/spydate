@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.Core.Project;
 using Spydate.Debugger;
+using Spydate.Disassembly;
 
 namespace Spydate.App.ViewModels;
 
@@ -31,6 +32,15 @@ public sealed record ThreadRow(uint Id, string Start, bool IsCurrent, bool Waiti
 {
     /// <summary>What it is doing, when that decides whether it can be stepped.</summary>
     public string Doing => Waiting ? "waiting" : string.Empty;
+}
+
+/// <summary>
+/// A patch that is in the running process but not in the project — a hypothesis, tried live before
+/// anyone commits to it. Keep writes it into the project; Undo takes it back out of the process.
+/// </summary>
+public sealed record LivePatchRow(uint Rva, ulong Va, string Was, string Now, string? Comment)
+{
+    public string Where => $"0x{Va:X}";
 }
 
 /// <summary>
@@ -302,6 +312,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             session.AddBreakpoint(address);
         }
+
+        // Every patch that is switched on goes into the run, so it behaves like the patched copy
+        // would without one having to be saved. They are held now and written when the module lands.
+        ApplySavedPatches(binary, session);
+        binary.Patches.Changed += OnSavedPatchChanged;
 
         try
         {
@@ -676,15 +691,195 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
     }
 
+    // ------------------------------------------------------------------
+    // Patches in the running process
+    // ------------------------------------------------------------------
+
+    /// <summary>Patches tried live that the project does not yet hold. See <see cref="LivePatchRow"/>.</summary>
+    public ObservableCollection<LivePatchRow> LivePatches { get; } = new();
+
+    public bool HasLivePatches => LivePatches.Count > 0;
+
+    private void ApplySavedPatches(OpenedBinary binary, DebugSession session)
+    {
+        foreach (var patch in binary.Patches.Snapshot().Where(p => p.Enabled))
+        {
+            if (Unsafe(binary, patch.Rva, patch.Bytes.Count) is { } why)
+            {
+                Add($"patch at 0x{binary.Image.RvaToVa(patch.Rva):X} not applied live: {why}");
+                continue;
+            }
+
+            session.SetPatch(new LivePatch(patch.Rva, patch.Bytes, patch.Original));
+        }
+    }
+
+    /// <summary>
+    /// Follows the project's patches into the running process while it is stopped. A save-patched-copy
+    /// is a separate thing; this is the same switch, honoured live.
+    /// </summary>
+    private void OnSavedPatchChanged(object? sender, PatchChange change)
+    {
+        // The assistant records patches from its own thread, so this can arrive off the UI thread;
+        // it touches the log and the registers, which are bound. A human editing the Patches tab
+        // fires it on the UI thread already, where the invoke runs inline.
+        if (Application.Current?.Dispatcher is { } dispatcher && !dispatcher.CheckAccess())
+        {
+            dispatcher.BeginInvoke(() => OnSavedPatchChanged(sender, change));
+            return;
+        }
+
+        if (_session is not { } session || _workspace.Current is not { } binary)
+        {
+            return;
+        }
+
+        bool on = change.After is { Enabled: true };
+        string? refused;
+        if (on)
+        {
+            if (Unsafe(binary, change.Rva, change.After!.Bytes.Count) is { } why)
+            {
+                Add($"patch at 0x{binary.Image.RvaToVa(change.Rva):X} not applied live: {why}");
+                return;
+            }
+
+            refused = session.SetPatch(new LivePatch(change.Rva, change.After!.Bytes, change.After!.Original));
+        }
+        else
+        {
+            refused = session.ClearPatch(change.Rva);
+        }
+
+        if (refused is not null)
+        {
+            Add($"patch at 0x{binary.Image.RvaToVa(change.Rva):X}: {refused}");
+        }
+        else
+        {
+            RefreshRegisters();
+        }
+    }
+
+    /// <summary>
+    /// Tries an instruction in the running process without recording it — a hypothesis. Returns null
+    /// on success, or why it could not be tried. It shows up as a live patch, to Keep or Undo.
+    /// </summary>
+    public string? TestPatch(ulong va, string instruction, string? comment = null)
+    {
+        if (_session is not { } session)
+        {
+            return "nothing is running to try it in";
+        }
+
+        if (_workspace.Current is not { Analysis: { } analysis } binary)
+        {
+            return "open a function first";
+        }
+
+        var proposal = InstructionPatches.Assemble(analysis, va, instruction);
+        if (!proposal.Ok)
+        {
+            return proposal.Problem;
+        }
+
+        var patch = proposal.Patch!;
+        if (Unsafe(binary, patch.Rva, patch.Bytes.Count) is { } why)
+        {
+            return why;
+        }
+
+        if (session.SetPatch(new LivePatch(patch.Rva, patch.Bytes, patch.Original)) is { } refused)
+        {
+            return refused;
+        }
+
+        // Replaces any earlier hypothesis at the same place, the way the store would.
+        for (int i = LivePatches.Count - 1; i >= 0; i--)
+        {
+            if (LivePatches[i].Rva == patch.Rva)
+            {
+                LivePatches.RemoveAt(i);
+            }
+        }
+
+        LivePatches.Add(new LivePatchRow(patch.Rva, va, patch.OriginalHex, patch.Hex, comment ?? patch.Comment));
+        OnPropertyChanged(nameof(HasLivePatches));
+        Add($"trying 0x{va:X} live: {patch.OriginalHex} → {patch.Hex}");
+        RefreshRegisters();
+        return null;
+    }
+
+    /// <summary>Writes a hypothesis into the project, where it becomes an ordinary patch.</summary>
+    [RelayCommand]
+    private void KeepPatch(LivePatchRow? row)
+    {
+        if (row is null || _workspace.Current is not { } binary)
+        {
+            return;
+        }
+
+        var original = binary.Image.ReadAtRva(row.Rva, row.Was.Length / 2).ToArray();
+        binary.Patches.Set(row.Rva, new Patch
+        {
+            Rva = row.Rva,
+            Bytes = Convert.FromHexString(row.Now),
+            Original = original.Length == row.Now.Length / 2 ? original : Convert.FromHexString(row.Was),
+            Comment = row.Comment,
+            Source = AnnotationSource.User,
+            Modified = DateTimeOffset.Now,
+        });
+
+        LivePatches.Remove(row);
+        OnPropertyChanged(nameof(HasLivePatches));
+        Add($"kept the patch at 0x{row.Va:X}; it is in the project now");
+    }
+
+    /// <summary>Takes a hypothesis back out of the running process.</summary>
+    [RelayCommand]
+    private void UndoPatch(LivePatchRow? row)
+    {
+        if (row is null || _session is not { } session)
+        {
+            return;
+        }
+
+        if (session.ClearPatch(row.Rva) is { } refused)
+        {
+            Add($"could not undo 0x{row.Va:X}: {refused}");
+            return;
+        }
+
+        LivePatches.Remove(row);
+        OnPropertyChanged(nameof(HasLivePatches));
+        Add($"undid the live patch at 0x{row.Va:X}");
+        RefreshRegisters();
+    }
+
+    /// <summary>Why a patch cannot go into the running image, or null when it can.</summary>
+    private static string? Unsafe(OpenedBinary binary, uint rva, int length)
+        => binary.Image.RelocationWithin(rva, length) is { } at
+            ? $"it covers an address the loader relocates (0x{binary.Image.RvaToVa(at):X}), so the file's "
+              + "bytes are wrong for the running image; save a patched copy instead"
+            : null;
+
     private void StopSession()
     {
         ExecutionAddress = null;
+        if (_workspace.Current is { } open)
+        {
+            open.Patches.Changed -= OnSavedPatchChanged;
+        }
+
         if (_session is { } session)
         {
             session.Reported -= OnReported;
             session.Dispose();
             _session = null;
         }
+
+        LivePatches.Clear();
+        OnPropertyChanged(nameof(HasLivePatches));
 
         State = DebugState.NotStarted;
         Registers.Clear();

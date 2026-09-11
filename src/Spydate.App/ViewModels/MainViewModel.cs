@@ -50,6 +50,7 @@ public sealed partial class MainViewModel : ObservableObject
             if (e.PropertyName is nameof(DebuggerViewModel.State) or nameof(DebuggerViewModel.IsStopped))
             {
                 RunToCursorCommand.NotifyCanExecuteChanged();
+                TestPatchLiveCommand.NotifyCanExecuteChanged();
             }
         };
         debugger.StoppedAt += (_, va) => ShowWhereItStopped(va);
@@ -365,6 +366,46 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         Propose(_ => InstructionPatches.Assemble(analysis, va, typed));
+    }
+
+    private bool CanTestPatchLive() => Debugger.IsStopped && CanPatchHere();
+
+    /// <summary>
+    /// Assembles an instruction into the running process without recording it — a hypothesis. It goes
+    /// into the process there and then, to be watched and then kept or undone. Only while stopped,
+    /// and only where the debugger is already running the thing being read.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanTestPatchLive))]
+    private void TestPatchLive()
+    {
+        if (Binary?.Analysis is not { } analysis || PatchTarget is not { } va)
+        {
+            return;
+        }
+
+        string current = analysis.DisassembleRange(va, 16, 1) is [{ } instruction] ? instruction.Text : string.Empty;
+
+        string? typed = _dialogs.AskForText(
+            "Try a patch live",
+            $"Instruction at 0x{va:X}, into the running process",
+            "It is written into the process now, not the project — Keep it or Undo it from the Live patches tab. "
+            + "Several may be separated by semicolons; bytes: <hex> writes raw bytes.",
+            current);
+
+        if (string.IsNullOrWhiteSpace(typed))
+        {
+            return;
+        }
+
+        if (Debugger.TestPatch(va, typed) is { } problem)
+        {
+            StatusText = problem;
+            Log($"Not tried live: {problem}");
+        }
+        else
+        {
+            StatusText = $"Trying 0x{va:X} in the running process. Keep or undo it from the Live patches tab.";
+        }
     }
 
     private void Propose(Func<BinaryAnalysis, PatchProposal> build)

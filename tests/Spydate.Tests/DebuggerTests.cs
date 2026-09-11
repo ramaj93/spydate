@@ -595,6 +595,67 @@ public sealed class DebuggerTests
         Assert.False(session.Pause());
     }
 
+    /// <summary>
+    /// A live patch goes into the running process and its file bytes come back out — the whole of
+    /// runtime patching, minus the file. The loader break is before the program's own code, so what
+    /// is at the entry then is the file's byte, which is what a removal must restore.
+    /// </summary>
+    [Fact]
+    public void ALivePatchIsWrittenIntoTheProcessAndTakenBackOut()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        uint rva = image.EntryPointRva;
+        ulong entry = image.ImageBase + rva;
+
+        using var session = new DebugSession();
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong runtime = session.ToRuntime(entry);
+        byte original = session.ReadMemory(runtime, 1)[0];
+        Assert.NotEqual(0x90, original);
+
+        Assert.Null(session.SetPatch(new LivePatch(rva, [0x90], [original])));
+        Assert.Equal(0x90, session.ReadMemory(runtime, 1)[0]);
+        Assert.Contains(session.LivePatches, p => p.Rva == rva);
+
+        Assert.Null(session.ClearPatch(rva));
+        Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
+        Assert.DoesNotContain(session.LivePatches, p => p.Rva == rva);
+    }
+
+    /// <summary>
+    /// A breakpoint and a patch on the same bytes have no single answer — one wants an int3 there,
+    /// the other its own byte — so a live patch over a planted breakpoint is refused rather than
+    /// clobbering it. The entry breakpoint is planted at the loader break, before the patch is tried.
+    /// </summary>
+    [Fact]
+    public void ALivePatchOverAPlantedBreakpointIsRefused()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        uint rva = image.EntryPointRva;
+        ulong entry = image.ImageBase + rva;
+
+        using var session = new DebugSession();
+        session.AddBreakpoint(entry);
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        string? refused = session.SetPatch(new LivePatch(rva, [0x90], [0xCC]));
+        Assert.NotNull(refused);
+        Assert.Contains("breakpoint", refused, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AThreadThatHasGoneIsNotTheOneStepped()
     {
