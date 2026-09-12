@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.Versioning;
+using System.Reflection.Metadata;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -99,6 +100,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Modules.Clear();
         Threads.Clear();
         Locals.Clear();
+        _statements.Clear();   // a different binary has different methods under the same tokens
         OnPropertyChanged(nameof(NeedsHost));
 
         // Which debugger applies is a fact about the file, so the panel rearranges itself when a
@@ -1452,15 +1454,54 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(at.MethodToken & 0x00FFFFFF));
-        if (bodies.Of(handle) is not { } body)
+        if (bodies.Of(handle) is null)
         {
             return null;
         }
 
-        return IlStatements.Containing(body, managed.Metadata, (int)at.Offset) is { } span
-            ? ((uint)span.From, (uint)span.To)
-            : null;
+        foreach (var statement in Statements(managed, at.MethodToken, handle))
+        {
+            if (statement.Covers(at.MethodToken, (int)at.Offset))
+            {
+                return ((uint)statement.From, (uint)statement.To);
+            }
+        }
+
+        return null;
     }
+
+    /// <summary>
+    /// The statements of one method, decompiled once and kept.
+    ///
+    /// Decompiling on every stop would be paid for on every step, and a step is something people
+    /// press repeatedly. The same method comes up again and again — stepping through it is the whole
+    /// activity — so the second press onwards costs a dictionary lookup.
+    /// </summary>
+    private IReadOnlyList<SourceStatement> Statements(ManagedAssembly managed, uint token, MethodDefinitionHandle handle)
+    {
+        if (_statements.TryGetValue(token, out var already))
+        {
+            return already;
+        }
+
+        IReadOnlyList<SourceStatement> found;
+        try
+        {
+            found = managed.Decompiler.StatementsFor(handle);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A method the decompiler will not take is not a reason to stop stepping: without
+            // ranges the session steps one instruction, which still moves.
+            Add($"could not work out the statements of method 0x{token:X8}: {ex.Message}");
+            found = System.Array.Empty<SourceStatement>();
+        }
+
+        _statements[token] = found;
+        return found;
+    }
+
+    private readonly Dictionary<uint, IReadOnlyList<SourceStatement>> _statements = new();
 
     /// <summary>Moves the dot in the listing to match a breakpoint set or cleared from elsewhere.</summary>
     private void Mark(string module, uint methodToken, uint ilOffset, bool on)

@@ -27,6 +27,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private readonly ManualResetEventSlim _attached = new(false);
     private readonly Lock _gate = new();
 
+    private readonly ManagedTypes _types = new();
     private GCHandle _self;
     private IntPtr _unregister;
     private IntPtr _launched;
@@ -1086,7 +1087,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         return Com.Owned<ICorDebugILFrame, IReadOnlyList<ManagedValue>>(
             frame,
-            il => arguments ? ManagedValues.Arguments(il) : ManagedValues.Locals(il))
+            il => arguments ? ManagedValues.Arguments(il, _types) : ManagedValues.Locals(il, _types))
             ?? Array.Empty<ManagedValue>();
     }
 
@@ -1297,5 +1298,6 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         _attached.Dispose();
         _settled.Dispose();
         _ready.Dispose();
+        _types.Dispose();
     }
 }

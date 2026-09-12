@@ -109,7 +109,7 @@ public class ManagedSourceTests
     }
 
     [Fact]
-    public void TheAddressOnALineIsInsideTheMethodAtOrBeforeItsInstruction()
+    public void TheAddressOnALineIsWhereThatLinesStatementBegins()
     {
         var image = PeImage.Load(CorePath);
         using var assembly = ManagedAssembly.Load(CorePath);
@@ -130,10 +130,10 @@ public class ManagedSourceTests
         {
             ulong address = AddressText.FromLine(lines[line.Line - 1])!.Value;
 
-            // In this method's body, and at or before the instruction the decompiler named — the
-            // address is the start of the statement holding that instruction, which is a step back
-            // and never a step forward.
-            Assert.InRange(address, image.ImageBase + body.IlRva, image.ImageBase + body.RvaOf(line.Offset));
+            // The line already carries the start of its statement, because that is the only offset a
+            // breakpoint binds at, so the text and the mapping say the same number.
+            
+            Assert.Equal(image.ImageBase + body.RvaOf(line.Offset), address);
             checkedLines++;
         }
 
@@ -145,19 +145,21 @@ public class ManagedSourceTests
     }
 
     [Fact]
-    public void EveryAddressLandsWhereTheEvaluationStackIsEmpty()
+    public void EveryAddressStartsAStatementAndAnInstruction()
     {
         var image = PeImage.Load(CorePath);
         using var assembly = ManagedAssembly.Load(CorePath);
         var bodies = ManagedBodies.Build(assembly);
-        var stack = new IlStack(assembly.Metadata);
 
-        // The rule the runtime actually enforces, and the one that is invisible until a breakpoint
-        // is silently refused: it binds one only where the stack is empty, because that is where the
-        // JIT's IL-to-native map has entries. ILSpy hands back the offset of the expression a line
-        // was made from, which is routinely one instruction into a statement — after the ldarg.0
-        // that pushed the receiver. Those offsets produced BreakpointSetError, asynchronously, long
-        // after CreateBreakpoint had said yes.
+        // The rule the runtime enforces is that a breakpoint binds only where the evaluation stack
+        // is empty, and a statement boundary is where that happens. So every address a line carries
+        // has to be the start of one, and of an instruction — an offset inside either is refused,
+        // asynchronously, long after CreateBreakpoint said yes.
+        //
+        // Checked against the decompiler's own statements rather than against a stack count taken by
+        // walking the IL: that walk is wrong the first time a method contains a ternary, which is
+        // how the whole of McpOptions.Parse came to be read as one statement. Whether the runtime
+        // really accepts these is a question for a running process, and ManagedDebuggerTests asks it.
         int checkedLines = 0;
         foreach (var type in assembly.Namespaces.SelectMany(n => n.Types).Take(12))
         {
@@ -171,10 +173,13 @@ public class ManagedSourceTests
                     continue;   // not addressable, which is a legitimate answer
                 }
 
-                var body = bodies.At(image.VaToRva(va)!.Value)!;
-                int offset = body.OffsetOf(image.VaToRva(va)!.Value);
+                uint rva = image.VaToRva(va)!.Value;
+                var body = bodies.At(rva)!;
+                int offset = body.OffsetOf(rva);
 
-                Assert.Equal(0, stack.Delta(body.Il, 0, offset, body.Method));
+                Assert.Contains(source.Statements, s => s.From == offset);
+                Assert.True(Il.TryCovering(body.Il, offset, out var covering) && covering.Offset == offset,
+                    $"IL_{offset:X4} is not the start of an instruction");
                 checkedLines++;
             }
         }
@@ -208,71 +213,32 @@ public class ManagedSourceTests
     }
 
     [Fact]
-    public void AStatementRunsFromOneEmptyStackToTheNext()
-    {
-        using var assembly = ManagedAssembly.Load(CorePath);
-        var bodies = ManagedBodies.Build(assembly);
-        var stack = new IlStack(assembly.Metadata);
-        var member = TypeOf(assembly, "Spydate.Core.Text.AddressText").Members.First(m => m.Name == "ParseHex");
-        var body = bodies.Of((System.Reflection.Metadata.MethodDefinitionHandle)member.Handle)!;
-
-        // Every instruction in the method belongs to exactly one statement, and asking from
-        // anywhere inside it gives the same answer — which is what makes this usable for stepping:
-        // the range does not depend on how far into the statement execution happens to be.
-        var byStart = new Dictionary<int, (int From, int To)>();
-        foreach (var instruction in Il.Walk(body.Il))
-        {
-            var found = IlStatements.Containing(body, assembly.Metadata, instruction.Offset);
-            Assert.NotNull(found);
-
-            var (from, to) = found!.Value;
-            Assert.InRange(instruction.Offset, from, to - 1);
-
-            // Both ends are where the stack is empty: the start because that is where a statement
-            // begins, the end because that is the next one's start.
-            Assert.Equal(0, stack.Delta(body.Il, 0, from, body.Method));
-            if (to < body.Il.Length)
-            {
-                Assert.Equal(0, stack.Delta(body.Il, 0, to, body.Method));
-            }
-
-            if (byStart.TryGetValue(from, out var already))
-            {
-                Assert.Equal(already, (from, to));
-            }
-            else
-            {
-                byStart[from] = (from, to);
-            }
-        }
-
-        // Several statements, covering the method end to end with no gaps.
-        Assert.True(byStart.Count > 3, $"only {byStart.Count} statements in a method with several");
-        var ordered = byStart.Values.OrderBy(s => s.From).ToList();
-        Assert.Equal(0, ordered[0].From);
-        Assert.Equal(body.Il.Length, ordered[^1].To);
-        for (int i = 1; i < ordered.Count; i++)
-        {
-            Assert.Equal(ordered[i - 1].To, ordered[i].From);
-        }
-    }
-
-    [Fact]
-    public void AnOffsetInsideAnInstructionIsNotAStatement()
+    public void StatementsCoverAMethodEndToEndWithoutGaps()
     {
         using var assembly = ManagedAssembly.Load(CorePath);
         var bodies = ManagedBodies.Build(assembly);
         var member = TypeOf(assembly, "Spydate.Core.Text.AddressText").Members.First(m => m.Name == "ParseHex");
         var body = bodies.Of((System.Reflection.Metadata.MethodDefinitionHandle)member.Handle)!;
+        uint token = (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(member.Handle);
 
-        // An operand byte is not a place. Answering for one would hand the stepper a range starting
-        // mid-instruction, and the runtime would either refuse it or step from somewhere nobody
-        // asked about.
-        var multiByte = Il.Walk(body.Il).First(i => i.Length > 1);
-        Assert.Null(IlStatements.Containing(body, assembly.Metadata, multiByte.Offset + 1));
+        var statements = assembly.Decompiler.StatementsFor((System.Reflection.Metadata.MethodDefinitionHandle)member.Handle);
 
-        // Past the end is not a place either.
-        Assert.Null(IlStatements.Containing(body, assembly.Metadata, body.Il.Length));
+        // Several of them, in order, meeting end to end. A gap would be code a step could land in
+        // and no line could show; an overlap would be two lines claiming the same instruction.
+        Assert.True(statements.Count > 3, $"only {statements.Count} statements in a method with several");
+        Assert.All(statements, s => Assert.Equal(token, s.MethodToken));
+        Assert.All(statements, s => Assert.InRange(s.From, 0, body.Il.Length - 1));
+        Assert.All(statements, s => Assert.InRange(s.To, s.From + 1, body.Il.Length));
+
+        for (int i = 1; i < statements.Count; i++)
+        {
+            Assert.True(statements[i].From >= statements[i - 1].To,
+                $"IL_{statements[i].From:X4} starts before IL_{statements[i - 1].To:X4} ended");
+        }
+
+        // And every statement starts at an instruction, never inside one.
+        var starts = Il.Walk(body.Il).Select(i => i.Offset).ToHashSet();
+        Assert.All(statements, s => Assert.Contains(s.From, starts));
     }
 
     [Fact]

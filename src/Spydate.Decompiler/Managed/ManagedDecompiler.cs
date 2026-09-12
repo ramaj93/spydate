@@ -54,6 +54,20 @@ public sealed class ManagedDecompiler
         return SequencePoints.Of(d, d.Decompile(member.Handle), _assembly.Settings);
     }
 
+    /// <summary>
+    /// Where each statement of one method begins and ends, for a debugger that has only a token.
+    ///
+    /// The stop reports a method and an offset and nothing else, so this takes the same. It also
+    /// works for a state machine's <c>MoveNext</c>, which is what an async method's stops are in:
+    /// the decompiler is given that method and the ranges come back for the body it really has.
+    /// </summary>
+    public IReadOnlyList<SourceStatement> StatementsFor(MethodDefinitionHandle method, CancellationToken cancellationToken = default)
+    {
+        var d = _assembly.CSharpDecompiler;
+        d.CancellationToken = cancellationToken;
+        return SequencePoints.Statements(d, d.Decompile(method));
+    }
+
     /// <summary>C# for a whole type, with the IL offset behind each line — every method in it.</summary>
     public ManagedSource SourceForType(ManagedType type, CancellationToken cancellationToken = default)
     {

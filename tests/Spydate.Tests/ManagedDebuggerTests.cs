@@ -197,8 +197,8 @@ public class ManagedDebuggerTests
         uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
 
         using var assembly = Spydate.Decompiler.Managed.ManagedAssembly.Load(typeof(Spydate.Core.PE.PeImage).Assembly.Location);
-        var bodies = Spydate.Decompiler.Managed.ManagedBodies.Build(assembly);
-        var body = bodies.Of(System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(token & 0xFFFFFF)))!;
+        var statements = assembly.Decompiler.StatementsFor(
+            System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(token & 0xFFFFFF)));
 
         using var session = Headless();
         Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
@@ -210,17 +210,17 @@ public class ManagedDebuggerTests
         var walked = new List<uint> { session.StoppedAt!.Offset };
         for (int i = 0; i < 3; i++)
         {
-            var statement = Spydate.Decompiler.Managed.IlStatements.Containing(body, assembly.Metadata, (int)session.StoppedAt!.Offset);
-            Assert.NotNull(statement);
+            var statement = statements.FirstOrDefault(s => s.Covers(token, (int)session.StoppedAt!.Offset));
+            Assert.True(statement.To > statement.From, $"nothing covers IL_{session.StoppedAt!.Offset:X4}");
 
-            Assert.Null(session.Step(into: false, (uint)statement!.Value.From, (uint)statement.Value.To));
+            Assert.Null(session.Step(into: false, (uint)statement.From, (uint)statement.To));
             Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(20)), $"step {i + 1} never landed");
             Assert.Equal(token, session.StoppedAt!.MethodToken);
 
             // Where the statement said it would end. Not "somewhere after here": a step that
             // overshot would be stepping over the next statement as well, which reads as lines
             // being skipped.
-            Assert.Equal((uint)statement.Value.To, session.StoppedAt.Offset);
+            Assert.Equal((uint)statement.To, session.StoppedAt.Offset);
             walked.Add(session.StoppedAt.Offset);
         }
 
@@ -285,6 +285,139 @@ public class ManagedDebuggerTests
         var bools = locals.Where(l => l.Kind == "bool").ToList();
         Assert.NotEmpty(bools);
         Assert.All(bools, b => Assert.Equal("false", b.Text));
+    }
+
+    [Fact]
+    public void EveryAddressTheCSharpViewShowsIsOneTheRuntimeAccepts()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // The only authority on whether a breakpoint can go somewhere is the runtime, and it does
+        // not say so at the time: CreateBreakpoint returns success and BreakpointSetError arrives
+        // later, when the method is compiled. So this puts one on every line of a method's C# at
+        // once and then looks at what the runtime said about them.
+        //
+        // The rule underneath is that a breakpoint binds only where the evaluation stack is empty.
+        // Offsets taken from ILSpy's node annotations broke it constantly — they name the expression
+        // a line was made from, one instruction into the statement — which is why the addresses are
+        // now the starts of the decompiler's own sequence-point ranges.
+        using var assembly = Spydate.Decompiler.Managed.ManagedAssembly.Load(McpPath);
+        var member = assembly.Namespaces.SelectMany(n => n.Types).SelectMany(t => t.Members)
+            .First(m => m.Name == "Parse");
+
+        var source = assembly.Decompiler.SourceForMember(member);
+        Assert.True(source.Lines.Count > 5, $"only {source.Lines.Count} addressable lines to try");
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+
+        foreach (var line in source.Lines)
+        {
+            Assert.Null(session.SetBreakpoint("spydate-mcp.dll", line.MethodToken, (uint)line.Offset));
+        }
+
+        session.Continue();
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        // It stopped at one of them, and the runtime complained about none of them.
+        Assert.Equal(ManagedStopKind.Breakpoint, session.StoppedBy);
+        Assert.DoesNotContain(session.Recent, l => l.Contains("could not be set", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnArrayReadsAsItsElementsRatherThanAsAnAddress()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // What a slot holding an array used to say was 0x218104BF690: that something is there, and
+        // nothing else. It is the address of an object the collector is free to move, it cannot be
+        // looked up anywhere, and two runs never agree on it. The runtime knows the length and every
+        // element, so this asks.
+        //
+        // This also pins ICorDebugArrayValue's interface id and its vtable layout. A wrong id reads
+        // as "not an array" and falls back to the address, which is what the old behaviour looked
+        // like — so the assertion is that the elements are there, by name.
+        const string Arguments = @"--root C:\Windows\System32 C:\Windows\System32\where.exe";
+        uint token = TokenIn(McpPath, "Spydate.Mcp.McpOptions", "Parse");
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: Arguments, holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("spydate-mcp.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        var args = session.Values(arguments: true);
+        var array = Assert.Single(args);
+
+        Assert.Equal("string[]", array.Kind);
+        Assert.Contains("[3]", array.Text, StringComparison.Ordinal);
+        Assert.Contains("\"--root\"", array.Text, StringComparison.Ordinal);
+        Assert.Contains("where.exe", array.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnObjectReadsAsItsTypeAndFields()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // A class-typed local said "object" and an address. The runtime can say which type, from
+        // which module, and what its fields hold — and the type's name is in that module's own
+        // metadata, which is a file this program can already read.
+        //
+        // Pins ICorDebugObjectValue and ICorDebugClass the same way: a wrong id for either leaves
+        // the value unnamed, which is exactly what it said before.
+        uint token = TokenIn(McpPath, "Spydate.Mcp.McpOptions", "Parse");
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("spydate-mcp.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        // Stepped until the local exists. At the method's first instruction every local is still
+        // zero, and a null has no type to report — which is correct, and proves nothing.
+        ManagedValue? held = null;
+        for (int i = 0; i < 6 && held is null; i++)
+        {
+            Assert.Null(session.Step(into: false));
+            Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(20)), $"step {i + 1} never landed");
+            held = session.Values().FirstOrDefault(v => v.Kind == "McpOptions");
+        }
+
+        Assert.True(held is not null, "no local ever read as an McpOptions: "
+            + string.Join(" | ", session.Values().Select(v => v.ToString())));
+
+        // Its fields, by the names the source used rather than the ones the compiler generated:
+        // an auto-property is a field called <MaxFunctions>k__BackingField, and a row of those
+        // hides the part worth reading.
+        Assert.Contains("MaxFunctions = ", held!.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("k__BackingField", held.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The MCP server's own assembly, which is what these run and break inside.</summary>
+    private static string McpPath => Path.ChangeExtension(Target!, ".dll");
+
+    /// <summary>A method's metadata token, from any assembly on disk.</summary>
+    private static uint TokenIn(string assembly, string type, string method)
+    {
+        using var loaded = Spydate.Decompiler.Managed.ManagedAssembly.Load(assembly);
+        var member = loaded.Namespaces
+            .SelectMany(n => n.Types)
+            .First(t => t.FullName == type)
+            .Members.First(m => m.Name == method);
+
+        return (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(member.Handle);
     }
 
     [Fact]

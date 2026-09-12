@@ -18,6 +18,20 @@ namespace Spydate.Decompiler.Managed;
 public readonly record struct SourceLine(int Line, uint MethodToken, int Offset);
 
 /// <summary>
+/// One statement's IL, from its first instruction to the first of the next.
+///
+/// This is the unit a debugger moves in and the unit a breakpoint goes at. The boundaries are the
+/// decompiler's, not a guess made from the bytes: a statement is whatever it decided to write on one
+/// line, and only it knows that the ternary in the middle of a `for` header is part of the same
+/// statement as the assignment before it.
+/// </summary>
+public readonly record struct SourceStatement(uint MethodToken, int From, int To)
+{
+    /// <summary>Whether an offset in a given method falls inside this statement.</summary>
+    public bool Covers(uint token, int offset) => token == MethodToken && offset >= From && offset < To;
+}
+
+/// <summary>
 /// Decompiled C# with the IL behind each line of it.
 ///
 /// The point of the pairing is that a line of C# here is not a line of anybody's source file. It was
@@ -25,25 +39,25 @@ public readonly record struct SourceLine(int Line, uint MethodToken, int Offset)
 /// about is the decompiler itself — a PDB, if there even is one, maps IL offsets onto lines of a
 /// source file this program has never seen.
 /// </summary>
-public sealed record ManagedSource(string Text, IReadOnlyList<SourceLine> Lines)
+public sealed record ManagedSource(string Text, IReadOnlyList<SourceLine> Lines, IReadOnlyList<SourceStatement> Statements)
 {
-    public static ManagedSource Empty { get; } = new(string.Empty, Array.Empty<SourceLine>());
+    public static ManagedSource Empty { get; } = new(string.Empty, Array.Empty<SourceLine>(), Array.Empty<SourceStatement>());
 }
 
 /// <summary>
-/// Pairing decompiled C# with the IL each line came from, by watching the text being written.
+/// Pairing decompiled C# with the IL each line came from.
 ///
-/// ILSpy has <c>CreateSequencePoints</c>, and it does not work from outside the ILSpy application:
-/// it reads each node's <c>StartLocation</c>, and a decompiled syntax tree has no locations in it —
-/// the nodes were built out of IL, not parsed from a file. Whatever fills those in lives in the app
-/// rather than the package, so every point it hands back says line zero. The ranges in them are
-/// right; only the lines are missing.
+/// Half of ILSpy's <c>CreateSequencePoints</c> works from outside the ILSpy application and half
+/// does not. Each point carries an IL range and a line number; the ranges are computed from the IL
+/// and are right, and the lines are all zero, because they are read from node positions that a
+/// decompiled tree does not have — nothing parsed it from a file, and whatever fills them in lives
+/// in the app rather than the package.
 ///
-/// What is actually needed is simpler than a sequence point anyway. ILSpy annotates each syntax node
-/// with the IL instructions it was made from — the same annotations its own builder reads — so a
-/// writer that knows which line it is on can record them as it goes. That is this: one pass, no
-/// second guess at where a node ended up in text, and it answers the only question the debugger
-/// asks, which is what IL offset a line of this C# stands for.
+/// So each half comes from where it is sound. The ranges are asked for directly, and they are the
+/// statements: where one begins, where it ends, which method it is in. The lines come from watching
+/// the text being written — ILSpy annotates every syntax node with the IL it was made from, and a
+/// token writer that knows its own line can record them as it goes. Then each line is moved to the
+/// start of the statement it landed in, which is the offset a breakpoint can actually bind at.
 /// </summary>
 internal static class SequencePoints
 {
@@ -54,8 +68,81 @@ internal static class SequencePoints
         var recorder = new Recorder(output);
         tree.AcceptVisitor(new CSharpOutputVisitor(recorder, settings.CSharpFormattingOptions));
 
-        var lines = recorder.Lines.Values.OrderBy(l => l.Line).ToList();
-        return new ManagedSource(output.ToString(), lines);
+        var statements = Statements(decompiler, tree);
+
+        // Each line moved to the start of the statement it is in. What the recorder caught is the
+        // offset of an expression — routinely one instruction past the statement, after the ldarg
+        // that pushed the receiver — and the runtime binds a breakpoint only at a statement. A line
+        // whose IL is in a hidden range is dropped: those are the compiler's own, a loop's jump back
+        // or a switch's dispatch, and they are not places a reader means to stop at.
+        var lines = new List<SourceLine>();
+        foreach (var line in recorder.Lines.Values.OrderBy(l => l.Line))
+        {
+            if (Containing(statements, line.MethodToken, line.Offset) is { } statement)
+            {
+                lines.Add(line with { Offset = statement.From });
+            }
+        }
+
+        return new ManagedSource(output.ToString(), lines, statements);
+    }
+
+    /// <summary>
+    /// Where each statement of a decompiled tree begins and ends.
+    ///
+    /// ILSpy's own sequence points, which is the one part of <c>CreateSequencePoints</c> that works
+    /// outside the ILSpy application: the ranges are computed from the IL and are right, and only the
+    /// line numbers are missing because a decompiled tree has no positions until something writes it.
+    ///
+    /// Worth having rather than working out from the bytes. A statement boundary is where the
+    /// evaluation stack is empty, and reading that off a linear walk of the IL is wrong the first
+    /// time a ternary appears: the instruction after the <c>br</c> is a branch target, not a
+    /// continuation, so the depth carried into it belongs to a path that jumped over it. One
+    /// `(a ? b : null)` left every later offset in `McpOptions.Parse` counted one too high, which
+    /// read as a single 0x100-byte statement covering the rest of the method.
+    /// </summary>
+    internal static IReadOnlyList<SourceStatement> Statements(CSharpDecompiler decompiler, SyntaxTree tree)
+    {
+        var found = new List<SourceStatement>();
+
+        foreach (var (function, points) in decompiler.CreateSequencePoints(tree))
+        {
+            // The state machine's MoveNext when there is one: an async method's own body is a stub
+            // that starts the machine, and these offsets are into the code the reader is looking at.
+            if ((function.MoveNextMethod ?? function.Method) is not { } method || method.MetadataToken.IsNil)
+            {
+                continue;
+            }
+
+            uint token = (uint)MetadataTokens.GetToken(method.MetadataToken);
+            foreach (var point in points)
+            {
+                if (!point.IsHidden && point.EndOffset > point.Offset)
+                {
+                    found.Add(new SourceStatement(token, point.Offset, point.EndOffset));
+                }
+            }
+        }
+
+        found.Sort((a, b) => a.MethodToken != b.MethodToken
+            ? a.MethodToken.CompareTo(b.MethodToken)
+            : a.From.CompareTo(b.From));
+
+        return found;
+    }
+
+    /// <summary>The statement an offset is inside, or null when it is in none of them.</summary>
+    internal static SourceStatement? Containing(IReadOnlyList<SourceStatement> statements, uint token, int offset)
+    {
+        foreach (var statement in statements)
+        {
+            if (statement.Covers(token, offset))
+            {
+                return statement;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -167,12 +254,7 @@ internal static class SequencePoints
                 continue;
             }
 
-            if (Statement(body, bodies.Metadata, line.Offset) is not { } offset)
-            {
-                continue;
-            }
-
-            ulong va = imageBase + body.RvaOf(offset);
+            ulong va = imageBase + body.RvaOf(line.Offset);
 
             // One line per place. A switch's case labels are all attributed to the switch
             // instruction — nothing runs when a label is reached — and several expressions on
@@ -217,22 +299,6 @@ internal static class SequencePoints
 
         return sb.ToString();
     }
-
-    /// <summary>
-    /// Where the statement containing an offset begins.
-    ///
-    /// This is the difference between a breakpoint and a breakpoint that is quietly refused. The
-    /// runtime will only bind one where the evaluation stack is empty, because that is where the
-    /// JIT's IL-to-native map has entries, and what ILSpy hands back is the offset of the expression
-    /// a line was made from rather than of the statement holding it. So
-    /// <c>builder.Logging.ClearProviders();</c> came back as the <c>ldfld</c> that loads
-    /// <c>Logging</c> — one instruction after a <c>ldarg.0</c> that had already pushed <c>this</c> —
-    /// and the runtime answered with <c>BreakpointSetError</c>, which arrives asynchronously long
-    /// after the call that created it said yes. Walking back to the empty stack lands on the
-    /// <c>ldarg.0</c>, which is where the statement really starts.
-    /// </summary>
-    private static int? Statement(ManagedBody body, MetadataReader metadata, int target)
-        => IlStatements.Containing(body, metadata, target)?.From;
 
     /// <summary>How wide a line is once tabs are expanded, which is what the reader sees.</summary>
     private static int Width(string line)

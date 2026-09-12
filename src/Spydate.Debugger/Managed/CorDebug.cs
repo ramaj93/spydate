@@ -44,6 +44,14 @@ internal static class CorDebugGuids
     internal const string GenericValue = "CC7BCAF8-8A68-11d2-983C-0000F808342D";
     internal const string ReferenceValue = "CC7BCAF9-8A68-11d2-983C-0000F808342D";
     internal const string StringValue = "CC7BCAFD-8A68-11d2-983C-0000F808342D";
+
+    // The four below are pinned by CorDebugIidTests the same way as the rest: a live array and a
+    // live object are asked what they support, because an id written from memory fails as
+    // "not available" rather than as a mistake.
+    internal const string Class = "CC7BCAF5-8A68-11d2-983C-0000F808342D";
+    internal const string BoxValue = "CC7BCAF6-8A68-11d2-983C-0000F808342D";
+    internal const string ObjectValue = "18AD3D6E-B7D2-11d2-BD04-0000F80849BD";
+    internal const string ArrayValue = "0405B0DF-A660-11d2-BD02-0000F80849BD";
 }
 
 [ComImport]
@@ -660,4 +668,116 @@ internal interface ICorDebugStringValue
     [PreserveSig] int GetLength(out uint pcchString);
 
     [PreserveSig] int GetString(uint cchString, out uint pcchString, IntPtr szString);
+}
+
+/// <summary>
+/// An object on the debuggee's heap, or a value class.
+///
+/// Derives from <c>ICorDebugValue</c> and not from <c>ICorDebugHeapValue</c>, which matters here
+/// more than it looks: the slots are counted from the methods declared in this interface alone, so
+/// two extra declarations would put <c>GetClass</c> on <c>GetFieldValue</c>'s slot and every field
+/// read would be a call to something else with the same argument count.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.ObjectValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugObjectValue
+{
+    // ICorDebugValue, repeated.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    // ICorDebugObjectValue itself.
+    [PreserveSig] int GetClass(out IntPtr ppClass);
+
+    [PreserveSig] int GetFieldValue(IntPtr pClass, uint fieldDef, out IntPtr ppValue);
+
+    [PreserveSig] int GetVirtualMethod(uint memberRef, out IntPtr ppFunction);
+
+    [PreserveSig] int GetContext(out IntPtr ppContext);
+
+    [PreserveSig] int IsValueClass(out int pbIsValueClass);
+
+    [PreserveSig] int GetManagedCopy(out IntPtr ppObject);
+
+    [PreserveSig] int SetFromManagedCopy(IntPtr pObject);
+}
+
+/// <summary>An array on the debuggee's heap.</summary>
+[ComImport]
+[Guid(CorDebugGuids.ArrayValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugArrayValue
+{
+    // ICorDebugValue, then ICorDebugHeapValue, repeated.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int IsValid(out int pbValid);
+
+    [PreserveSig] int CreateRelocBreakpoint(out IntPtr ppBreakpoint);
+
+    // ICorDebugArrayValue itself. Every array parameter is an IntPtr: the default marshalling for
+    // one is a SAFEARRAY, and handing a flat buffer to something expecting that takes the process
+    // down rather than failing.
+    [PreserveSig] int GetElementType(out int pType);
+
+    [PreserveSig] int GetRank(out uint pnRank);
+
+    [PreserveSig] int GetCount(out uint pnCount);
+
+    [PreserveSig] int GetDimensions(uint cdim, IntPtr dims);
+
+    [PreserveSig] int HasBaseIndicies(out int pbHasBaseIndicies);
+
+    [PreserveSig] int GetBaseIndicies(uint cdim, IntPtr indicies);
+
+    [PreserveSig] int GetElement(uint cdim, IntPtr indices, out IntPtr ppValue);
+
+    [PreserveSig] int GetElementAtPosition(uint nPosition, out IntPtr ppValue);
+}
+
+/// <summary>A type, as the runtime holds it: which module declares it, and under which token.</summary>
+[ComImport]
+[Guid(CorDebugGuids.Class)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugClass
+{
+    [PreserveSig] int GetModule(out IntPtr pModule);
+
+    [PreserveSig] int GetToken(out uint pTypeDef);
+
+    [PreserveSig] int GetStaticFieldValue(uint fieldDef, IntPtr pFrame, out IntPtr ppValue);
+}
+
+/// <summary>A boxed value type. The thing worth reading is inside it.</summary>
+[ComImport]
+[Guid(CorDebugGuids.BoxValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugBoxValue
+{
+    // ICorDebugValue, then ICorDebugHeapValue, repeated.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int IsValid(out int pbValid);
+
+    [PreserveSig] int CreateRelocBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int GetObject(out IntPtr ppObject);
 }

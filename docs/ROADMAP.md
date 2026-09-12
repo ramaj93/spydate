@@ -256,7 +256,13 @@ native side already reads it, because native is what it is.
   and disassembling them produced a page of invented x86 on every step. The execution arrow is placed
   by nearest-preceding line, so a `for` header — three statements in IL, one line on screen — keeps
   the arrow on the `for` rather than blanking it for two presses out of three.
-  Still to do: multiple threads and frames beyond the innermost, setting values, and evaluation.
+  Values are followed rather than pointed at: an array reads as `string[1] { "C:\Windows\..." }`, an
+  object as `McpOptions { ReadOnly = false, MaxFunctions = 20000, … }`, a boxed value as what is in
+  it, and the type name comes from the module's own metadata rather than from `IMetaDataImport`.
+  Two levels deep and six wide — a graph has no end and a line has a width — so what is not shown is
+  an expandable tree, which is the next thing worth building here.
+  Still to do: multiple threads and frames beyond the innermost, setting values, evaluation, and
+  expanding a value in place.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable

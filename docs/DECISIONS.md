@@ -330,6 +330,23 @@ dbgshim is still needed for is the runtime-startup handshake, which is the part 
 documented contract. The launch keeps the process handle, so a target whose runtime never publishes
 itself can still be killed.
 
+**A value is followed, not printed as a pointer.** An array reads as its length and its elements, an
+object as its type name and its fields, a boxed value as what is inside it. The type name comes from
+the module's own metadata read with `System.Reflection.Metadata` — the module is a file on disk, and
+the alternative is `IMetaDataImport`, sixty-odd methods that must be declared in vtable order to
+call four of them. A module with no file behind it keeps the old answer rather than inventing one.
+Two levels deep and six elements or fields wide: an object graph has no natural end, and a line of
+text has a width.
+
+**Statement boundaries come from the decompiler, not from counting the evaluation stack.** The rule
+is right — a statement ends where the stack is empty — but reading it off a linear walk of the IL is
+wrong the first time a method contains a ternary: the instruction after the `br` is a branch target,
+not a continuation, so the depth carried into it belongs to a path that jumped over it. One
+`(a ? b : null)` made the rest of `McpOptions.Parse` read as a single 0x100-byte statement, and
+every line below it lost its address. ILSpy's `CreateSequencePoints` gives ranges computed properly
+from the IL; only the line numbers in it are unusable, so the ranges come from there and the lines
+from watching the text being written.
+
 **A statement is the IL between two empty evaluation stacks, and that is what a step moves.** It
 needs no decompiler and no symbols: an empty stack is where the language says a statement may end
 and where the JIT's IL-to-native map has entries, which is also why a breakpoint binds nowhere else.
