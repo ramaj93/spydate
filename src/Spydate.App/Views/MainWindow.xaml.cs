@@ -52,7 +52,7 @@ public partial class MainWindow : FluentWindow
         };
 
         AssistantTranscript.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(OnTranscriptScrolled));
-        AssistantTranscript.GotKeyboardFocus += (_, _) => HoldTranscriptStill();
+        AssistantTranscript.GotKeyboardFocus += (_, _) => RestoreAnchor();
 
         // What the reader does with the wheel, the keys and the scrollbar is the only evidence of
         // whether they still want the end followed. Preview, because the scrollbar lives inside this
@@ -77,10 +77,14 @@ public partial class MainWindow : FluentWindow
         // would treat every later move as the reader's doing.
         AssistantTranscript.LostMouseCapture += (_, _) => _dragging = false;
 
+        // A resize reflows the document and lets the ScrollViewer clamp the offset toward the top;
+        // the anchor is what survives that, and puts the same line back once layout has settled.
+        AssistantTranscript.SizeChanged += (_, _) => RestoreAnchor();
+
         // The window coming forward restores focus inside itself, which brings a caret into view and
         // moves the transcript for reasons that have nothing to do with the reader. Alt-tabbing away
         // and back while an answer was arriving was the commonest way to see it jump.
-        Activated += (_, _) => HoldTranscriptStill();
+        Activated += (_, _) => RestoreAnchor();
     }
 
     /// <summary>Ctrl+G: focus the go-to box.</summary>
@@ -296,43 +300,85 @@ public partial class MainWindow : FluentWindow
         if (_gesture > 0 || _dragging)
         {
             _followTranscript = AtBottom();
+            RememberAnchor();
         }
     }
 
     /// <summary>
-    /// Keeps focus from moving the transcript.
+    /// The reader's place in the conversation, as a position in the text and not a pixel offset.
     ///
-    /// A read-only RichTextBox still has a caret; it sits at the start of the document, and taking
-    /// keyboard focus brings it into view. So clicking the panel to select a line, or tabbing into
-    /// it, threw the reader back to the first message of the conversation — the jump. The position
-    /// is read before the caret is honoured and put back afterwards.
+    /// A pixel offset does not survive a reflow. Maximizing the window widens the panel, the
+    /// document re-wraps and re-measures from the top, and the ScrollViewer clamps the offset toward
+    /// zero before anyone is asked where to look; reading that clamped value back and restoring it
+    /// is how the view jumped to the top on maximize. A TextPointer names a line of the answer
+    /// instead and stays valid across the reflow, so the same line can be put back afterwards.
     /// </summary>
-    private void HoldTranscriptStill()
+    private TextPointer? _anchor;
+
+    /// <summary>Remembers the line at the top of the view, so a later reflow can bring it back.</summary>
+    private void RememberAnchor()
     {
-        double offset = AssistantTranscript.VerticalOffset;
-        bool follow = _followTranscript;
+        // Following the end needs no anchor - the end is the position, and ScrollToEnd finds it.
+        _anchor = _followTranscript
+            ? null
+            : AssistantTranscript.GetPositionFromPoint(new Point(4, 4), snapToText: true);
+    }
 
-        // Counted from here rather than around the correction below, because the scroll being
-        // corrected is the caret being brought into view, and that happens in between the two.
-        _ourScrolls++;
-
-        // Later than Render and Loaded, which is when the caret is brought into view, and earlier
-        // than the Background pass that follows a growing answer down.
-        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+    /// <summary>
+    /// Puts the remembered line back at the top of the view, after whatever moved it.
+    ///
+    /// A reflow (the window resized) and focus landing in the panel (its caret is at the document
+    /// start and gets brought into view) both move the transcript for reasons that are not the
+    /// reader's. When the end is being followed that is simply the end again; otherwise the anchor
+    /// is scrolled back up. Bounded retries at Background priority, because a long document
+    /// re-measures over several passes and the anchor's position is not settled on the first - and
+    /// Background, run after layout has settled, is what keeps this calm. Correcting sooner, mid
+    /// reflow, reads a position that is not final yet and scrolls by the wrong amount, which is
+    /// erratic. The cost is that on maximize the corrected position is applied a beat after the
+    /// reflowed one is shown, so the reader briefly sees it scroll back into place.
+    /// </summary>
+    private void RestoreAnchor(int attempts = 8)
+    {
+        if (_followTranscript)
         {
-            // Where to look is already decided when the end is being followed, and this offset was
-            // measured before the last tokens arrived. Putting it back would haul the view up and
-            // let the next pass drop it to the bottom again - the flicker this is meant to prevent.
-            if (follow)
+            ScrollAssistantToEnd();
+            return;
+        }
+
+        if (_anchor is null || attempts <= 0)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            if (_followTranscript || _anchor is not { } current)
             {
-                ScrollAssistantToEnd();
-            }
-            else if (Math.Abs(AssistantTranscript.VerticalOffset - offset) > 0.5)
-            {
-                AssistantTranscript.ScrollToVerticalOffset(offset);
+                return;
             }
 
-            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => _ourScrolls--));
+            // A pointer into a document that has since been rebuilt names nothing here.
+            if (!current.IsInSameDocument(AssistantTranscript.Document.ContentStart))
+            {
+                _anchor = null;
+                return;
+            }
+
+            Rect rect = current.GetCharacterRect(LogicalDirection.Forward);
+            if (rect.IsEmpty)
+            {
+                RestoreAnchor(attempts - 1);   // not laid out yet; wait for the next pass
+                return;
+            }
+
+            // rect.Top is where the line sits relative to the viewport; move it back to the top.
+            double delta = rect.Top;
+            if (Math.Abs(delta) > 0.5)
+            {
+                Scrolling(() => AssistantTranscript.ScrollToVerticalOffset(
+                    Math.Max(0, AssistantTranscript.VerticalOffset + delta)));
+                RestoreAnchor(attempts - 1);
+            }
         }));
     }
 
@@ -342,6 +388,7 @@ public partial class MainWindow : FluentWindow
         {
             AssistantTranscript.Document.Blocks.Clear();
             StopStreaming();
+            _anchor = null;
             _followTranscript = true;
             return;
         }
