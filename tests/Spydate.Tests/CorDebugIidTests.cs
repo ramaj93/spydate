@@ -26,6 +26,9 @@ public class CorDebugIidTests
 
     private const string Dereferenced = "--- dereferenced ---";
 
+    /// <summary>A session whose debuggee gets no console window. See the debugger tests for why.</summary>
+    private static ManagedDebugSession Headless() => new() { ShowConsole = false };
+
     [Fact]
     public void AStringArgumentAnswersToTheIdsThisReliesOn()
     {
@@ -36,7 +39,7 @@ public class CorDebugIidTests
 
         uint token = Probe.Token("Spydate.Core.PE.PeImage", "Load");
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
         Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
         session.Continue();

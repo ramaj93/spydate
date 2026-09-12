@@ -214,10 +214,24 @@ native side already reads it, because native is what it is.
   offset that line stands for, and a stop puts the arrow back on the line it is at — the same body
   index answers both directions, so the two cannot disagree. Breakpoints set before a run are held
   and planted while the process is held at the start.
-  Still to do: multiple threads and frames beyond the innermost, setting values, evaluation, and
-  clearing a managed breakpoint from a running process — the session keeps them by module rather
-  than by method, so the marker comes off the listing and the runtime keeps firing until it is
-  stopped and started, which the log says rather than hiding.
+  A breakpoint can be cleared from a running process, without stopping it first: the session keeps
+  the runtime's own object beside the method and offset it is for, and turns it off with
+  `Activate(false)` — releasing the pointer alone gives back a handle and leaves the breakpoint
+  firing, because the runtime holds a reference of its own. One still waiting for its module is only
+  a note and is forgotten; one whose process has exited is dropped without asking a dead object to
+  deactivate; one the runtime refuses stays in the list and keeps its dot, since the dot describes
+  the process rather than the request. Clearing one the assistant set takes its dot off the listing
+  too, and the other way round.
+  Neither debugger's debuggee needs a console window: `ShowConsole` decides, and the test suite
+  turns it off so a run does not throw thirty windows in front of whoever is working.
+  Three things only a run of the panel itself showed, none of which a test could have: the managed
+  Start validated a host and then launched the assembly anyway, so a modern .NET DLL — which is
+  every .NET assembly with an entry point, the `.exe` beside it being a native launcher — produced a
+  process with no runtime and a thirty-second wait; every ICorDebug call from the window's STA thread
+  threw before it was made; and `CorDebugMappingResult` is a flag set, so the word beside a stop's
+  offset said "unmapped" on every ordinary stop. The panel is now driven end to end from a probe
+  outside the repo, which is what found all three.
+  Still to do: multiple threads and frames beyond the innermost, setting values, and evaluation.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable

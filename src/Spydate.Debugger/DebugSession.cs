@@ -258,6 +258,17 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>
+    /// Whether the debuggee gets a console window of its own.
+    ///
+    /// On by default, because a console program's output is half of what the person watching it came
+    /// for. Off for tests, which start dozens of these: each window takes the foreground as it
+    /// appears, so a suite run while somebody is typing takes the keyboard away from them repeatedly.
+    /// The program still has a console either way — only the window is withheld — so nothing about
+    /// how it runs changes.
+    /// </summary>
+    public bool ShowConsole { get; init; } = true;
+
+    /// <summary>
     /// Starts <paramref name="path"/> under the debugger. Nothing runs until this is called, and it
     /// is only ever called because somebody asked for it.
     /// </summary>
@@ -881,7 +892,8 @@ public sealed class DebugSession : IDisposable
             {
                 started = Native.CreateProcess(
                     null, line, IntPtr.Zero, IntPtr.Zero, false,
-                    Native.DEBUG_ONLY_THIS_PROCESS | Native.CREATE_NEW_CONSOLE,
+                    Native.DEBUG_ONLY_THIS_PROCESS
+                        | (ShowConsole ? Native.CREATE_NEW_CONSOLE : Native.CREATE_NO_WINDOW),
                     IntPtr.Zero, workingDirectory, ref startup, out info);
             }
         }

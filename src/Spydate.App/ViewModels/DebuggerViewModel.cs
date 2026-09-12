@@ -321,13 +321,20 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        string run = host ?? path;
+
         if (IsManaged)
         {
-            StartManaged(binary, path);
+            // The host, not the assembly. A .NET assembly with an entry point is still a DLL — the
+            // .exe beside it is a native launcher with no metadata of its own — so the thing the
+            // analyst opened is almost never the thing that can be started. This used to hand the
+            // DLL to CreateProcess, which took it, produced a process with no runtime in it, and
+            // reported after thirty seconds that the target did not look like .NET. The breakpoints
+            // are unaffected: they name the module they are in and are planted when it loads, which
+            // is exactly what running under a host does.
+            StartManaged(binary, run, host);
             return;
         }
-
-        string run = host ?? path;
 
         // Asked every time, not once and remembered. The answer is about this binary, and the cost
         // of getting it wrong is running something hostile on the analyst's own machine.
@@ -392,12 +399,17 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// certainly in place before the code it is about, and it costs nothing: the panel comes up
     /// stopped and one click on continue lets it go.
     /// </summary>
-    private void StartManaged(OpenedBinary binary, string path)
+    private void StartManaged(OpenedBinary binary, string run, string? host)
     {
         if (!_confirm(
                 "Run this binary?",
-                $"{binary.DisplayName} will be started on this machine under the .NET debugger and "
-                + "will do whatever it does.\n\nEverything else in Spydate only reads the file. Debug "
+                (host is null
+                    ? $"{binary.DisplayName} will be started on this machine under the .NET debugger "
+                      + "and will do whatever it does.\n\n"
+                    : $"{Path.GetFileName(host)} will be started on this machine under the .NET "
+                      + $"debugger, so that it loads {binary.DisplayName}. Both will do whatever they "
+                      + "do.\n\n")
+                + "Everything else in Spydate only reads the file. Debug "
                 + "it in a virtual machine if you do not know what it is.\n\nStart it?"))
         {
             return;
@@ -408,7 +420,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _managed = session;
 
         string? problem = session.Start(
-            path,
+            run,
             Arguments is { Length: > 0 } arguments ? arguments : null,
             WorkingDirectory is { Length: > 0 } directory ? directory : null,
             holdAtStart: true);
@@ -435,7 +447,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         State = DebugState.Stopped;
         Status = "Held before it ran anything.";
-        Add($"started {path} under the .NET debugger, held before it ran anything");
+        Add($"started {run} under the .NET debugger, held before it ran anything");
         SyncManaged();
         NotifyCommands();
     }
@@ -600,10 +612,27 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     {
         foreach (ulong address in BreakpointAddresses.ToList())
         {
-            _session?.RemoveBreakpoint(address);
+            // A managed one is named by its method rather than by the address it is drawn at, and
+            // the runtime has to be told about each. Clearing all of them used to empty the listing
+            // and leave every one of them firing.
+            if (_pendingManaged.TryGetValue(address, out var managed))
+            {
+                if (_managed?.ClearBreakpoint(managed.Module, managed.Token, managed.Offset) is { } refused)
+                {
+                    Add(refused);
+                    continue;   // kept, marker and all, because it is still in the process
+                }
+
+                _pendingManaged.Remove(address);
+            }
+            else
+            {
+                _session?.RemoveBreakpoint(address);
+            }
+
+            BreakpointAddresses.Remove(address);
         }
 
-        BreakpointAddresses.Clear();
         BreakpointsVersion++;
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
@@ -645,19 +674,31 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// file is worse than no arrow.
     /// </summary>
     private ulong? Located(ManagedLocation? at)
+        => at is null ? null : AddressOf(at.Module, at.MethodToken, at.Offset);
+
+    /// <summary>
+    /// Where a method's IL offset sits in the file now open, or null when it is somewhere else.
+    ///
+    /// The reverse of what the gutter does, and it has to be the same index in both directions: the
+    /// addresses the listing printed came from <see cref="OpenedBinary.Bodies"/>, so an answer
+    /// computed any other way could point at a line the reader is not looking at. Null for a method
+    /// in another assembly, which is not a fault — a marker on the nearest line of the wrong file
+    /// would be worse than no marker.
+    /// </summary>
+    private ulong? AddressOf(string module, uint methodToken, uint ilOffset)
     {
-        if (at is null || _workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
         {
             return null;
         }
 
-        if (!string.Equals(at.Module, binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(module, binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
 
-        var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(at.MethodToken & 0x00FFFFFF));
-        return bodies.Of(handle) is { } body ? binary.Image.ImageBase + body.RvaOf((int)at.Offset) : null;
+        var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(methodToken & 0x00FFFFFF));
+        return bodies.Of(handle) is { } body ? binary.Image.ImageBase + body.RvaOf((int)ilOffset) : null;
     }
 
     /// <summary>Reads the managed session's state onto the panel.</summary>
@@ -1218,13 +1259,18 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         if (BreakpointAddresses.Remove(staticVa))
         {
-            // Taken off the listing, but the runtime keeps it: removing one means finding the
-            // breakpoint object the session made and deactivating it, and the session keeps them by
-            // module rather than by method. Saying so beats a dot that vanishes while it still fires.
-            Add(_managed is null
-                ? $"cleared the breakpoint at IL_{offset:X4}"
-                : $"took the marker off IL_{offset:X4}, but the running process keeps the breakpoint "
-                  + "until it is stopped and started");
+            _pendingManaged.Remove(staticVa);
+            string? refused = _managed?.ClearBreakpoint(module, token, offset);
+            if (refused is not null)
+            {
+                // Put back, because the runtime still has it. The dot is a statement about the
+                // process, and one that disappeared while the breakpoint went on firing would be
+                // the most confusing thing this panel could do.
+                BreakpointAddresses.Add(staticVa);
+                _pendingManaged[staticVa] = (module, token, offset);
+            }
+
+            Add(refused ?? $"cleared the breakpoint at IL_{offset:X4}");
         }
         else
         {
@@ -1308,9 +1354,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>
     /// Sets or clears a breakpoint in a managed method, so the panel and the agent share one set.
     ///
-    /// Clearing is not implemented below: the runtime's own breakpoint object would have to be found
-    /// and deactivated, and the session keeps them by module rather than by method. Saying so beats
-    /// reporting success and leaving it armed.
+    /// Sharing means the marker moves either way: a breakpoint the assistant sets appears in the
+    /// gutter, and one it clears leaves it. Two sets that were each correct on their own and did not
+    /// match each other would be worse than either.
     /// </summary>
     internal string? SetManagedBreakpoint(string module, uint methodToken, uint ilOffset, bool on)
     {
@@ -1319,14 +1365,43 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return "nothing is running under the .NET debugger; start it first";
         }
 
-        if (!on)
+        string? problem = on
+            ? session.SetBreakpoint(module, methodToken, ilOffset)
+            : session.ClearBreakpoint(module, methodToken, ilOffset);
+
+        if (problem is null)
         {
-            return "clearing a .NET breakpoint is not implemented yet; stop and start to drop them all";
+            // The marker follows what the agent did, so the gutter and the assistant are looking at
+            // one set of breakpoints rather than two that quietly disagree.
+            Mark(module, methodToken, ilOffset, on);
         }
 
-        string? problem = session.SetBreakpoint(module, methodToken, ilOffset);
         SyncManaged();
         return problem;
+    }
+
+    /// <summary>Moves the dot in the listing to match a breakpoint set or cleared from elsewhere.</summary>
+    private void Mark(string module, uint methodToken, uint ilOffset, bool on)
+    {
+        if (AddressOf(module, methodToken, ilOffset) is not { } staticVa)
+        {
+            return;   // a method in some other assembly, which this listing cannot show
+        }
+
+        if (on)
+        {
+            BreakpointAddresses.Add(staticVa);
+            _pendingManaged[staticVa] = (module, methodToken, ilOffset);
+        }
+        else
+        {
+            BreakpointAddresses.Remove(staticVa);
+            _pendingManaged.Remove(staticVa);
+        }
+
+        BreakpointsVersion++;
+        RefreshBreakpoints();
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private static bool DefaultConfirm(string title, string message)

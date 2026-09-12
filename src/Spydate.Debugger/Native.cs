@@ -14,7 +14,17 @@ namespace Spydate.Debugger;
 internal static partial class Native
 {
     internal const uint DEBUG_ONLY_THIS_PROCESS = 0x00000002;
+    internal const uint CREATE_SUSPENDED = 0x00000004;
     internal const uint CREATE_NEW_CONSOLE = 0x00000010;
+
+    /// <summary>
+    /// Give the debuggee a console it can write to, but no window for it.
+    ///
+    /// Only console allocation is affected: a program with windows of its own still shows them. It
+    /// is what makes a debugger runnable from a test — a suite that starts thirty processes with
+    /// <see cref="CREATE_NEW_CONSOLE"/> throws thirty windows in front of whoever is working.
+    /// </summary>
+    internal const uint CREATE_NO_WINDOW = 0x08000000;
 
     internal const uint DBG_CONTINUE = 0x00010002;
     internal const uint DBG_EXCEPTION_NOT_HANDLED = 0x80010001;

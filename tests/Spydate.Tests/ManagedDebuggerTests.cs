@@ -17,6 +17,15 @@ namespace Spydate.Tests;
 [Collection(Debugging.Name)]
 public class ManagedDebuggerTests
 {
+    /// <summary>
+    /// A session whose debuggee gets no console window.
+    ///
+    /// Every test here starts a process, and a console window takes the foreground as it appears —
+    /// so a suite run while somebody is typing took the keyboard off them a dozen times. The
+    /// debuggee still has a console and still runs exactly as it would; only the window is withheld.
+    /// </summary>
+    private static ManagedDebugSession Headless() => new() { ShowConsole = false };
+
     /// <summary>A managed program to debug, or null when this build has not produced one.</summary>
     private static string? Target
     {
@@ -36,7 +45,7 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         string? problem = session.Start(target);
 
         Assert.True(problem is null, problem + "\n" + string.Join("\n", session.Recent));
@@ -56,7 +65,7 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target));
 
         uint pid = session.ProcessId;
@@ -75,7 +84,7 @@ public class ManagedDebuggerTests
             Thread.Sleep(100);
         }
 
-        Assert.False(Alive(pid), $"process {pid} is still running after Stop()");
+        Assert.False(Alive(pid), $"process {pid} is still running after Stop()\n" + string.Join("\n", session.Recent));
     }
 
     private static bool Alive(uint pid)
@@ -104,7 +113,7 @@ public class ManagedDebuggerTests
         // debuggee has not loaded yet, and lets the program walk into it.
         uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         string? problem = session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true);
         Assert.True(problem is null, problem);
 
@@ -125,6 +134,12 @@ public class ManagedDebuggerTests
         Assert.Equal(token, at!.MethodToken);
         Assert.Equal("Spydate.Core.dll", at.Module);
         Assert.Equal(0u, at.Offset);
+
+        // The word beside the number, which is the whole point of carrying it: a stop on the first
+        // instruction of a method is exactly there. This read the mapping as a list of values when
+        // it is a set of flags, so every ordinary stop called itself "unmapped" — the offset right,
+        // and a warning attached to it telling the reader not to believe the line it was on.
+        Assert.Equal("exact", at.Mapping);
     }
 
     [Fact]
@@ -137,7 +152,7 @@ public class ManagedDebuggerTests
 
         uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
         Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
         session.Continue();
@@ -181,7 +196,7 @@ public class ManagedDebuggerTests
         const string Opening = @"C:\Windows\System32\where.exe";
         uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target, arguments: Opening, holdAtStart: true));
         Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
         session.Continue();
@@ -209,7 +224,7 @@ public class ManagedDebuggerTests
         // reads "not available" is an interface this could not reach.
         uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
         Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
         session.Continue();
@@ -232,7 +247,7 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target));
 
         // A running program has no frame to read, and inventing one would be inventing values.
@@ -248,12 +263,159 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target));
 
         // Running, not stopped. A step accepted here would arm a stepper against nothing and the
         // caller would wait for a landing that never comes.
         Assert.Contains("not stopped", session.Step()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AClearedBreakpointStopsFiringInTheProcessThatIsAlreadyRunning()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // A method called over and over while one file is parsed, which is what makes this provable:
+        // a breakpoint in something called once cannot tell a clear that worked from a clear that
+        // did nothing. So the test watches it fire twice first, and only then removes it.
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "RvaToOffset");
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+        Assert.Equal(ManagedStopKind.Breakpoint, session.StoppedBy);
+        Assert.Equal(token, session.StoppedAt!.MethodToken);
+
+        // Twice, so what follows is measured against a breakpoint that was demonstrably still live.
+        session.Continue();
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), "it only ever hit it once, so clearing proves nothing");
+        Assert.Equal(ManagedStopKind.Breakpoint, session.StoppedBy);
+
+        Assert.Null(session.ClearBreakpoint("Spydate.Core.dll", token));
+        Assert.Empty(session.Breakpoints);
+
+        // The part that releasing the pointer alone does not do. The runtime holds a reference of
+        // its own, so a breakpoint merely let go of goes on stopping the program — which reads as a
+        // debugger that reported success and changed nothing.
+        session.Continue();
+        Assert.False(
+            session.WaitUntilStopped(TimeSpan.FromSeconds(15)),
+            "it stopped again after the breakpoint was cleared: " + session.Status);
+    }
+
+    [Fact]
+    public void OneCanBeClearedAfterTheProgramHasAlreadyGone()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // The breakpoint object outlives the process it was in, and asking a dead one to deactivate
+        // fails. Reporting that as a refusal would leave a breakpoint from a finished run impossible
+        // to drop — the marker stuck in the listing over a program that is not running at all.
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+        Assert.Contains(session.Breakpoints, b => b.Planted);
+
+        session.Stop();
+        Assert.Equal(DebugState.Exited, session.State);
+
+        Assert.Null(session.ClearBreakpoint("Spydate.Core.dll", token));
+        Assert.Empty(session.Breakpoints);
+    }
+
+    [Fact]
+    public void ClearingOneThatIsStillWaitingForItsModuleSimplyForgetsIt()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("SomethingNotLoaded.dll", 0x06000001));
+        Assert.Single(session.Breakpoints);
+
+        // Nothing was ever planted, so there is nothing to deactivate and forgetting the note is the
+        // whole of removing it. Refusing here would leave the only breakpoints that can be set
+        // before a run — which is most of them — as the ones that cannot be taken back.
+        Assert.Null(session.ClearBreakpoint("SomethingNotLoaded.dll", 0x06000001));
+        Assert.Empty(session.Breakpoints);
+    }
+
+    [Fact]
+    public void ClearingOneThatWasNeverSetSaysSoRatherThanReportingSuccess()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", 0x06000001, ilOffset: 4));
+
+        // The right method at the wrong offset is the way this is got wrong in practice, and a
+        // cheerful "cleared" would leave the caller waiting to not stop at something it still stops
+        // at. Both halves are named so the mismatch is visible.
+        string? problem = session.ClearBreakpoint("Spydate.Core.dll", 0x06000001);
+        Assert.NotNull(problem);
+        Assert.Contains("no breakpoint", problem!, StringComparison.Ordinal);
+        Assert.Contains("IL_0000", problem!, StringComparison.Ordinal);
+
+        // And the one that is really there is untouched by the failed attempt.
+        Assert.Single(session.Breakpoints);
+    }
+
+    [Fact]
+    public void OneCanBeClearedWithoutStoppingTheProgramFirst()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // The case the panel is actually in. Somebody watching a program run clicks the dot off, and
+        // a debugger that answered "stop it first" would be asking them to interrupt the thing they
+        // are watching in order to stop watching part of it. Most of ICorDebug does refuse a running
+        // process — Terminate does, which is why Stop() synchronises first — so this is worth
+        // pinning rather than assuming.
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        // Let go, and given long enough to get past the file it was opening and back to waiting on
+        // its input. The assertion below is what says it really is running.
+        session.Continue();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && session.State != DebugState.Running)
+        {
+            Thread.Sleep(100);
+        }
+
+        Assert.Equal(DebugState.Running, session.State);
+        Assert.Null(session.ClearBreakpoint("Spydate.Core.dll", token));
+        Assert.Empty(session.Breakpoints);
     }
 
     [Fact]
@@ -264,7 +426,7 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target, holdAtStart: true));
 
         // Nothing has loaded this yet, and it never will - the point is that asking is not an error.
@@ -285,7 +447,7 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
 
         // Nothing is loaded yet at this point, so the answer cannot come now - it comes when the
@@ -329,7 +491,7 @@ public class ManagedDebuggerTests
             return;
         }
 
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
         string? problem = session.Start(native, timeout: TimeSpan.FromSeconds(6));
 
         Assert.NotNull(problem);
@@ -339,7 +501,7 @@ public class ManagedDebuggerTests
     [Fact]
     public void AFileThatIsNotThereIsRefusedBeforeAnythingIsLaunched()
     {
-        using var session = new ManagedDebugSession();
+        using var session = Headless();
 
         Assert.Contains("there is no file at", session.Start(@"C:\nothing\here.exe")!, StringComparison.Ordinal);
         Assert.Equal(DebugState.NotStarted, session.State);

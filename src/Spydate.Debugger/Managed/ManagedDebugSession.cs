@@ -29,6 +29,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
     private GCHandle _self;
     private IntPtr _unregister;
+    private IntPtr _launched;
     private ICorDebug? _debug;
     private ICorDebugProcess? _process;
     private ManagedCallback? _callback;
@@ -55,6 +56,16 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// <summary>Why the last stop happened.</summary>
     public ManagedStopKind StoppedBy { get; private set; }
 
+    /// <summary>
+    /// Whether the debuggee gets a console window of its own.
+    ///
+    /// On by default: a console program's output is half of what the person watching it came for.
+    /// Off for tests, which start a dozen of these — each window takes the foreground as it appears,
+    /// so a suite run while somebody is working takes the keyboard away from them over and over. The
+    /// program still gets a console either way; only the window is withheld.
+    /// </summary>
+    public bool ShowConsole { get; init; } = true;
+
     /// <summary>Modules the runtime has loaded, by name.</summary>
     public IReadOnlyList<string> Modules
     {
@@ -70,7 +81,49 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private readonly List<string> _modules = new();
     private readonly Dictionary<string, ICorDebugModule> _loaded = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<ManagedBreakpoint> _wanted = new();
-    private readonly List<IntPtr> _planted = new();
+    private readonly List<Planted> _planted = new();
+
+    /// <summary>
+    /// A breakpoint that is actually in the process, and the runtime's object for it.
+    ///
+    /// The pointer is kept beside what it is a breakpoint <em>for</em>, which is the whole of what
+    /// makes one removable. A bare list of pointers says a breakpoint exists and gives no way to
+    /// find the one the caller means.
+    /// </summary>
+    private sealed record Planted(string Module, uint MethodToken, uint Offset, IntPtr Pointer);
+
+    /// <summary>
+    /// Runs a call to the debugging interface on a thread that is allowed to make it.
+    ///
+    /// ICorDebug's objects cannot cross a COM apartment. Every interface pointer here arrives on one
+    /// of the runtime's own threads, which are MTA, and a window's thread is an STA — so the moment
+    /// the panel pressed continue, the runtime callable wrapper tried to marshal itself into the STA,
+    /// found that ICorDebugProcess supports no marshalling, and threw
+    /// <c>InvalidCastException: No such interface supported</c> before the call was even attempted.
+    /// The tests never saw it because xunit's threads are MTA, and so are the pool's, which is what
+    /// makes this fix as short as it is.
+    ///
+    /// So every public entry point that touches the interface comes through here. The caller blocks
+    /// either way — these are short calls into a debuggee that is already stopped — and a caller
+    /// that is already on an MTA thread pays nothing.
+    /// </summary>
+    private static T Interop<T>(Func<T> work)
+        => Thread.CurrentThread.GetApartmentState() == ApartmentState.STA
+            ? Task.Run(work).GetAwaiter().GetResult()
+            : work();
+
+    private static void Interop(Action work)
+        => Interop<bool>(() =>
+        {
+            work();
+            return true;
+        });
+
+    /// <summary>Whether a breakpoint is the one being named. Module names compare as file names do.</summary>
+    private static bool Same(string module, uint token, uint offset, string wantedModule, uint wantedToken, uint wantedOffset)
+        => token == wantedToken
+           && offset == wantedOffset
+           && string.Equals(module, wantedModule, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The last things that happened, oldest first.</summary>
     public IReadOnlyList<string> Recent => _log.Select(e => e.Text).ToList();
@@ -116,14 +169,15 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         _attached.Reset();
         _settled.Reset();
 
-        int hr = DbgShim.CreateProcessForLaunch(command, true, IntPtr.Zero, workingDirectory, out uint pid, out IntPtr resume);
-        _pid = pid;
-        if (hr < 0)
+        if (Launch(command, workingDirectory, out uint pid, out IntPtr resume) is { } refused)
         {
             Release();
-            return $"could not launch it: 0x{hr:X8}";
+            return refused;
         }
 
+        _pid = pid;
+
+        int hr;
         unsafe
         {
             hr = DbgShim.RegisterForRuntimeStartup(pid, &Started, GCHandle.ToIntPtr(_self), out _unregister);
@@ -131,13 +185,16 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         if (hr < 0)
         {
-            _ = DbgShim.CloseResumeHandle(resume);
+            // Killed rather than left. It is suspended and nobody is going to resume it, so letting
+            // it go would leave a process that never runs and never exits sitting on the machine.
+            _ = Native.TerminateProcess(_launched, 1);
+            _ = Native.CloseHandle(resume);
             Release();
             return $"could not register for the runtime starting: 0x{hr:X8}";
         }
 
-        _ = DbgShim.ResumeProcess(resume);
-        _ = DbgShim.CloseResumeHandle(resume);
+        _ = Native.ResumeThread(resume);
+        _ = Native.CloseHandle(resume);
 
         Note($"launched {System.IO.Path.GetFileName(path)} as process {pid}, waiting for its runtime");
 
@@ -176,6 +233,54 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             }
         }
 
+        return null;
+    }
+
+    /// <summary>
+    /// Creates the process suspended, so a debugger can be registered before it runs anything.
+    ///
+    /// Done here rather than through dbgshim's <c>CreateProcessForLaunch</c>, which is the same
+    /// <c>CreateProcessW</c> with no way to pass creation flags. Without them every debuggee gets a
+    /// console window, which is right for a person watching a program and wrong for a test suite
+    /// that starts a dozen of them behind whatever someone is doing. What dbgshim is needed for is
+    /// the runtime-startup handshake below — that part is not reimplementable, and this part is a
+    /// single documented call.
+    ///
+    /// Null when it started. The process handle is kept: until the runtime publishes itself there is
+    /// no <c>ICorDebugProcess</c>, and something has to be able to kill it if that never happens.
+    /// </summary>
+    private string? Launch(string command, string? workingDirectory, out uint pid, out IntPtr resume)
+    {
+        pid = 0;
+        resume = IntPtr.Zero;
+
+        var startup = new Native.STARTUPINFO { cb = (uint)Marshal.SizeOf<Native.STARTUPINFO>() };
+
+        // Writable, because CreateProcessW may modify the buffer it is given.
+        char[] line = (command + '\0').ToCharArray();
+
+        Native.PROCESS_INFORMATION info;
+        bool started;
+        unsafe
+        {
+            fixed (char* text = line)
+            {
+                started = Native.CreateProcess(
+                    null, text, IntPtr.Zero, IntPtr.Zero, false,
+                    Native.CREATE_SUSPENDED
+                        | (ShowConsole ? Native.CREATE_NEW_CONSOLE : Native.CREATE_NO_WINDOW),
+                    IntPtr.Zero, workingDirectory, ref startup, out info);
+            }
+        }
+
+        if (!started)
+        {
+            return $"could not launch it: {Marshal.GetLastPInvokeErrorMessage()}";
+        }
+
+        pid = info.dwProcessId;
+        resume = info.hThread;
+        _launched = info.hProcess;
         return null;
     }
 
@@ -270,6 +375,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// Works before the module is loaded, which is the normal case. Null when it was taken.
     /// </summary>
     public string? SetBreakpoint(string module, uint methodToken, uint ilOffset = 0)
+        => Interop(() => SetBreakpointCore(module, methodToken, ilOffset));
+
+    private string? SetBreakpointCore(string module, uint methodToken, uint ilOffset)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(module);
 
@@ -299,6 +407,73 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             return problem;
         }
 
+        return null;
+    }
+
+    /// <summary>
+    /// Removes a breakpoint from a running process, by the same three things that set it.
+    ///
+    /// Turning it off is the part that matters, and releasing the pointer is not it. The runtime
+    /// holds a reference of its own to every breakpoint it made, so dropping ours only gives back a
+    /// handle: the breakpoint stays in the process and keeps stopping it, which is a debugger that
+    /// appears to have cleared something and has not. <c>Activate(false)</c> is what makes it stop
+    /// firing; the release afterwards is ordinary tidying.
+    ///
+    /// Works on one that is still waiting for its module too — that one is only a note, and
+    /// forgetting the note is the whole of removing it. Null when it is gone.
+    /// </summary>
+    public string? ClearBreakpoint(string module, uint methodToken, uint ilOffset = 0)
+        => Interop(() => ClearBreakpointCore(module, methodToken, ilOffset));
+
+    private string? ClearBreakpointCore(string module, uint methodToken, uint ilOffset)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        string name = System.IO.Path.GetFileName(module);
+
+        Planted? planted;
+        bool asked;
+        lock (_gate)
+        {
+            asked = _wanted.Any(b => Same(b.Module, b.MethodToken, b.Offset, name, methodToken, ilOffset));
+            planted = _planted.Find(p => Same(p.Module, p.MethodToken, p.Offset, name, methodToken, ilOffset));
+        }
+
+        if (!asked && planted is null)
+        {
+            // Said rather than shrugged off. A caller clearing something that was never there has
+            // the wrong method or the wrong offset, and a silent success leaves it believing the
+            // breakpoint it is still stopping at has been removed.
+            return $"there is no breakpoint in {name} at method 0x{methodToken:X8}+IL_{ilOffset:X4}";
+        }
+
+        // Nothing to switch off in a process that has gone: the breakpoint object outlives the
+        // program it was in, and asking it to deactivate then fails — which would leave a caller
+        // unable to drop a breakpoint from a run that is already over.
+        if (planted is not null && State != DebugState.Exited)
+        {
+            int hr = Activation.Set(planted.Pointer, false);
+            if (hr < 0)
+            {
+                // Left in place, and in the list, because it is still in the process. Reporting it
+                // as cleared here would be the exact failure this method exists to avoid.
+                return $"the runtime would not turn the breakpoint off: 0x{hr:X8}";
+            }
+        }
+
+        lock (_gate)
+        {
+            _wanted.RemoveAll(b => Same(b.Module, b.MethodToken, b.Offset, name, methodToken, ilOffset));
+            _planted.RemoveAll(p => Same(p.Module, p.MethodToken, p.Offset, name, methodToken, ilOffset));
+        }
+
+        if (planted is not null)
+        {
+            Marshal.Release(planted.Pointer);
+        }
+
+        Note($"cleared the breakpoint in {name} at method 0x{methodToken:X8}+IL_{ilOffset:X4}"
+             + (planted is null ? ", which was still waiting for its module" : string.Empty));
         return null;
     }
 
@@ -364,7 +539,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
             lock (_gate)
             {
-                _planted.Add(breakpoint);
+                _planted.Add(new Planted(wanted.Module, wanted.MethodToken, wanted.Offset, breakpoint));
                 int at = _wanted.IndexOf(wanted);
                 if (at >= 0)
                 {
@@ -392,7 +567,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// Null when the step was armed. It is reported as complete through the usual stop, so a caller
     /// waits on <see cref="WaitUntilStopped"/> exactly as it would for a breakpoint.
     /// </summary>
-    public string? Step(bool into = true)
+    public string? Step(bool into = true) => Interop(() => StepCore(into));
+
+    private string? StepCore(bool into)
     {
         ICorDebugThread? thread;
         lock (_gate)
@@ -459,7 +636,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     }
 
     /// <summary>Runs to the end of the current method and stops in whatever called it.</summary>
-    public string? StepOut()
+    public string? StepOut() => Interop(StepOutCore);
+
+    private string? StepOutCore()
     {
         ICorDebugThread? thread;
         lock (_gate)
@@ -497,6 +676,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
     /// <summary><c>STOP_NONE</c>: never stop in code that maps to no IL.</summary>
     private const int StopNowhereUnmapped = 0;
+
+    /// <summary>How long to give the runtime to bring the process to a halt before terminating it.</summary>
+    private const uint SynchroniseTimeout = 5000;
 
     /// <summary>
     /// Turns off the stepper from the last step, if there is one.
@@ -542,6 +724,11 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     {
         ArgumentNullException.ThrowIfNull(ask);
 
+        return Interop(() => ProbeCore(index, ask));
+    }
+
+    private IReadOnlyList<string> ProbeCore(uint index, Func<IntPtr, IReadOnlyList<string>> ask)
+    {
         ICorDebugThread? thread;
         lock (_gate)
         {
@@ -593,7 +780,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     }
 
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
-    public void Continue()
+    public void Continue() => Interop(ContinueCore);
+
+    private void ContinueCore()
     {
         ICorDebugThread? letting;
         lock (_gate)
@@ -625,7 +814,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     }
 
     /// <summary>Ends the process and the session with it.</summary>
-    public void Stop()
+    public void Stop() => Interop(StopCore);
+
+    private void StopCore()
     {
         lock (_gate)
         {
@@ -637,7 +828,37 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         try
         {
-            _process?.Terminate(0);
+            if (_process is { } process)
+            {
+                // Synchronised, then told, then let go. Each of the three is load-bearing.
+                //
+                // Terminate on a process that is running is refused outright —
+                // CORDBG_E_PROCESS_NOT_SYNCHRONIZED, 0x80131302 — and that return used to be
+                // thrown away, so a session that had been asked to kill something said it had. The
+                // process went on running and announced itself through the next callback, which is
+                // the worst version of this: a debuggee outliving the debugger that believes it is
+                // gone. And a synchronised process does not die on the call either; it dies when it
+                // is continued, so the continue below is what actually ends it.
+                if (process.IsRunning(out int running) >= 0 && running != 0)
+                {
+                    _ = process.Stop(SynchroniseTimeout);
+                }
+
+                int hr = process.Terminate(0);
+                if (hr < 0)
+                {
+                    Note($"the runtime would not terminate it: 0x{hr:X8}");
+                }
+
+                _ = process.Continue(0);
+            }
+            else if (_launched != IntPtr.Zero)
+            {
+                // No ICorDebugProcess means the runtime never got far enough to report one — and the
+                // process is still there regardless, so it is killed through the handle from the
+                // launch rather than left behind because the debugging interface never arrived.
+                _ = Native.TerminateProcess(_launched, 1);
+            }
         }
         catch (COMException)
         {
@@ -679,10 +900,6 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         {
             Note("the process could not be held on to");
         }
-        finally
-        {
-            _attached.Set();
-        }
 
         if (!_holdAtStart)
         {
@@ -700,6 +917,8 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         _settled.Set();
         return true;
     }
+
+    void IManagedEvents.Attached() => _attached.Set();
 
     bool IManagedEvents.ModuleLoaded(IntPtr module, IntPtr controller)
     {
@@ -800,7 +1019,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// Only while it is stopped: the frame is what the values live in, and there is no frame to read
     /// once the program is running again.
     /// </summary>
-    public IReadOnlyList<ManagedValue> Values(bool arguments = false)
+    public IReadOnlyList<ManagedValue> Values(bool arguments = false) => Interop(() => ValuesCore(arguments));
+
+    private IReadOnlyList<ManagedValue> ValuesCore(bool arguments)
     {
         ICorDebugThread? thread;
         lock (_gate)
@@ -876,16 +1097,29 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// It is not always. A frame stopped in code the JIT reordered, or in a prologue, maps to an
     /// approximate offset or to none at all, and a listing that highlighted that line as though it
     /// were the current one would be confidently wrong. The word travels with the number.
+    ///
+    /// <c>CorDebugMappingResult</c> is a flag set rather than a list — 0x10 is exact, not 0x00 — and
+    /// reading it as one made every ordinary stop report "unmapped". The number was right each time,
+    /// so the only sign was the word beside it warning the reader off a line the arrow was correctly
+    /// sitting on. A combination is reported as itself rather than guessed at.
     /// </summary>
     private static string Mapped(int mapping) => mapping switch
     {
-        0 => "exact",
-        1 => "approximate",
-        2 => "prologue",
-        3 => "epilogue",
-        4 => "no mapping",
-        _ => "unmapped",
+        Exact => "exact",
+        Approximate => "approximate",
+        Prolog => "prologue",
+        Epilog => "epilogue",
+        NoInfo => "no mapping",
+        UnmappedAddress => "unmapped address",
+        _ => $"mapping 0x{mapping:X}",
     };
+
+    private const int Prolog = 0x01;
+    private const int Epilog = 0x02;
+    private const int NoInfo = 0x04;
+    private const int UnmappedAddress = 0x08;
+    private const int Exact = 0x10;
+    private const int Approximate = 0x20;
 
     void IManagedEvents.Exited() => Exited();
 
@@ -927,7 +1161,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         Reported?.Invoke(this, reported);
     }
 
-    private void Release()
+    private void Release() => Interop(ReleaseCore);
+
+    private void ReleaseCore()
     {
         if (_unregister != IntPtr.Zero)
         {
@@ -942,9 +1178,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         // process nobody is watching.
         lock (_gate)
         {
-            foreach (IntPtr breakpoint in _planted)
+            foreach (var breakpoint in _planted)
             {
-                Marshal.Release(breakpoint);
+                Marshal.Release(breakpoint.Pointer);
             }
 
             _planted.Clear();
@@ -982,6 +1218,12 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
             Marshal.ReleaseComObject(_debug);
             _debug = null;
+        }
+
+        if (_launched != IntPtr.Zero)
+        {
+            _ = Native.CloseHandle(_launched);
+            _launched = IntPtr.Zero;
         }
 
         if (_self.IsAllocated)

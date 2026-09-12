@@ -110,6 +110,22 @@ public class McpManagedDebugTests
     }
 
     [Fact]
+    public void ClearingOneNamesTheSameMethodAndSaysItIsGone()
+    {
+        var (tools, debug, _) = Open();
+
+        tools.Break("Spydate.Core.PE.PeImage::Load+IL_000F");
+        string text = tools.Break("Spydate.Core.PE.PeImage::Load+IL_000F", on: false);
+
+        // The same three things it was set with, because that is all a managed breakpoint is: no
+        // address is involved in either direction, so clearing one cannot miss by an address.
+        Assert.Equal("Spydate.Core.dll", debug.Module);
+        Assert.Equal(0x0Fu, debug.Offset);
+        Assert.False(debug.Wanted);
+        Assert.Contains("cleared", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void BreakingOnATypeSaysWhyThatIsNotAPlace()
     {
         var (tools, _, _) = Open();
@@ -195,6 +211,9 @@ public class McpManagedDebugTests
 
         public uint Offset { get; private set; }
 
+        /// <summary>Whether the last breakpoint call was setting one or clearing one.</summary>
+        public bool? Wanted { get; private set; }
+
         public string? Where { get; set; }
 
         public string Mapping { get; set; } = "exact";
@@ -231,6 +250,7 @@ public class McpManagedDebugTests
             Module = module;
             Token = methodToken;
             Offset = ilOffset;
+            Wanted = on;
             return null;
         }
 

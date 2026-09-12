@@ -118,7 +118,21 @@ internal sealed class ManagedCallback : ICorDebugManagedCallback, ICorDebugManag
         // The session decides whether to let it go. Holding here is the only moment at which a
         // breakpoint can be set before the program has run a single managed instruction — after
         // this the process is away, and anything set later is a race with the code it is about.
-        return _events.Created(pProcess) ? 0 : Go(pProcess);
+        if (_events.Created(pProcess))
+        {
+            _events.Attached();
+            return 0;
+        }
+
+        int hr = Go(pProcess);
+
+        // Said after the Continue, never before it, and the order is the whole of the fix. Start()
+        // returns on this signal, so a caller told "attached" while this thread still had the
+        // process stopped could terminate it in the gap — and the Continue below it would then
+        // resume a process that had been asked to die. It lived on under a session that believed it
+        // had killed it, which is exactly the state a debugger must never leave behind.
+        _events.Attached();
+        return hr;
     }
 
     public int ExitProcess(IntPtr pProcess)
@@ -261,6 +275,12 @@ internal interface IManagedEvents
     /// The process exists and its runtime is debuggable. True to hold it here rather than let it run.
     /// </summary>
     bool Created(IntPtr process);
+
+    /// <summary>
+    /// The process is now in the state the callback left it in — running, or held — and can be acted
+    /// on. Separate from <see cref="Created"/> so that nothing acts on it mid-callback.
+    /// </summary>
+    void Attached();
 
     /// <summary>
     /// A module was loaded. True when the session has taken over continuing the debuggee, which it

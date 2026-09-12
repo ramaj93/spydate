@@ -20,6 +20,16 @@ public sealed class DebuggerTests
 
     private static bool Available => OperatingSystem.IsWindows() && File.Exists(Trivial);
 
+    /// <summary>
+    /// A session whose debuggee gets no console window.
+    ///
+    /// There are two dozen live tests below and each starts a process. A console window takes the
+    /// foreground as it appears, so a run went off like a strobe and took the keyboard away from
+    /// whoever was working. The debuggee still has a console and behaves exactly as it would; only
+    /// the window is withheld.
+    /// </summary>
+    private static DebugSession Headless() => new() { ShowConsole = false };
+
     [Fact]
     public void TheDebuggeeUsedByTheseTestsIsActuallyPresent()
     {
@@ -35,7 +45,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         var seen = new List<DebugEvent>();
         var exited = new ManualResetEventSlim();
 
@@ -86,7 +96,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         string? ending = null;
         var exited = new ManualResetEventSlim();
 
@@ -124,7 +134,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0x140000000, imageSize: 0x100000, arguments: "where.exe");
 
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
@@ -148,7 +158,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -174,7 +184,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -193,7 +203,7 @@ public sealed class DebuggerTests
     [Fact]
     public void RegistersAreRefusedWhileItIsRunning()
     {
-        using var session = new DebugSession();
+        using var session = Headless();
 
         // Nothing has been started, so there is nothing to report and no guess is offered.
         Assert.Equal(DebugState.NotStarted, session.State);
@@ -206,7 +216,7 @@ public sealed class DebuggerTests
     {
         // The property the whole design rests on: constructing a session starts no process. Opening,
         // analysing and patching a binary all leave it inert.
-        using var session = new DebugSession();
+        using var session = Headless();
 
         Assert.Equal(DebugState.NotStarted, session.State);
         Assert.Equal(0ul, session.LoadedBase);
@@ -226,7 +236,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -254,7 +264,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0x180000000, imageSize: 0x200000, arguments: "where.exe", module: "ntdll.dll");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -289,7 +299,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         var seen = new List<DebugEvent>();
         session.Reported += (_, e) =>
         {
@@ -327,7 +337,7 @@ public sealed class DebuggerTests
     [Fact]
     public void ABreakpointIsRememberedBeforeThereIsAProcessToPlantItIn()
     {
-        using var session = new DebugSession();
+        using var session = Headless();
 
         Assert.True(session.AddBreakpoint(0x140001000));
         Assert.False(session.AddBreakpoint(0x140001000));   // already there
@@ -346,7 +356,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0x140000000, imageSize: 0x10000, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -372,7 +382,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -450,7 +460,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -491,7 +501,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
 
@@ -522,7 +532,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         DebugEvent? paused = null;
         var exited = new ManualResetEventSlim();
         session.Reported += (_, e) =>
@@ -569,7 +579,7 @@ public sealed class DebuggerTests
         var image = Spydate.Core.PE.PeImage.Load(Trivial);
         ulong entry = image.ImageBase + image.EntryPointRva;
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
 
@@ -611,7 +621,7 @@ public sealed class DebuggerTests
         }
 
         var image = Spydate.Core.PE.PeImage.Load(Trivial32);
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
 
@@ -638,7 +648,7 @@ public sealed class DebuggerTests
         }
 
         var image = Spydate.Core.PE.PeImage.Load(Trivial32);
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
 
@@ -665,7 +675,7 @@ public sealed class DebuggerTests
         }
 
         var image = Spydate.Core.PE.PeImage.Load(Trivial32);
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial32, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
 
@@ -695,7 +705,7 @@ public sealed class DebuggerTests
         var image = Spydate.Core.PE.PeImage.Load(Trivial32);
         ulong entry = image.ImageBase + image.EntryPointRva;
 
-        using var session = new DebugSession();
+        using var session = Headless();
         var said = new List<string>();
         string ending = string.Empty;
         var exited = new ManualResetEventSlim();
@@ -759,7 +769,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         var exited = new ManualResetEventSlim();
         session.Reported += (_, e) =>
         {
@@ -779,7 +789,7 @@ public sealed class DebuggerTests
     [Fact]
     public void NothingRunningCannotBePaused()
     {
-        using var session = new DebugSession();
+        using var session = Headless();
         Assert.False(session.Pause());
     }
 
@@ -800,7 +810,7 @@ public sealed class DebuggerTests
         uint rva = image.EntryPointRva;
         ulong entry = image.ImageBase + rva;
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
 
@@ -834,7 +844,7 @@ public sealed class DebuggerTests
         uint rva = image.EntryPointRva;
         ulong entry = image.ImageBase + rva;
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.AddBreakpoint(entry);
         session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
@@ -847,7 +857,7 @@ public sealed class DebuggerTests
     [Fact]
     public void AThreadThatHasGoneIsNotTheOneStepped()
     {
-        using var session = new DebugSession();
+        using var session = Headless();
 
         // Nothing running, so no thread of that id exists and the choice cannot stand.
         session.SelectedThreadId = 999999;
@@ -868,7 +878,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         DebugEvent? stop = null;
         var reached = new ManualResetEventSlim();
 
@@ -911,7 +921,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
         Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
 
@@ -951,7 +961,7 @@ public sealed class DebuggerTests
             return;
         }
 
-        using var session = new DebugSession();
+        using var session = Headless();
         var exited = new ManualResetEventSlim();
         int stops = 0;
 

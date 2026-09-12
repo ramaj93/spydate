@@ -319,3 +319,30 @@ meaningful in one mode and misleading in the other.
 
 **A NativeAOT or single-file publish is not a managed target.** There is no IL and no metadata, so
 the native debugger is not a fallback for it — it is the correct and only reading of that file.
+
+**The process is launched here, not by dbgshim.** `CreateProcessForLaunch` is the same
+`CreateProcessW` with the flags parameter left out, and the flags are what decide whether a debuggee
+appears as a window in front of whoever is working. Both debuggers now create the process themselves
+with `CREATE_SUSPENDED` and either `CREATE_NEW_CONSOLE` or `CREATE_NO_WINDOW`, which is what
+`ShowConsole` selects: on for a person, who wants to see the program's output, off for the suite,
+which starts three dozen processes and used to throw three dozen windows across the desktop. What
+dbgshim is still needed for is the runtime-startup handshake, which is the part that is not a
+documented contract. The launch keeps the process handle, so a target whose runtime never publishes
+itself can still be killed.
+
+**Every call into ICorDebug is made from an MTA thread, by the session itself.** Its interface
+pointers arrive on the runtime's own threads, which are MTA, and they cannot be marshalled into a
+COM apartment: asking one for anything from a WPF window's STA thread fails the QueryInterface with
+`E_NOINTERFACE` before the call happens, so the panel's first Continue threw rather than continuing.
+Tests never saw it, because xunit's threads are MTA — and so are the thread pool's, which is why the
+fix is a hop to the pool inside `ManagedDebugSession` rather than a rule its callers have to keep.
+Raw vtable calls such as `Activate` are unaffected, since nothing marshals.
+
+**Terminating goes stop, terminate, continue, and all three are load-bearing.**
+`ICorDebugProcess::Terminate` on a process that is running is refused with
+`CORDBG_E_PROCESS_NOT_SYNCHRONIZED`, and a synchronised process does not die on the call either — it
+dies when it is continued. Ignoring that HRESULT gave a session that reported a kill, left the
+process running, and found out only when the next callback arrived from it. `Start` also waits for a
+signal raised *after* the create-process callback continues the debuggee rather than during it: told
+any earlier, a caller could terminate in the gap and have the callback's own continue resume what it
+had just killed.
