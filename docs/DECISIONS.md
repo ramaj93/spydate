@@ -295,3 +295,27 @@ endpoint at all, and a failed lookup writes a line of status rather than blockin
 providers, the secret store, the settings — is in `Spydate.Agent`, a plain library.
 Nothing in the WPF project is reachable from a test, and an assistant whose
 behaviour lived there would be verified by looking at it.
+
+## Managed debugging goes through dbgshim, and is a second debugger rather than a branch
+
+**`Microsoft.Diagnostics.DbgShim.win-x64` is a dependency, for one DLL.** `dbgshim` is the supported
+way to obtain an `ICorDebug` for a process: it works out which runtime the target is using, loads
+*that* runtime's own `mscordbi`, and signals when the CLR is far enough up to be debugged. None of
+that is something to reimplement — the startup handshake is not a documented contract, and getting
+it subtly wrong produces a debugger that attaches to some processes and hangs on others. It stopped
+shipping in the shared framework after .NET 5 (this machine has one only under 5.0.17), so the
+package is where it now lives. It contains exactly one file and no build targets, so a RID-less
+build resolves the reference, succeeds, and leaves the DLL absent at run time; `Spydate.Debugger`
+copies it explicitly rather than taking a `RuntimeIdentifier` it has no other use for.
+
+**It cannot extend `DebugSession`, and that is a fact about ICorDebug rather than a preference.**
+ICorDebug takes the process's native debug port and intends to be the only debugger attached, so
+managed debugging is a second `IDebugControl` implementation chosen when a binary is opened — which
+is the argument for that interface having existed since the MCP server was written. The two answer
+different questions about different things: `DebugSession` stops at a virtual address and reports
+registers and stack words, `ManagedDebugSession` stops at a method and an IL offset and reports
+frames and typed locals. Trying to make one type do both would mean a snapshot whose every field is
+meaningful in one mode and misleading in the other.
+
+**A NativeAOT or single-file publish is not a managed target.** There is no IL and no metadata, so
+the native debugger is not a fallback for it — it is the correct and only reading of that file.

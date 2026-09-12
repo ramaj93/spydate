@@ -1,0 +1,119 @@
+using Spydate.Debugger;
+using Spydate.Debugger.Managed;
+
+namespace Spydate.Tests;
+
+/// <summary>
+/// Debugging a .NET process through the CLR debugging interface.
+///
+/// These run a program. Every one of them launches something, watches it, and kills it, so each is
+/// written to leave nothing behind whether it passes or fails — and each skips rather than fails
+/// when the target it wants is not built, so the suite still runs on a fresh clone.
+///
+/// The target is Spydate's own MCP server: a real .NET console application that starts, initialises
+/// a host, and then blocks reading stdin, which is exactly what a debuggee should do while it is
+/// being looked at.
+/// </summary>
+public class ManagedDebuggerTests
+{
+    /// <summary>A managed program to debug, or null when this build has not produced one.</summary>
+    private static string? Target
+    {
+        get
+        {
+            string here = AppContext.BaseDirectory;
+            string guess = Path.GetFullPath(Path.Combine(here, "..", "..", "..", "..", "..", "src", "Spydate.Mcp", "bin", "Debug", "net10.0", "spydate-mcp.exe"));
+            return File.Exists(guess) ? guess : null;
+        }
+    }
+
+    [Fact]
+    public void ARuntimeIsFoundAndAttachedTo()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        string? problem = session.Start(target);
+
+        Assert.True(problem is null, problem + "\n" + string.Join("\n", session.Recent));
+        Assert.Equal(DebugState.Running, session.State);
+
+        // Attaching is the whole of the hard part: the process had to be launched suspended, the
+        // debugger registered against it, the runtime given a chance to come up, and the right
+        // mscordbi loaded for whichever runtime it picked.
+        Assert.Contains(session.Recent, line => line.Contains("runtime is attached", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void StoppingItEndsTheProcess()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target));
+
+        uint pid = session.ProcessId;
+        Assert.True(pid != 0, "the session reported no process id");
+
+        session.Stop();
+
+        Assert.Equal(DebugState.Exited, session.State);
+
+        // Asked of the operating system, not of the session. A debugger that believes it has killed
+        // something and has not leaves a process running under a dead debugger, and the only place
+        // that shows is the machine.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && Alive(pid))
+        {
+            Thread.Sleep(100);
+        }
+
+        Assert.False(Alive(pid), $"process {pid} is still running after Stop()");
+    }
+
+    private static bool Alive(uint pid)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById((int)pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
+    public void SomethingThatIsNotManagedSaysSoRatherThanWaitingForever()
+    {
+        // A native program never publishes a runtime, so the wait is the only thing that can end
+        // this - and it has to end, with a sentence that names the likely reason.
+        string native = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "where.exe");
+        if (!File.Exists(native))
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        string? problem = session.Start(native, timeout: TimeSpan.FromSeconds(6));
+
+        Assert.NotNull(problem);
+        Assert.Contains("not .NET", problem!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFileThatIsNotThereIsRefusedBeforeAnythingIsLaunched()
+    {
+        using var session = new ManagedDebugSession();
+
+        Assert.Contains("there is no file at", session.Start(@"C:\nothing\here.exe")!, StringComparison.Ordinal);
+        Assert.Equal(DebugState.NotStarted, session.State);
+    }
+}

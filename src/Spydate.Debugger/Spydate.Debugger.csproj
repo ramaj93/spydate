@@ -6,6 +6,14 @@
     <Description>Spydate debugging: launching a binary under a debug loop, breakpoints, registers and memory.</Description>
     <!-- The whole thing is Win32 debugging APIs. Saying so once here beats an attribute per method. -->
     <SupportedOSPlatform>windows</SupportedOSPlatform>
+    <!--
+      CA1416 flags COM interop as Windows-only, which it is, in a project that is Windows-only
+      throughout: every type here is a wrapper over a debugging API that exists nowhere else. The
+      line above does not reach the analyzer - it is not a property MSBuild knows - and the
+      alternative, an assembly-level SupportedOSPlatform, moves the same warnings into the net10.0
+      test project, where they would be just as true and just as uninformative.
+    -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
@@ -13,6 +21,21 @@
     <!-- Iced directly rather than Spydate.Disassembly: stepping over a call needs the length of one
          instruction, not function discovery or listings. -->
     <PackageReference Include="Iced" />
+    <!-- Native asset only: dbgshim.dll beside the output, loaded by name at run time. -->
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <!--
+    The package holds one file, runtimes/win-x64/native/dbgshim.dll, and nothing else - no lib, no
+    build targets. A RID-less build does not flow native assets, so without this the reference
+    resolves, the build succeeds, and the DLL is simply absent at run time. Copying it by hand beats
+    putting a RuntimeIdentifier on a library that has no other reason to want one.
+  -->
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_Diagnostics_DbgShim_win-x64)\runtimes\win-x64\native\dbgshim.dll"
+          Condition="'$(PkgMicrosoft_Diagnostics_DbgShim_win-x64)' != ''"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

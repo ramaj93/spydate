@@ -12,6 +12,17 @@
     <PackageVersion Include="ICSharpCode.Decompiler" Version="9.1.0.7988" />
   </ItemGroup>
 
+  <ItemGroup Label="Debugging">
+    <!--
+      dbgshim: the supported way to get an ICorDebug for a process. It finds the target's runtime,
+      loads that runtime's own mscordbi, and signals when the CLR is far enough up to be debugged.
+      A NuGet package rather than a file on the machine because it stopped shipping in the shared
+      framework after .NET 5 - this box has one only under 5.0.17 - and the alternative is
+      reimplementing an undocumented startup handshake. See docs/DECISIONS.md.
+    -->
+    <PackageVersion Include="Microsoft.Diagnostics.DbgShim.win-x64" Version="10.0.745401" />
+  </ItemGroup>
+
   <ItemGroup Label="Runtime extensions">
     <!--
       PKCS#7 decoding for Authenticode summaries. Microsoft-owned and shipped with the runtime -
