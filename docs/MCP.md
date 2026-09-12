@@ -90,6 +90,20 @@ that only the code mentions.
 address column's job done better — the native side needs a second `xrefs` call to learn the same
 thing. `referenced_only` has nothing to filter there and says so rather than looking applied.
 
+`patch` works on IL too. `read_function(view="il")` prints a file address against every
+instruction, and `patch` takes one exactly as it takes an x86 address — whole instructions, padded
+with `nop`, recorded in the same `.spydate` project, written by the same File ▸ Save patched copy.
+The assembler is a subset and refuses anything taking a metadata token by name: writing a token
+that is not already in the tables means adding a row and moving everything after it.
+
+One check has no native equivalent and is the reason this is usable at all. IL is verified before
+it runs, so a patch that leaves the evaluation stack a different depth does not produce a program
+that behaves differently — it produces one the runtime refuses with an `InvalidProgramException`
+at first call, nowhere near the patch. The depth of what is removed and what replaces it is
+computed, and a mismatch is refused with the number of values it is out by, so the fix is in the
+message. Depth only: a patch that removes a call says so, because removing
+`call uint8[] ReadAllBytes(string)` is depth-neutral and still will not verify. `force` overrides.
+
 `get_overview` describes the assembly as an assembly: full name, target framework, entry point,
 type and member counts, what it references. It also says which of the file's two readings is about
 the program. For an IL-only assembly the native lines above it describe the CLR loader stub, and

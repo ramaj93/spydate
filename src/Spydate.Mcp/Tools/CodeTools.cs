@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
 using Spydate.Core.Strings;
+using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
@@ -192,6 +193,18 @@ public sealed class CodeTools
 
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// An IL listing with an address against every instruction, when the member has a body.
+    ///
+    /// Without it the listing is unpatchable: <c>IL_0007</c> is a distance into a method body, and
+    /// the patch tool, the annotation tools and the breakpoint gutter all take an address. With it,
+    /// every line of IL can be named by exactly the same thing that names a line of x86.
+    /// </summary>
+    private static string Listing(BinarySession session, string listing, ManagedMember member)
+        => session.Bodies?.Of(member.Handle) is { } body
+            ? ManagedDecompiler.Addressed(listing, body, session.Image.ImageBase, session.Image.Is64Bit)
+            : listing;
+
     /// <summary>Why there is no managed reading of this file, for a view that asked for one.</summary>
     private static string NoManaged(BinarySession session, string view)
         => session.Image.ClrHeader is null
@@ -221,7 +234,7 @@ public sealed class CodeTools
             {
                 (false, { } member) => managed.Decompiler.DecompileMember(member),
                 (false, null) => managed.Decompiler.DecompileType(type),
-                (true, { } member) => managed.Decompiler.DisassembleMember(member),
+                (true, { } member) => Listing(session, managed.Decompiler.DisassembleMember(member), member),
                 (true, null) => managed.Decompiler.DisassembleType(type),
             };
         }

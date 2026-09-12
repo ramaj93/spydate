@@ -186,28 +186,12 @@ public sealed class ManagedReferences
 
     private void Walk(MethodDefinitionHandle method, ImmutableArray<byte> il)
     {
-        int pos = 0;
-        while (pos < il.Length)
+        foreach (var instruction in Il.Walk(il))
         {
-            int start = pos;
-            var code = OpCodes_.At(il, ref pos);
-            if (code is not { } op)
+            if (Interesting(instruction.Op, il, instruction.OperandAt) is { } found)
             {
-                return;   // an opcode this does not know: the rest of this body is not decodable
+                Record(method, instruction.Offset, found.Kind, found.Target, found.Text);
             }
-
-            int operand = OpCodes_.OperandSize(op.OperandType, il, pos);
-            if (operand < 0 || pos + operand > il.Length)
-            {
-                return;
-            }
-
-            if (Interesting(op, il, pos) is { } found)
-            {
-                Record(method, start, found.Kind, found.Target, found.Text);
-            }
-
-            pos += operand;
         }
     }
 
@@ -590,76 +574,3 @@ public sealed class ManagedReferences
     }
 }
 
-/// <summary>
-/// The IL opcode table, taken from the runtime rather than written out here.
-///
-/// Every opcode's length and operand shape is already stated by <see cref="OpCodes"/>, and a
-/// hand-copied table of two hundred entries is a thing that is wrong in one place and silently
-/// mis-decodes one instruction — which, in a stream where instruction boundaries are found by
-/// walking, throws off everything after it.
-/// </summary>
-internal static class OpCodes_
-{
-    private static readonly OpCode?[] Single = new OpCode?[0x100];
-    private static readonly OpCode?[] Extended = new OpCode?[0x100];
-
-    static OpCodes_()
-    {
-        foreach (var field in typeof(OpCodes).GetFields())
-        {
-            if (field.GetValue(null) is not OpCode op)
-            {
-                continue;
-            }
-
-            if (op.Size == 1)
-            {
-                Single[op.Value & 0xFF] = op;
-            }
-            else
-            {
-                Extended[op.Value & 0xFF] = op;
-            }
-        }
-    }
-
-    /// <summary>Reads one opcode and advances past it. Null when the byte is not an opcode.</summary>
-    public static OpCode? At(ImmutableArray<byte> il, ref int pos)
-    {
-        byte first = il[pos++];
-        if (first != 0xFE)
-        {
-            return Single[first];
-        }
-
-        return pos >= il.Length ? null : Extended[il[pos++]];
-    }
-
-    /// <summary>How many bytes of operand follow, or -1 when that cannot be worked out.</summary>
-    public static int OperandSize(OperandType type, ImmutableArray<byte> il, int at) => type switch
-    {
-        OperandType.InlineNone => 0,
-        OperandType.ShortInlineBrTarget or OperandType.ShortInlineI or OperandType.ShortInlineVar => 1,
-        OperandType.InlineVar => 2,
-        OperandType.InlineBrTarget or OperandType.InlineField or OperandType.InlineI
-            or OperandType.InlineMethod or OperandType.InlineSig or OperandType.InlineString
-            or OperandType.InlineTok or OperandType.InlineType or OperandType.ShortInlineR => 4,
-        OperandType.InlineI8 or OperandType.InlineR => 8,
-
-        // A jump table: four bytes of count, then that many targets. The count comes out of the file
-        // and is clamped, because a body claiming a billion arms would otherwise be an overflow
-        // rather than an unreadable method.
-        OperandType.InlineSwitch => at + 4 > il.Length
-            ? -1
-            : Arms(il, at) is { } arms && arms <= (il.Length - at - 4) / 4
-                ? 4 + (arms * 4)
-                : -1,
-        _ => -1,
-    };
-
-    private static int? Arms(ImmutableArray<byte> il, int at)
-    {
-        long count = (uint)(il[at] | (il[at + 1] << 8) | (il[at + 2] << 16) | (il[at + 3] << 24));
-        return count > int.MaxValue / 4 ? null : (int)count;
-    }
-}

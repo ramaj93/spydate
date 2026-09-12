@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using ModelContextProtocol.Server;
 using Spydate.Core.Project;
+using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
@@ -40,16 +41,22 @@ public sealed class PatchTools
         [Description("Address, sub_XXXX, or an existing name.")] string target,
         [Description("Instruction(s) to assemble, or bytes: followed by hex.")] string instruction,
         [Description("Why this patch exists. Worth giving: it is what the next reader sees.")] string? comment = null,
-        [Description("False to try it live only, recording nothing.")] bool keep = true)
+        [Description("False to try it live only, recording nothing.")] bool keep = true,
+        [Description("Write IL that will not verify anyway. Read the refusal first.")] bool force = false)
     {
         if (_options.ReadOnly)
         {
             return ReadOnlyRefusal;
         }
 
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } session)
         {
             return SessionTools.NothingOpen;
+        }
+
+        if (session is not { Analysis: not null } && session.Managed is null)
+        {
+            return $"there is nothing to patch: {session.Image.Machine} is not a machine this disassembles";
         }
 
         var resolved = Targets.Resolve(session, target);
@@ -78,7 +85,14 @@ public sealed class PatchTools
                    + "revert_patch takes it back out, patch writes it into the project.";
         }
 
-        var proposal = InstructionPatches.Assemble(analysis, resolved.Va, instruction);
+        // Which assembler, decided by where the address lands rather than by what the file claims
+        // to be. A mixed-mode assembly has both kinds of code in it, and the CLR header's ILOnly bit
+        // is one bit that untrusted input is free to get wrong; whether a method body's IL covers
+        // this address is a fact about the bytes.
+        var proposal = InIl(session, resolved.Va)
+            ? IlPatches.Assemble(session.Managed!, session.Bodies!, session.Image, resolved.Va, instruction, force)
+            : InstructionPatches.Assemble(session.Analysis!, resolved.Va, instruction);
+
         if (!proposal.Ok)
         {
             return proposal.Problem!;
@@ -99,6 +113,7 @@ public sealed class PatchTools
         return $"patched 0x{session.Image.RvaToVa(patch.Rva):X}: {patch.OriginalHex} -> {patch.Hex}"
                + $"\n{patch.Comment}"
                + "\nrecorded in the project. Nothing is written to any binary; a person applies it from the window."
+               + Precompiled(session)
                + Save(session);
     }
 
@@ -197,6 +212,26 @@ public sealed class PatchTools
         session.Patches.Remove(covering.Rva);
         return $"reverted the patch at 0x{session.Image.RvaToVa(covering.Rva):X}" + Save(session);
     }
+
+    /// <summary>
+    /// Whether a patched copy of this file would actually run the bytes that were changed.
+    ///
+    /// A ReadyToRun image carries native code compiled ahead of time beside the IL, and the runtime
+    /// prefers it. Patching the IL of such a method is not wrong — the bytes really do change — it
+    /// simply may have no effect at all, which is the worst way for a patch to fail: everything
+    /// reports success and the program behaves exactly as it did.
+    /// </summary>
+    private static string Precompiled(BinarySession session)
+        => session.Image.ClrHeader is { ManagedNativeHeader.Size: > 0 }
+            ? "\nnote: this assembly is precompiled (ReadyToRun), so the runtime may run its native copy "
+              + "rather than the IL you changed - the patch can be correct and still do nothing"
+            : string.Empty;
+
+    /// <summary>Whether an address is inside a method's IL, which is what decides how to assemble.</summary>
+    private static bool InIl(BinarySession session, ulong va)
+        => session.Bodies is { } bodies
+           && session.Image.VaToRva(va) is { } rva
+           && bodies.At(rva) is not null;
 
     internal const string ReadOnlyRefusal =
         "this server was started with --read-only, so no patches can be recorded. Everything else still works.";

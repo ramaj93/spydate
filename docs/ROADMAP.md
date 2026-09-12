@@ -180,17 +180,26 @@ native side already reads it, because native is what it is.
   things had to be decoded rather than skipped: a MethodSpec, or every call to a generic method
   would be counted against one instantiation; and a TypeSpec, without which `List.Add` and
   `HashSet.Add` collapsed into one fictional member with ninety calls against it
-- ⬜ **IL patching.** A method body is bytes at an RVA, so `PatchStore`, `PatchWriter` and the
-  overlap and original-bytes checks all apply unchanged. Two things are missing: an IL listing
-  that carries the RVA in its first column, because `AddressText.FromLine` wants 8 or 16 hex
-  digits there and ILSpy emits `IL_0007:`, and an IL assembler subset mirroring `X86Assembler`
-  (`nop`, `ret`, `ldc.i4.0/1`, `br`, `brtrue`↔`brfalse`, `pop`) — easier than x86, since `nop`
-  is one byte and the pad-to-whole-instruction rule falls out. Three limits are inherent rather
-  than effort, and each should be *said* rather than discovered: anything needing new metadata
-  (a new string literal, a new member reference) is out of scope for a byte patcher; a ReadyToRun
-  image carries precompiled native code the runtime prefers over the IL, so a patch there may do
-  nothing at all — detectable up front from `ClrHeader.ManagedNativeHeader`; and a patched copy
-  has a broken strong name, as it already has a broken Authenticode signature
+- ✅ **IL patching.** `PatchStore`, `PatchWriter` and the overlap and original-bytes checks are
+  untouched: an IL patch is a change to bytes at an RVA, which is what they always took.
+  `ManagedBodies` supplies the RVA a body's IL actually starts at — read from the method header
+  rather than taken from `MethodBodyBlock`, which hands back the IL without saying where it began —
+  and the IL listing carries that address against every instruction, so `AddressText.FromLine`,
+  `Targets.Resolve` and the patch tool all work on it unchanged. `IlAssembler` is the subset;
+  anything taking a metadata token is refused by name, because writing a token that is not already
+  in the tables means adding a row and moving everything after it, and the one thing this promises
+  is that nothing moves.
+  The part with no native equivalent is `IlStack`. x86 is a machine with registers, so NOPping a
+  call leaves a wrong value in one and the program runs on being wrong — usually the point. IL is
+  verified before it runs, so the same edit leaves the stack a different depth and the method is
+  refused outright with an `InvalidProgramException`, at first call, nowhere near the patch. So the
+  depth is computed for what goes and for what replaces it, and a mismatch is reported as the
+  number of values it is out by, which is the fix. Depth only: types are not checked, and a patch
+  that removes a call says so, since removing `call uint8[] ReadAllBytes(string)` is depth-neutral
+  and still will not verify.
+  The three limits stated up front all hold. New metadata is out of scope. A ReadyToRun image is
+  detected from `ClrHeader.ManagedNativeHeader` and the answer says the patch may correctly do
+  nothing. A patched copy's strong name breaks, as its Authenticode signature already did
 - ⬜ **Managed debugging (ICorDebug).** The one that matters most and costs most. Breakpoints are
   `(MethodDef token, IL offset)` pairs, which is exactly what the IL view shows, and the portable
   PDB's sequence points carry them onto C# lines; `ICorDebugStepper` steps statements rather than
