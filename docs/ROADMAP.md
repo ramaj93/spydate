@@ -147,3 +147,60 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ Plugin API (IAnalyzer / IDocumentProvider)
 - ⬜ ARM64 decoding
 - ⬜ Signed release builds, installer
+
+## Phase 5 — Managed (.NET) depth 🚧
+
+The window has decompiled managed assemblies since Phase 0 — C# and IL, from the ILSpy engine
+behind `ManagedAssembly` / `ManagedDecompiler`. Nothing else has caught up with it. The agent
+surface cannot see a .NET assembly at all, the patch path assembles x86 and only x86, and the
+debugger is a raw Win32 debug loop that has never heard of the CLR. This phase closes that,
+in the order the gaps actually hurt.
+
+One thing applies throughout: single-file and NativeAOT publishes have no IL in them. `IsManaged`
+is false, there is no metadata, and every item below is silent about such a binary by design — the
+native side already reads it, because native is what it is.
+
+- ✅ **Managed analysis for agents.** `Spydate.Mcp` never loads `ManagedAssembly`; every tool
+  resolves its target to a virtual address through `Targets.Resolve`, and a managed entity has no
+  address to resolve to. The fix is to widen the tools rather than add a second set: `read_function`
+  takes a type or member name and a `view` of `csharp` or `il`, `find_symbol` searches metadata
+  names, `get_overview` describes an assembly as an assembly. **No new tool at all** — not even
+  `list_types`, which was in the first draft of this plan and did not survive the manifest budget:
+  every tool's schema is sent on every turn of every conversation, including the ones that never
+  open a .NET file, and an empty `find_symbol` query lists types already. Reading a type's members
+  is `read_function`, since in managed code the listing and the source are the same answer
+- ⬜ **Managed cross-references and strings.** `xrefs` on a method, and `find_strings` over `ldstr`
+  operands. This is the piece with no library behind it: ILSpy's analyzers live in the ILSpy
+  application, not in the `ICSharpCode.Decompiler` package, so scanning method bodies for
+  `call`/`callvirt`/`newobj`/`ldsfld`/`ldstr` tokens is ours to write. One pass produces both
+  answers, since a string reference *is* an xref
+- ⬜ **IL patching.** A method body is bytes at an RVA, so `PatchStore`, `PatchWriter` and the
+  overlap and original-bytes checks all apply unchanged. Two things are missing: an IL listing
+  that carries the RVA in its first column, because `AddressText.FromLine` wants 8 or 16 hex
+  digits there and ILSpy emits `IL_0007:`, and an IL assembler subset mirroring `X86Assembler`
+  (`nop`, `ret`, `ldc.i4.0/1`, `br`, `brtrue`↔`brfalse`, `pop`) — easier than x86, since `nop`
+  is one byte and the pad-to-whole-instruction rule falls out. Three limits are inherent rather
+  than effort, and each should be *said* rather than discovered: anything needing new metadata
+  (a new string literal, a new member reference) is out of scope for a byte patcher; a ReadyToRun
+  image carries precompiled native code the runtime prefers over the IL, so a patch there may do
+  nothing at all — detectable up front from `ClrHeader.ManagedNativeHeader`; and a patched copy
+  has a broken strong name, as it already has a broken Authenticode signature
+- ⬜ **Managed debugging (ICorDebug).** The one that matters most and costs most. Breakpoints are
+  `(MethodDef token, IL offset)` pairs, which is exactly what the IL view shows, and the portable
+  PDB's sequence points carry them onto C# lines; `ICorDebugStepper` steps statements rather than
+  instructions, and `ICorDebugValue` reads a local as a typed value rather than as a stack word.
+  Two structural consequences. It cannot extend `DebugSession`: ICorDebug takes the process's
+  native debug port and intends to be the only debugger attached, so this is a second
+  `IDebugControl` implementation chosen when the binary is opened, not a branch inside the
+  existing one — which is the argument for that interface having existed all along. And
+  `DebugSnapshot` is native-shaped (registers, stack words, VAs), so managed frames, locals and
+  IL offsets go beside those rather than through them. Budget it honestly: there is no usable
+  managed wrapper — MdbgCore is .NET Framework-era and CLRMD is read-only — so this is
+  hand-written COM interop over several dozen interfaces plus `dbgshim` startup
+  (`RegisterForRuntimeStartup`), with callbacks arriving on ICorDebug's own thread and every one
+  of them needing a `Continue()`. dnSpy spent roughly ten thousand lines here
+- ⬜ **Managed inspection without control (CLRMD).** `Microsoft.Diagnostics.Runtime` against a
+  live process or a dump: managed thread stacks, heap objects, field and static values. No
+  breakpoints and no stepping, so it is not debugging — but it answers "what is actually on the
+  heap" and "what do these managed frames say" for a fraction of the work above, and it is
+  useful whether or not ICorDebug ever lands
