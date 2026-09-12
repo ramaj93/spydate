@@ -181,39 +181,90 @@ internal static class MarkdownFlow
     /// <summary>
     /// A fenced block: the language it was tagged with, a button that copies it, and the code.
     ///
-    /// The code itself stays a Paragraph in the document's own flow, so it can still be selected
-    /// along with the prose around it and copied a few lines at a time. Only the strip above it is
-    /// a UI container. Putting the code in a container too would have made the button the only way
-    /// to get at it, which is a poorer trade than it sounds — a listing is often wanted in part.
+    /// A Border inside a BlockUIContainer rather than a Section, because a FlowDocument block's
+    /// background is a flat rectangle — there is no corner radius on one at any depth — and a
+    /// rounded corner needs a real UIElement. The cost is that the code leaves the document's own
+    /// text flow, so selecting a whole answer no longer sweeps through it. A read-only TextBox buys
+    /// most of that back: a listing can still be selected a few lines at a time, which is what it is
+    /// usually wanted for, and the button covers taking all of it at once.
     /// </summary>
     private static Block Code(CodeBlock code)
     {
-        // The tint sits on the Section so that it covers the strip and the code as one block.
-        // The inset then goes on the pieces inside it, equally on both sides, rather than on the
-        // Section itself: padding there would move the tint's edges instead of the text's.
-        var section = new Section
+        var listing = new TextBox
         {
-            Background = CodeBackground,
-            Margin = Inset(4, 8),
-            Padding = default,
-        };
+            Text = code.Text,
+            IsReadOnly = true,
+            IsReadOnlyCaretVisible = false,
 
-        section.Blocks.Add(Strip(code));
+            // Without this the newlines in a listing are not shown as the line breaks they are.
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
 
-        var paragraph = new System.Windows.Documents.Paragraph
-        {
             FontFamily = Mono,
             FontSize = 12,
-            Margin = new Thickness(10, 0, 10, 8),
+            Foreground = Resource("Text.Primary") as Brush ?? Brushes.White,
+
+            // The tint belongs to the Border, and the theme's own chrome would draw a second edge
+            // inside the rounded one.
+            Background = Brushes.Transparent,
+            BorderThickness = default,
+            BorderBrush = Brushes.Transparent,
+            Padding = default,
+            MinHeight = 0,
+            MinWidth = 0,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Margin = new Thickness(0, 2, 0, 0),
         };
 
-        AppendWithLineBreaks(paragraph.Inlines, code.Text);
-        section.Blocks.Add(paragraph);
-        return section;
+        Forward(listing);
+
+        var stack = new StackPanel();
+        stack.Children.Add(Strip(code));
+        stack.Children.Add(listing);
+
+        var border = new Border
+        {
+            Child = stack,
+            Background = CodeBackground,
+            CornerRadius = new CornerRadius(6),
+
+            // One padding for the whole block, so the gap above the language and the gap below the
+            // last line of code are the same number. They were 4 and 8 before, set on two different
+            // children, which is why the listing sat lower in its tint than it sat high.
+            Padding = new Thickness(10, 8, 10, 8),
+        };
+
+        return new BlockUIContainer(border) { Margin = Inset(4, 8) };
+    }
+
+    /// <summary>
+    /// Hands the wheel back to the transcript.
+    ///
+    /// A TextBox has a ScrollViewer of its own and swallows the wheel even when it has nothing to
+    /// scroll with it, so the panel stopped moving whenever the pointer happened to be over a
+    /// listing. The event is raised again on the parent, which is where it would have gone.
+    /// </summary>
+    private static void Forward(TextBox listing)
+    {
+        listing.PreviewMouseWheel += (sender, e) =>
+        {
+            if (e.Handled || sender is not TextBox box || box.Parent is not UIElement parent)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            parent.RaiseEvent(new System.Windows.Input.MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+            {
+                RoutedEvent = UIElement.MouseWheelEvent,
+                Source = box,
+            });
+        };
     }
 
     /// <summary>The strip above a code block: which language it is, and a button to copy it.</summary>
-    private static Block Strip(CodeBlock code)
+    private static DockPanel Strip(CodeBlock code)
     {
         var language = new TextBlock
         {
@@ -227,7 +278,13 @@ internal static class MarkdownFlow
         {
             Content = Glyph(),
             Style = Resource("ToolButton") as Style,
-            Padding = new Thickness(5, 1, 5, 1),
+            // Small enough that the strip is no taller than its label. The button used to set the
+            // strip height, and an 11px label centred in a 22px row put blank space above the
+            // text with nothing to answer it at the bottom - the gap that looked uneven.
+            Padding = new Thickness(4, 0, 4, 0),
+            MinHeight = 0,
+            MinWidth = 0,
+            VerticalAlignment = VerticalAlignment.Center,
             Foreground = Dim,
             ToolTip = "Copy this block",
             HorizontalAlignment = HorizontalAlignment.Right,
@@ -236,14 +293,14 @@ internal static class MarkdownFlow
         System.Windows.Automation.AutomationProperties.SetName(copy, "Copy code");
         copy.Click += (_, _) => Copy(code.Text, copy);
 
-        // The same inset as the code below it, so the icon lines up with the code's right edge
-        // rather than standing proud of it.
-        var strip = new DockPanel { Margin = new Thickness(10, 4, 10, 2), LastChildFill = false };
+        // No margin of its own: the Border's padding is the block's one inset, and a second one
+        // here is how the two ends stopped matching in the first place.
+        var strip = new DockPanel { LastChildFill = false };
         DockPanel.SetDock(copy, Dock.Right);
         strip.Children.Add(copy);
         strip.Children.Add(language);
 
-        return new BlockUIContainer(strip) { Margin = default };
+        return strip;
     }
 
     private static Wpf.Ui.Controls.SymbolIcon Glyph() =>
