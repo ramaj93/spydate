@@ -126,6 +126,56 @@ dotnet run --project src/Spydate.App
 - Never commit third‑party binaries to the repo. Put local samples in
   `samples/local/` (git‑ignored).
 
+### 5.1 Anything that touches the window must be run, not reasoned about
+
+`Spydate.App` is unreachable from the test suite on purpose (see `docs/DECISIONS.md`),
+so **a green `dotnet test` says nothing about the panel, the documents, or the
+gutter.** Every bug found in that layer so far was found by running it, and each
+one was invisible to 700+ passing tests: the managed Start launched the assembly
+instead of the host it had just validated; every ICorDebug call from the window's
+STA thread threw before it was made; stale tool names went on being printed by a
+live server.
+
+**So: if a change can affect the window, drive the window before saying it works.**
+No exceptions, including when the change looks like pure view-model plumbing —
+that is exactly what all three of those were.
+
+**Start from `tools/ui/`, which already exists.** `Spydate.Ui.psm1` runs a copy of the
+built app and drives it, and its header lists every obstacle that has cost an hour —
+read that before writing any UI automation of your own. `debug-managed.ps1` is the
+worked example:
+
+```
+powershell -File tools\ui\debug-managed.ps1 -Open src\Spydate.Mcp\bin\Debug\net10.0\spydate-mcp.dll -Out shot.png
+```
+
+The two that waste the most time if rediscovered: a modal dialog is answered with
+`SendKeys` ("y" is Yes) rather than by hunting the automation tree, and screenshots
+come from `CopyFromScreen`, never `PrintWindow` — `PrintWindow` draws the window
+alone and so misses every dialog, popup and dropdown. And the Debug panel publishes
+nothing to UIA, so its status line is readable only from the picture.
+
+Two ways, in order of preference:
+
+1. **A console probe** (`scratchpad/panel/`): a throwaway `panel.csproj` with
+   `UseWPF`, `ImplicitUsings`, `ManagePackageVersionsCentrally=false` and a
+   `ProjectReference` to `src/Spydate.App/Spydate.App.csproj`, driving the view
+   models directly. Deterministic — no coordinates, no virtualised trees. Two
+   things are load-bearing: construct a real `System.Windows.Application` and call
+   `Run()`, because `DebuggerViewModel` drops every debugger event when
+   `Application.Current` is null; and drive from a background thread, marshalling
+   each call with `app.Dispatcher.Invoke`, so the dispatcher keeps pumping.
+2. **UI Automation plus `PrintWindow`** when the thing being checked is what the
+   pixels show. Run a *copy* of the app from the scratchpad — a live instance holds
+   a lock on the repo's build output. Known obstacles: the explorer tree is
+   virtualised, so unrealised nodes do not exist to UIA; the window exposes no
+   `ComboBox` to UIA at all; WPF dropdowns live in a popup with their own tree that
+   `PrintWindow` will not capture, so use real mouse input and follow a `{DOWN}`
+   with `{ENTER}` or the next click reverts the selection.
+
+Say which one was used and what it showed. "The tests pass" is not an answer to
+"does it work in the UI".
+
 ## 6. How to approach common tasks
 
 **Adding a PE structure (e.g. TLS, relocations, resources)**

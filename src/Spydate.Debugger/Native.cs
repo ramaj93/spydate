@@ -210,6 +210,13 @@ internal static partial class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
+    /// <summary>What <see cref="GetExitCodeProcess"/> reports for a process that has not exited.</summary>
+    internal const uint STILL_ACTIVE = 259;
+
     /// <summary>Breaks into a running process: Windows starts a thread in it that executes an int3.</summary>
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

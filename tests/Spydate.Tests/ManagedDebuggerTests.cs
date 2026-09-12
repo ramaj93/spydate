@@ -481,10 +481,12 @@ public class ManagedDebuggerTests
     }
 
     [Fact]
-    public void SomethingThatIsNotManagedSaysSoRatherThanWaitingForever()
+    public void AProgramThatDiesBeforeItsRuntimeStartsSaysWhatItDiedOf()
     {
-        // A native program never publishes a runtime, so the wait is the only thing that can end
-        // this - and it has to end, with a sentence that names the likely reason.
+        // where.exe with no arguments prints its usage and exits. The debugger cannot attach to it,
+        // and the useful thing to say is not "this might not be .NET" — the process is right there
+        // to be asked, and it has an exit code. Guessing between the two reasons was leaving the
+        // reader to work out which of them applied to a program they had just been told nothing about.
         string native = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "where.exe");
         if (!File.Exists(native))
         {
@@ -495,7 +497,37 @@ public class ManagedDebuggerTests
         string? problem = session.Start(native, timeout: TimeSpan.FromSeconds(6));
 
         Assert.NotNull(problem);
+        Assert.Contains("exited with code", problem!, StringComparison.Ordinal);
+        Assert.Contains("where.exe", problem!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SomethingThatIsNotManagedSaysSoAndIsNotLeftRunning()
+    {
+        // A native program that keeps running never publishes a runtime, so the wait is the only
+        // thing that can end this — and what it launched must not outlive it. A debugger that gives
+        // up on a process and walks away has started something nobody asked to merely run.
+        string native = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ping.exe");
+        if (!File.Exists(native))
+        {
+            return;
+        }
+
+        using var session = Headless();
+        string? problem = session.Start(native, arguments: "-n 30 127.0.0.1", timeout: TimeSpan.FromSeconds(6));
+
+        Assert.NotNull(problem);
         Assert.Contains("not .NET", problem!, StringComparison.Ordinal);
+        Assert.Contains("stopped", problem!, StringComparison.Ordinal);
+
+        // Asked of the operating system: ping was told to run for thirty seconds and this took six.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline && Alive(session.ProcessId))
+        {
+            Thread.Sleep(100);
+        }
+
+        Assert.False(Alive(session.ProcessId), "the debuggee was left running after the debugger gave up on it");
     }
 
     [Fact]

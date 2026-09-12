@@ -177,6 +177,11 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         _pid = pid;
 
+        // Reported from the moment there is a process, not from the moment the runtime owns up to
+        // one. A launch that never becomes debuggable still started something, and a caller asking
+        // what it started was being told nothing.
+        ProcessId = pid;
+
         int hr;
         unsafe
         {
@@ -201,9 +206,28 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         var patience = timeout == default ? TimeSpan.FromSeconds(30) : timeout;
         if (!_ready.Wait(patience))
         {
+            // Asked of the process rather than guessed at. The old sentence listed the two things
+            // this could mean and left the reader to work out which, when the debuggee is right
+            // there to be asked: a program that exited has an exit code, and one still running
+            // simply never published a runtime. Naming what was launched matters too — under a host
+            // it is not the file the analyst opened, and that is frequently the whole mistake.
+            string what = System.IO.Path.GetFileName(path);
+            string outcome = Ended() is { } code
+                ? $"{what} exited with code 0x{code:X8} before its runtime started, so there was nothing to attach to. "
+                  + "A program that refuses its arguments, or cannot find its runtime, ends this way."
+                : $"{what} is still running but never published a debuggable runtime within "
+                  + $"{patience.TotalSeconds:0}s. A program that is not .NET looks like this. It has been stopped.";
+
+            // Killed, not abandoned. Something was asked to be debugged and cannot be, and leaving
+            // it running is leaving a process nobody asked to simply run — started by a debugger
+            // that has given up on it and will never report anything it does.
+            if (Ended() is null)
+            {
+                _ = Native.TerminateProcess(_launched, 1);
+            }
+
             Release();
-            return $"its runtime did not become debuggable within {patience.TotalSeconds:0}s. "
-                   + "A program that is not .NET, or one that exits before the runtime starts, looks like this.";
+            return outcome;
         }
 
         if (_startupProblem is { } problem)
@@ -283,6 +307,14 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         _launched = info.hProcess;
         return null;
     }
+
+    /// <summary>The debuggee's exit code, or null while it is still running.</summary>
+    private uint? Ended()
+        => _launched != IntPtr.Zero
+           && Native.GetExitCodeProcess(_launched, out uint code)
+           && code != Native.STILL_ACTIVE
+            ? code
+            : null;
 
     /// <summary>
     /// The runtime is up. Called on a thread dbgshim owns, once, before the debuggee runs any
