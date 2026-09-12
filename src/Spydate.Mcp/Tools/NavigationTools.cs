@@ -79,21 +79,35 @@ public sealed class NavigationTools
                          + (minRefs > 0 ? $", min_refs={minRefs}" : string.Empty)
                          + (nameContains is not null ? $", name_contains={nameContains}" : string.Empty);
 
-        return Budget.Clip(table.Render("no function matched") + '\n'
+        return Budget.Clip(Stub(session)
+                           + table.Render("no function matched") + '\n'
                            + TextTable.Meta(page.Count, ordered.Count, all.Count, "functions", next, filters)
                            + Partial(session));
     }
 
     [McpServerTool(Name = "find_symbol")]
-    [Description("Search every known name - functions, imports, exports, data and anything renamed - for a substring. Use this when you know what something is called but not where it is.")]
+    [Description("Search every known name - functions, imports, exports, data and anything renamed - for a substring. In a .NET assembly, searches types and members instead. Use this when you know what something is called but not where it is.")]
     public string FindSymbol(
         [Description("Substring to look for, case-insensitive. Empty lists everything of the chosen kind.")] string query = "",
         [Description("\"any\", \"function\", \"import\", \"export\" or \"data\". Default \"any\".")] string kind = "any",
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
     {
-        if (_store.Current is not { Analysis: { } analysis })
+        if (_store.Current is not { } open)
         {
             return SessionTools.NothingOpen;
+        }
+
+        // Managed first when there is a managed reading. The native symbol table of an IL-only
+        // assembly holds one import and the loader stub, so answering from it would be answering a
+        // question about the file that nobody asked.
+        if (open.ManagedIndex is { } managed && open.Image.ClrHeader?.IsILOnly == true)
+        {
+            return FindManaged(managed, query, limit);
+        }
+
+        if (open.Analysis is not { } analysis)
+        {
+            return $"there is no symbol table: {open.Image.Machine} is not a machine this disassembles";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -227,6 +241,59 @@ public sealed class NavigationTools
 
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// Type and member names matching a substring — the whole managed listing surface, since there
+    /// is no separate one.
+    ///
+    /// There is deliberately no <c>list_types</c>. Every tool's schema is sent on every turn of
+    /// every conversation, including the ones that never open a .NET file, and a tool that only
+    /// listed types would be paid for by all of them to do what an empty query does here. Reading a
+    /// type's members is <c>read_function</c>, which prints the type: in managed code the listing
+    /// and the source are the same answer.
+    ///
+    /// A member is matched on its own name and on its declaring type's, so a query naming a type
+    /// returns that type and everything in it. Each row carries the type it belongs to, because a
+    /// bare method name cannot be handed back to any other tool.
+    /// </summary>
+    private static string FindManaged(ManagedIndex index, string query, int limit)
+    {
+        limit = Math.Clamp(limit, 1, MaxLimit);
+
+        var hits = new List<(string Kind, string Name)>();
+        foreach (var type in index.Types)
+        {
+            bool wholeType = query.Length == 0 || type.FullName.Contains(query, StringComparison.OrdinalIgnoreCase);
+            if (wholeType)
+            {
+                hits.Add((type.Kind.ToString().ToLowerInvariant(), type.FullName));
+            }
+
+            foreach (var member in type.Members)
+            {
+                if (!wholeType && !member.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                hits.Add((member.Kind.ToString().ToLowerInvariant(), $"{type.FullName}::{member.Signature}"));
+            }
+        }
+
+        // Shortest first, as in the native search: a name that merely contains the query is longer
+        // than one that nearly is the query, and that is a good enough proxy for relevance.
+        var ordered = hits.OrderBy(h => h.Name.Length).ThenBy(h => h.Name, StringComparer.Ordinal).ToList();
+
+        var table = new TextTable(("kind", 11), ("name", 84));
+        foreach (var (kind, name) in ordered.Take(limit))
+        {
+            table.Add(kind, name);
+        }
+
+        return Budget.Clip(table.Render($"nothing is called anything like '{query}'") + '\n'
+                           + TextTable.Meta(Math.Min(limit, ordered.Count), ordered.Count,
+                               index.Types.Count + index.MemberCount, "names", null, "managed metadata"));
+    }
+
     private static bool Matches(Function function, string named, int minRefs, string? nameContains, BinaryAnalysis analysis)
     {
         string name = analysis.NameFor(function.EntryVa);
@@ -287,6 +354,22 @@ public sealed class NavigationTools
         string operands = analysis.Disassembler.FormatOperands(instruction.Native);
         return operands.Length == 0 ? instruction.Mnemonic : $"{instruction.Mnemonic} {operands}";
     }
+
+    /// <summary>
+    /// Says so when the functions in the list are not the program's.
+    ///
+    /// Discovery still runs over an IL-only assembly, and deliberately: the ILOnly flag is one bit
+    /// in a header that untrusted input is free to lie about, and a binary that hides real native
+    /// code behind it is exactly the binary somebody opened this to look at. So the sweep happens
+    /// and the answer is labelled, rather than the sweep being skipped on the file's own say-so.
+    /// What it finds in genuine IL is x86 shapes in bytes that were never instructions — and an
+    /// unnamed-by-references worklist made of those would be a day's work naming nothing.
+    /// </summary>
+    private static string Stub(BinarySession session)
+        => session.Managed is not null && session.Image.ClrHeader?.IsILOnly == true
+            ? "-- IL-only .NET assembly: these are x86 shapes found in bytes that hold IL, not this "
+              + "program's methods. Its own code is find_symbol() and read_function(view=\"csharp\") --\n"
+            : string.Empty;
 
     /// <summary>Says so when the answer rests on a discovery that did not finish.</summary>
     private static string Partial(BinarySession session)

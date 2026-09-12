@@ -18,8 +18,18 @@ public class McpContractTests
     /// <summary>
     /// Total manifest size. Not a hard limit anyone imposed — a guard against it quietly doubling,
     /// which is what happens when tools accumulate and nobody is counting.
+    ///
+    /// Raised from 6,000 when the tools learned to read .NET assemblies. The old figure was set when
+    /// the surface described one kind of binary and it described it exactly: the manifest stood at
+    /// 5,999 characters, so every word about managed code had to be paid for by deleting a word
+    /// about native code. That is the wrong trade — the answer to a second kind of file is a second
+    /// sentence, not a worse description of the first — and the honest move is to move the number
+    /// once, on purpose, rather than to shave real descriptions until they fit a figure nobody
+    /// chose for this reason. It bought a mention of C#/IL in two tools and nothing else: Phase 5
+    /// deliberately adds no new tool, because a schema only the .NET sessions use is still sent to
+    /// every session that never opens one.
     /// </summary>
-    private const int MaxManifestChars = 6_000;
+    private const int MaxManifestChars = 6_400;
 
     private const int MaxDescriptionChars = 400;
 

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
+using Spydate.Decompiler.Managed;
 using Spydate.Decompiler.Native;
 using Spydate.Disassembly;
 
@@ -33,6 +34,7 @@ public sealed class BinarySession : IDisposable
     private IReadOnlyList<Function>? _functions;
     private int _functionsAt = -1;
     private bool _namesChanged;
+    private ManagedIndex? _index;
 
     /// <param name="save">
     /// How annotations reach disk. Injectable so tests can watch a write without one landing in the
@@ -45,7 +47,9 @@ public sealed class BinarySession : IDisposable
         ProjectLoadResult? project,
         DiscoveryState discovery,
         Func<PeImage, AnnotationStore, string?>? save = null,
-        PatchStore? patches = null)
+        PatchStore? patches = null,
+        ManagedAssembly? managed = null,
+        string? managedLoadError = null)
     {
         // A lambda rather than the method group: SpydateProject.Save takes an optional patch store
         // now, and a group with a defaulted parameter no longer converts on its own.
@@ -57,6 +61,8 @@ public sealed class BinarySession : IDisposable
         Decompiler = analysis is null ? null : new NativeDecompiler(analysis);
         Project = project;
         Discovery = discovery;
+        Managed = managed;
+        ManagedLoadError = managedLoadError;
 
         if (analysis is not null)
         {
@@ -74,6 +80,25 @@ public sealed class BinarySession : IDisposable
     public BinaryAnalysis? Analysis { get; }
 
     public NativeDecompiler? Decompiler { get; }
+
+    /// <summary>
+    /// The assembly's metadata, and the C#/IL decompiler over it, when this is a .NET file ILSpy
+    /// could read. Null for a native binary — and null for a managed one whose metadata could not be
+    /// read, which <see cref="ManagedLoadError"/> distinguishes from the first case.
+    /// </summary>
+    public ManagedAssembly? Managed { get; }
+
+    /// <summary>Why <see cref="Managed"/> is null on a file that carries a CLR header.</summary>
+    public string? ManagedLoadError { get; }
+
+    /// <summary>
+    /// Every type in the assembly, nested ones included, flattened and indexed by name.
+    ///
+    /// Built once and held, because it is what every managed target resolves through:
+    /// <see cref="ManagedAssembly.Namespaces"/> is a tree, and walking it per lookup would make
+    /// resolving a name cost the size of the assembly.
+    /// </summary>
+    public ManagedIndex? ManagedIndex => _index ??= Managed is null ? null : new ManagedIndex(Managed);
 
     public ProjectLoadResult? Project { get; }
 
@@ -137,9 +162,16 @@ public sealed class BinarySession : IDisposable
 
         string full = System.IO.Path.GetFullPath(path);
         var image = PeImage.Load(full);
+
+        // Before the native analysis, and independent of it. A .NET assembly built AnyCPU says
+        // I386 in its machine field and so passes the x86 test below, but the bytes in its .text
+        // are IL: the two readings of the same file are unrelated, and either can be the useful
+        // one — a mixed-mode assembly has both, a NativeAOT publish has only the native side.
+        var (managed, managedError) = LoadManaged(image, full);
+
         if (!image.IsX86Family)
         {
-            return new BinarySession(full, image, null, null, DiscoveryState.None);
+            return new BinarySession(full, image, null, null, DiscoveryState.None, managed: managed, managedLoadError: managedError);
         }
 
         var analysis = new BinaryAnalysis(image) { ResolveImportSignatures = true };
@@ -152,8 +184,36 @@ public sealed class BinarySession : IDisposable
         clock.Stop();
 
         var discovery = new DiscoveryState(found.Count, found.Count < options.MaxFunctions, clock.Elapsed);
-        return new BinarySession(full, image, analysis, project, discovery);
+        return new BinarySession(full, image, analysis, project, discovery, managed: managed, managedLoadError: managedError);
     }
 
-    public void Dispose() => _gate.Dispose();
+    /// <summary>
+    /// The assembly behind a CLR header, or why it could not be read. Never throws: a file that
+    /// claims to be managed and is not must leave every other tool working, since a binary whose
+    /// metadata is deliberately broken is a thing an analyst opens on purpose.
+    /// </summary>
+    private static (ManagedAssembly? Assembly, string? Error) LoadManaged(PeImage image, string path)
+    {
+        if (!image.IsManaged)
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            var assembly = ManagedAssembly.Load(path);
+            _ = assembly.Namespaces;   // forces the metadata read, so a failure lands here and not mid-answer
+            return (assembly, null);
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or IOException or ArgumentException)
+        {
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    public void Dispose()
+    {
+        Managed?.Dispose();
+        _gate.Dispose();
+    }
 }

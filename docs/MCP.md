@@ -56,6 +56,28 @@ reverse engineering. For an import, pass the IAT slot address that `list_imports
 decompiler warnings, then the body as pseudo-C. `read_data(as="pointers")` names every word that
 lands in the image, which turns a vtable into a list of methods in one call.
 
+**.NET assemblies** — the same two tools, widened
+
+There is no separate managed tool set, and that is a decision rather than an omission: every tool's
+schema is sent on every turn of every conversation, including the ones that never open a .NET file,
+so a `list_types` that existed only for managed sessions would be paid for by all of them. Instead
+`find_symbol` searches types and members when the open binary is managed, and `read_function` takes
+a type or member — `Namespace.Type`, `Namespace.Type::Member`, or `Namespace.Type.Member`, whichever
+the last answer printed — with `view="csharp"` (the default) or `view="il"`. Reading a type prints
+its members, so the listing and the source are one answer.
+
+An overloaded name is refused with its overloads named rather than resolved to one of them, because
+reading the wrong overload produces something that looks exactly like reading the right one. Pass a
+signature — `Type::Method(String, Int32)` — to pick.
+
+`get_overview` describes the assembly as an assembly: full name, target framework, entry point,
+type and member counts, what it references. It also says which of the file's two readings is about
+the program. For an IL-only assembly the native lines above it describe the CLR loader stub, and
+`list_functions` there returns x86 shapes swept out of bytes that hold IL — the answer says so
+rather than leaving it to be discovered. Discovery still runs on such a file, deliberately: ILOnly
+is one bit in a header, and a binary that hides native code behind it is exactly the binary somebody
+opened this to look at.
+
 **Naming** — `annotate` · `annotate_local` · `list_annotations`
 
 Writes save immediately; there is no save tool, because one whose only failure mode is "the agent

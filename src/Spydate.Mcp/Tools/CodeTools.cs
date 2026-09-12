@@ -26,22 +26,61 @@ public sealed class CodeTools
     public CodeTools(SessionStore store) => _store = store;
 
     [McpServerTool(Name = "read_function")]
-    [Description("Read a function as pseudo-C (default) or as a disassembly listing, with a header naming its signature, callers, callees and any strings it uses. An address inside a function resolves to the function.")]
+    [Description("Read a function as pseudo-C (default) or as a disassembly listing, with a header naming its signature, callers, callees and any strings it uses. An address inside a function resolves to the function. In a .NET assembly, reads a type or member as C# or IL.")]
     public string ReadFunction(
-        [Description("Address, sub_XXXX, or a name.")] string target,
-        [Description("\"pseudo_c\" or \"asm\". Default \"pseudo_c\", which carries far more meaning per token.")] string view = "pseudo_c",
+        [Description("Address, sub_XXXX, or a name. In .NET: Namespace.Type or Namespace.Type::Member.")] string target,
+        [Description("Native \"pseudo_c\" or \"asm\"; .NET \"csharp\" or \"il\". Defaults to the first of the pair.")] string view = "auto",
         [Description("First line of the body to return, for continuing a long function.")] int offset = 0,
         [Description("Body lines to return, at most 1000.")] int maxLines = DefaultLines)
     {
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } session)
         {
             return SessionTools.NothingOpen;
+        }
+
+        // The managed reading is tried first, and asked for explicitly by the view. Order matters
+        // for one case only, and it is the common one: in an IL-only assembly a native name lookup
+        // can only fail, so letting it answer first would turn every "read this type" into "not an
+        // address or a known name".
+        bool wantsManaged = view is "csharp" or "il";
+        string? managedProblem = null;
+        if (wantsManaged || session.Managed is not null)
+        {
+            var found = ManagedTargets.Resolve(session, target);
+            if (found.Found)
+            {
+                // Refused rather than quietly substituted. "asm" on a type could only mean the C#
+                // instead, and an agent that believes it is reading instructions when it is reading
+                // source will draw conclusions about bytes that were never there.
+                return view is "pseudo_c" or "asm"
+                    ? $"{found.Describe()} is managed code; \"{view}\" is for native code. "
+                      + $"Use view=\"csharp\" or view=\"il\"."
+                    : ReadManaged(session, found, view, offset, maxLines);
+            }
+
+            managedProblem = found.Problem;
+            if (wantsManaged)
+            {
+                return managedProblem ?? NoManaged(session, view);
+            }
+        }
+
+        if (session.Analysis is not { } analysis)
+        {
+            return managedProblem ?? $"there is nothing to read: {session.Image.Machine} is not a machine this disassembles";
         }
 
         var (resolved, function, inside) = Targets.ResolveFunction(session, target);
         if (!resolved.Found || function is null)
         {
-            return resolved.Problem ?? $"no function at {target}";
+            // The managed miss is the better answer whenever there was one to make. An agent that
+            // wrote a type name wants to hear which type it meant, not that its text is not hex.
+            return managedProblem ?? resolved.Problem ?? $"no function at {target}";
+        }
+
+        if (view is "auto")
+        {
+            view = "pseudo_c";
         }
 
         string body;
@@ -152,6 +191,75 @@ public sealed class CodeTools
     }
 
     // ------------------------------------------------------------------
+
+    /// <summary>Why there is no managed reading of this file, for a view that asked for one.</summary>
+    private static string NoManaged(BinarySession session, string view)
+        => session.Image.ClrHeader is null
+            ? $"{session.Image.FileName} is not a .NET assembly, so there is no \"{view}\" of it. "
+              + "Use view=\"pseudo_c\" or view=\"asm\"."
+            : $"{session.Image.FileName} carries a CLR header but its metadata could not be read"
+              + (session.ManagedLoadError is { } why ? $" - {why}" : string.Empty);
+
+    /// <summary>
+    /// A type or member as C# or IL.
+    ///
+    /// The header is much shorter than the native one, and that is not an omission. Managed code
+    /// carries its own facts: the signature is in the text, the declaring type is in the name, and
+    /// what calls it is a question this cannot answer yet. Repeating what the body already says
+    /// would be spending an agent's context to tell it what it is about to read.
+    /// </summary>
+    private static string ReadManaged(BinarySession session, ManagedTarget target, string view, int offset, int maxLines)
+    {
+        var managed = session.Managed!;
+        bool il = view == "il";
+        var type = target.Type!;
+
+        string body;
+        try
+        {
+            body = (il, target.Member) switch
+            {
+                (false, { } member) => managed.Decompiler.DecompileMember(member),
+                (false, null) => managed.Decompiler.DecompileType(type),
+                (true, { } member) => managed.Decompiler.DisassembleMember(member),
+                (true, null) => managed.Decompiler.DisassembleType(type),
+            };
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or KeyNotFoundException
+                                       or NotSupportedException or BadImageFormatException)
+        {
+            // ILSpy fails on individual members far more readily than the native decompiler does -
+            // an unsupported construct, a reference it could not resolve - and the useful answer
+            // names the other view, which very often works where this one did not.
+            return $"{target.Describe()} could not be read as {(il ? "il" : "csharp")}: {ex.Message}"
+                   + $"\ntry read_function(target=\"{target.Key()}\", view=\"{(il ? "csharp" : "il")}\")";
+        }
+
+        maxLines = Math.Clamp(maxLines, 1, MaxLines);
+        string chosen = il ? "il" : "csharp";
+        string continuation = $"read_function(target=\"{target.Key()}\", view=\"{chosen}\", offset={offset + maxLines})";
+
+        var sb = new StringBuilder();
+        if (target.Member is { } shown)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"{type.FullName}::{shown.Signature}   {shown.Kind.ToString().ToLowerInvariant()}\n");
+            sb.Append(CultureInfo.InvariantCulture, $"in          {type.FullName} ({type.Kind.ToString().ToLowerInvariant()})\n");
+        }
+        else
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $"{type.FullName}   {type.Kind.ToString().ToLowerInvariant()}, {type.Members.Count} members\n");
+            if (type.Members.Count > 0)
+            {
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"members     find_symbol(query=\"{type.Name}\") names them; read one with read_function\n");
+            }
+        }
+
+        sb.Append(CultureInfo.InvariantCulture, $"assembly    {managed.FullName}\n");
+        sb.Append(Budget.Window(body, offset, maxLines, continuation));
+        return Budget.Clip(sb.ToString());
+    }
 
     /// <summary>
     /// Everything about a function that is not its body. This is the densest part of the answer:

@@ -69,6 +69,8 @@ public sealed class SessionTools
 
     private const int MaxSectionsListed = 6;
 
+    private const int MaxReferencesListed = 8;
+
     /// <summary>
     /// One screenful that answers what an agent needs before it can ask anything useful. Deliberately
     /// dense: every fact here is one it would otherwise spend a round trip on, and the whole block
@@ -114,24 +116,83 @@ public sealed class SessionTools
             Line(sb, "analysis", $"none - {image.Machine} is not a machine this disassembles, so only headers and strings are readable");
         }
 
-        if (image.IsManaged)
-        {
-            Line(sb, "note", "this is a .NET assembly; what the native decompiler produces for it describes the CLR stub, not the program");
-        }
+        Managed(sb, session);
 
         if (image.Warnings.Count > 0)
         {
             Line(sb, "warnings", string.Join("; ", image.Warnings.Take(3)));
         }
 
-        if (session.Analysis is not null)
+        // Costs about twenty tokens and saves an agent that has never seen this server from guessing
+        // where to start. Which start, though, depends on which reading of the file is the real one:
+        // pointing at the function worklist for an IL-only assembly sends it to sweep up junk.
+        if (session.Managed is not null && image.ClrHeader?.IsILOnly == true)
         {
-            // Costs about twenty tokens and saves an agent that has never seen this server from
-            // guessing where to start.
+            Line(sb, "next", "find_symbol(query=...) | read_function(target=\"Namespace.Type\") | read_function(target=\"Type::Member\", view=\"il\")");
+        }
+        else if (session.Analysis is not null)
+        {
             Line(sb, "next", "list_functions(named=\"unnamed\", sort=\"refs\") | list_imports() | find_strings(query=...)");
         }
 
         return Budget.Clip(sb.ToString());
+    }
+
+    /// <summary>
+    /// The other reading of the same file, when there is one.
+    ///
+    /// A .NET assembly has two descriptions and only one of them is about the program. The native
+    /// lines above are true — those really are the sections and that really is the entry point — but
+    /// for an IL-only assembly they describe the loader stub, and an agent that reads them as the
+    /// program will spend its whole budget naming compiler scaffolding. So the managed facts go in
+    /// the same block rather than behind a tool call, and the note says plainly which is which.
+    /// </summary>
+    private static void Managed(StringBuilder sb, BinarySession session)
+    {
+        if (session.Image.ClrHeader is not { } clr)
+        {
+            return;
+        }
+
+        if (session.Managed is not { } managed)
+        {
+            Line(sb, "managed", session.ManagedLoadError is { } why
+                ? $"this file has a CLR header, but its metadata could not be read - {why}"
+                : "this file has a CLR header, but no metadata was loaded for it");
+            return;
+        }
+
+        var index = session.ManagedIndex!;
+        Line(sb, "assembly", $"{managed.FullName}, {managed.TargetFramework}, metadata {managed.RuntimeVersion}");
+        Line(sb, "types", $"{index.Types.Count} in {managed.Namespaces.Count} namespaces, {index.MemberCount} members");
+
+        if (managed.EntryPoint is { } entry)
+        {
+            Line(sb, "main", entry.Signature);
+        }
+
+        if (managed.AssemblyReferences.Count > 0)
+        {
+            // "needs", not "references": the label column is ten wide and "references" fills it
+            // exactly, so the value ran straight into the label with no gap at all.
+            Line(sb, "needs", string.Join(", ", managed.AssemblyReferences.Take(MaxReferencesListed))
+                                   + (managed.AssemblyReferences.Count > MaxReferencesListed
+                                       ? $", +{managed.AssemblyReferences.Count - MaxReferencesListed} more"
+                                       : string.Empty));
+        }
+
+        // Which of the two readings to trust, said once, in the terms that decide it. ILOnly is the
+        // question exactly: a mixed-mode assembly has real native code and both halves are worth
+        // reading, and a ReadyToRun image has native code the runtime prefers over the IL.
+        Line(sb, "note", clr.IsILOnly
+            ? "IL-only: the disassembly and pseudo-C above describe the CLR loader stub, not the program. "
+              + "Read this one with find_symbol and read_function(view=\"csharp\")"
+            : "mixed-mode: it carries real native code as well as IL, so both readings are about the program");
+
+        if (clr.ManagedNativeHeader.Size != 0)
+        {
+            Line(sb, "r2r", "precompiled (ReadyToRun): the runtime may run the native copy rather than the IL shown here");
+        }
     }
 
     /// <summary>
