@@ -7,6 +7,7 @@
     <RootNamespace>Spydate.App</RootNamespace>
     <AssemblyName>Spydate</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets/spydate.ico</ApplicationIcon>
     <Description>Spydate: Windows PE disassembler and decompiler.</Description>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
