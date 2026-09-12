@@ -200,7 +200,23 @@ native side already reads it, because native is what it is.
   The three limits stated up front all hold. New metadata is out of scope. A ReadyToRun image is
   detected from `ClrHeader.ManagedNativeHeader` and the answer says the patch may correctly do
   nothing. A patched copy's strong name breaks, as its Authenticode signature already did
-- ⬜ **Managed debugging (ICorDebug).** The one that matters most and costs most. Breakpoints are
+- 🚧 **Managed debugging (ICorDebug).** Launch, attach, hold before anything runs, breakpoints by
+  `(module, method token, IL offset)` — including ones set before their module exists, which is the
+  normal case — stops reported as a method and an IL offset with a word for whether that offset is
+  exact, stepping one IL instruction at a time (in, over, out), locals and arguments read as typed
+  values, continue, and terminate. `ManagedDebugSession` is a second `IDebugControl`, as planned.
+  Still to do: the panel and the MCP surface, multiple threads and frames beyond the innermost,
+  setting values, and evaluation.
+  Four things cost real time and are worth knowing before touching this again. Registering for
+  runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
+  and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable
+  slots from the methods declared in it alone, so `ICorDebugProcess : ICorDebugController` puts
+  `GetID` on the slot holding `Stop`. `ICorDebugCode::CreateBreakpoint` never returns when called on
+  the thread delivering the callback, though the calls needed to reach it answer there fine.
+  And `Step` moves one *machine* instruction: stepping IL means `StepRange` over the current offset.
+  Interface ids are pinned by a test that asks a live value what it supports, because three written
+  from memory were wrong and a wrong one reads as "not available" rather than as a mistake
+- ⬜ **Managed debugging, the rest.** Breakpoints are
   `(MethodDef token, IL offset)` pairs, which is exactly what the IL view shows, and the portable
   PDB's sequence points carry them onto C# lines; `ICorDebugStepper` steps statements rather than
   instructions, and `ICorDebugValue` reads a local as a typed value rather than as a stack word.

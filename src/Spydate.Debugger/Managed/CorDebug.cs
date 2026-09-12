@@ -40,6 +40,10 @@ internal static class CorDebugGuids
     internal const string Frame = "CC7BCAEF-8A68-11d2-983C-0000F808342D";
     internal const string IlFrame = "03E26311-4F76-11d3-88C6-006097945418";
     internal const string Stepper = "CC7BCAEC-8A68-11d2-983C-0000F808342D";
+    internal const string Value = "CC7BCAF7-8A68-11d2-983C-0000F808342D";
+    internal const string GenericValue = "CC7BCAF8-8A68-11d2-983C-0000F808342D";
+    internal const string ReferenceValue = "CC7BCAF9-8A68-11d2-983C-0000F808342D";
+    internal const string StringValue = "CC7BCAFD-8A68-11d2-983C-0000F808342D";
 }
 
 [ComImport]
@@ -565,4 +569,95 @@ internal interface ICorDebugStepper
     [PreserveSig] int StepOut();
 
     [PreserveSig] int SetRangeIL(int bIL);
+}
+
+/// <summary>
+/// A value in the debuggee: a local, an argument, a field.
+///
+/// The method is called <c>GetKind</c> here and <c>GetType</c> in the IDL. Only the slot matters to
+/// COM, and <c>GetType</c> on an interface-typed variable in C# reads as <c>object.GetType</c> at a
+/// glance, which is a confusion worth not having in code that is already full of them.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Value)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugValue
+{
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+}
+
+/// <summary>A value whose bytes can be copied out: everything that is not a reference.</summary>
+[ComImport]
+[Guid(CorDebugGuids.GenericValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugGenericValue
+{
+    // ICorDebugValue, repeated: slots come from this interface alone.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int GetValue(IntPtr pTo);
+
+    [PreserveSig] int SetValue(IntPtr pFrom);
+}
+
+/// <summary>A reference, which is either null or points at something worth following.</summary>
+[ComImport]
+[Guid(CorDebugGuids.ReferenceValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugReferenceValue
+{
+    // ICorDebugValue, repeated.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int IsNull(out int pbNull);
+
+    [PreserveSig] int GetValue(out ulong pValue);
+
+    [PreserveSig] int SetValue(ulong value);
+
+    [PreserveSig] int Dereference(out IntPtr ppValue);
+
+    [PreserveSig] int DereferenceStrong(out IntPtr ppValue);
+}
+
+/// <summary>A string on the debuggee's heap, which is worth reading rather than counting.</summary>
+[ComImport]
+[Guid(CorDebugGuids.StringValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugStringValue
+{
+    // ICorDebugValue, then ICorDebugHeapValue, repeated.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int IsValid(out int pbValid);
+
+    [PreserveSig] int CreateRelocBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int GetLength(out uint pcchString);
+
+    [PreserveSig] int GetString(uint cchString, out uint pcchString, IntPtr szString);
 }

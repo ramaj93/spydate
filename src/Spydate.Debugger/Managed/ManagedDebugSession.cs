@@ -532,6 +532,66 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         Com.Drop(previous);
     }
 
+    /// <summary>
+    /// Which interfaces one of the stopped frame's arguments actually answers to.
+    ///
+    /// A diagnostic, not a feature: two IIDs written from memory were wrong, and a wrong IID fails
+    /// as "not available" rather than as a mistake. This asks the object instead of guessing again.
+    /// </summary>
+    public IReadOnlyList<string> ProbeArgumentInterfaces(uint index, Func<IntPtr, IReadOnlyList<string>> ask)
+    {
+        ArgumentNullException.ThrowIfNull(ask);
+
+        ICorDebugThread? thread;
+        lock (_gate)
+        {
+            thread = State == DebugState.Stopped ? _stopped : null;
+        }
+
+        if (thread is null || thread.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
+        {
+            return Array.Empty<string>();
+        }
+
+        return Com.Owned<ICorDebugILFrame, IReadOnlyList<string>>(frame, il =>
+        {
+            if (il.GetArgument(index, out IntPtr value) < 0 || value == IntPtr.Zero)
+            {
+                return Array.Empty<string>();
+            }
+
+            try
+            {
+                var found = new List<string>(ask(value));
+                var deeper = Com.Borrow<ICorDebugReferenceValue, IReadOnlyList<string>>(value, r =>
+                    r.Dereference(out IntPtr pointed) == 0 && pointed != IntPtr.Zero ? Ask(pointed, ask) : null);
+                if (deeper is not null)
+                {
+                    found.Add("--- dereferenced ---");
+                    found.AddRange(deeper);
+                }
+
+                return found;
+            }
+            finally
+            {
+                Marshal.Release(value);
+            }
+        }) ?? Array.Empty<string>();
+    }
+
+    private static IReadOnlyList<string> Ask(IntPtr pointer, Func<IntPtr, IReadOnlyList<string>> ask)
+    {
+        try
+        {
+            return ask(pointer);
+        }
+        finally
+        {
+            Marshal.Release(pointer);
+        }
+    }
+
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     public void Continue()
     {
@@ -728,6 +788,36 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
     /// <summary>Where the program is, once it has stopped: a method and an offset into its IL.</summary>
     public ManagedLocation? StoppedAt { get; private set; }
+
+    /// <summary>
+    /// The locals and arguments of the frame it stopped in, as text.
+    ///
+    /// The whole reason for driving the runtime rather than the process. A native stop gives back
+    /// registers and stack words, and turning those into "the path is C:\Windows\notepad.exe" is
+    /// work the analyst does by hand from a calling convention they have to know. Here the runtime
+    /// knows what every slot is, so the stop can simply say.
+    ///
+    /// Only while it is stopped: the frame is what the values live in, and there is no frame to read
+    /// once the program is running again.
+    /// </summary>
+    public IReadOnlyList<ManagedValue> Values(bool arguments = false)
+    {
+        ICorDebugThread? thread;
+        lock (_gate)
+        {
+            thread = State == DebugState.Stopped ? _stopped : null;
+        }
+
+        if (thread is null || thread.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
+        {
+            return Array.Empty<ManagedValue>();
+        }
+
+        return Com.Owned<ICorDebugILFrame, IReadOnlyList<ManagedValue>>(
+            frame,
+            il => arguments ? ManagedValues.Arguments(il) : ManagedValues.Locals(il))
+            ?? Array.Empty<ManagedValue>();
+    }
 
     /// <summary>
     /// Reads the stopped thread's innermost frame.

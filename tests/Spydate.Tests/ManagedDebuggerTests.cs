@@ -167,6 +167,79 @@ public class ManagedDebuggerTests
     }
 
     [Fact]
+    public void AStoppedFrameSaysWhatItsArgumentsActuallyAre()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // This is the thing the native debugger cannot do. PeImage.Load takes a path, and stopping
+        // at its first instruction should be able to say which path - not a register, not a stack
+        // word to be chased by hand, the string itself.
+        const string Opening = @"C:\Windows\System32\where.exe";
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target, arguments: Opening, holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        var arguments = session.Values(arguments: true);
+        Assert.NotEmpty(arguments);
+
+        var path = arguments[0];
+        Assert.Equal("string", path.Kind);
+        Assert.Contains("where.exe", path.Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void PrimitiveLocalsReadAsValuesRatherThanAsBytes()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // PeImage.Load declares its locals with .locals init, so at its first instruction they are
+        // all zero - and a bool that reads "false" is a bool that was really read, where one that
+        // reads "not available" is an interface this could not reach.
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        var locals = session.Values();
+        Assert.NotEmpty(locals);
+
+        var bools = locals.Where(l => l.Kind == "bool").ToList();
+        Assert.NotEmpty(bools);
+        Assert.All(bools, b => Assert.Equal("false", b.Text));
+    }
+
+    [Fact]
+    public void ValuesAreOnlyReadableWhileItIsStopped()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target));
+
+        // A running program has no frame to read, and inventing one would be inventing values.
+        Assert.Empty(session.Values());
+        Assert.Empty(session.Values(arguments: true));
+    }
+
+    [Fact]
     public void SteppingSomethingThatIsNotStoppedSaysSo()
     {
         if (Target is not { } target)
