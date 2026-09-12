@@ -91,6 +91,104 @@ public class ManagedDebuggerTests
     }
 
     [Fact]
+    public void ItBreaksOnAMethodNamedOnlyByItsMetadataToken()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // The server opens whatever binary it is given as an argument, and opening one goes through
+        // PeImage.Load. So this breaks on a method chosen from the metadata, in a library the
+        // debuggee has not loaded yet, and lets the program walk into it.
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var session = new ManagedDebugSession();
+        string? problem = session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true);
+        Assert.True(problem is null, problem);
+
+        // Held before anything managed ran, which is what makes this a test rather than a race.
+        Assert.Equal(DebugState.Stopped, session.State);
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        Assert.Contains(session.Breakpoints, b => !b.Planted);
+
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)),
+            "it never stopped\n" + string.Join("\n", session.Recent));
+
+        Assert.Equal(ManagedStopKind.Breakpoint, session.StoppedBy);
+
+        var at = session.StoppedAt;
+        Assert.NotNull(at);
+        Assert.Equal(token, at!.MethodToken);
+        Assert.Equal("Spydate.Core.dll", at.Module);
+        Assert.Equal(0u, at.Offset);
+    }
+
+    [Fact]
+    public void ABreakpointWaitsForTheModuleItIsIn()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target, holdAtStart: true));
+
+        // Nothing has loaded this yet, and it never will - the point is that asking is not an error.
+        // Most breakpoints worth setting are in libraries that load later, and a debugger that could
+        // only set them once loaded could not set the interesting ones at all.
+        Assert.Null(session.SetBreakpoint("SomethingNotLoaded.dll", 0x06000001));
+
+        var waiting = Assert.Single(session.Breakpoints);
+        Assert.False(waiting.Planted);
+        Assert.Contains("waiting for the module", waiting.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AMethodThatIsNotThereIsRefusedRatherThanSilentlyNeverHit()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+
+        // Nothing is loaded yet at this point, so the answer cannot come now - it comes when the
+        // module arrives. It has to come at all, though: a breakpoint accepted on a method that does
+        // not exist is one that never fires and never says why.
+        Assert.Empty(session.Modules);
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", 0x06FFFFFF));
+
+        session.Continue();
+
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline && !session.Recent.Any(l => l.Contains("0x06FFFFFF", StringComparison.Ordinal)))
+        {
+            Thread.Sleep(100);
+        }
+
+        Assert.Contains(session.Recent, l => l.Contains("0x06FFFFFF", StringComparison.Ordinal));
+        Assert.Contains(session.Recent, l => l.Contains("no method with token", StringComparison.Ordinal));
+    }
+
+    /// <summary>The metadata token of a method, which is how a managed breakpoint names one.</summary>
+    private static uint TokenOf(string type, string method)
+    {
+        using var assembly = Spydate.Decompiler.Managed.ManagedAssembly.Load(typeof(Spydate.Core.PE.PeImage).Assembly.Location);
+        var member = assembly.Namespaces
+            .SelectMany(n => n.Types)
+            .First(t => t.FullName == type)
+            .Members.First(m => m.Name == method);
+
+        return (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(member.Handle);
+    }
+
+    [Fact]
     public void SomethingThatIsNotManagedSaysSoRatherThanWaitingForever()
     {
         // A native program never publishes a runtime, so the wait is the only thing that can end

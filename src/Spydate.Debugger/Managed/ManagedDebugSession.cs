@@ -34,6 +34,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private ManagedCallback? _callback;
     private string? _startupProblem;
     private uint _pid;
+    private bool _holdAtStart;
     private bool _disposed;
 
     /// <summary>How many events to keep. Enough to explain a stop, not a transcript of the run.</summary>
@@ -65,6 +66,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     }
 
     private readonly List<string> _modules = new();
+    private readonly Dictionary<string, ICorDebugModule> _loaded = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<ManagedBreakpoint> _wanted = new();
+    private readonly List<IntPtr> _planted = new();
 
     /// <summary>The last things that happened, oldest first.</summary>
     public IReadOnlyList<string> Recent => _log.Select(e => e.Text).ToList();
@@ -76,7 +80,17 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// round is a race that is usually won and occasionally lost, and losing it means the runtime
     /// starts, publishes nothing, and the debugger waits for an event that has already gone past.
     /// </summary>
-    public string? Start(string path, string? arguments = null, string? workingDirectory = null, TimeSpan timeout = default)
+    /// <param name="holdAtStart">
+    /// Stop as soon as the process exists, before it runs any managed code. This is the only moment
+    /// at which a breakpoint is certainly in place before the code it is about runs; setting one
+    /// afterwards is a race against a program that is already going.
+    /// </param>
+    public string? Start(
+        string path,
+        string? arguments = null,
+        string? workingDirectory = null,
+        TimeSpan timeout = default,
+        bool holdAtStart = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -92,6 +106,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         }
 
         string command = arguments is { Length: > 0 } ? $"\"{path}\" {arguments}" : $"\"{path}\"";
+        _holdAtStart = holdAtStart;
         _callback = new ManagedCallback(this);
         _self = GCHandle.Alloc(this);
         _startupProblem = null;
@@ -150,8 +165,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         lock (_gate)
         {
-            State = DebugState.Running;
-            Status = "running";
+            // Not overwritten when it is being held: the callback got there first and stopping is
+            // what was asked for.
+            if (State != DebugState.Stopped)
+            {
+                State = DebugState.Running;
+                Status = "running";
+            }
         }
 
         return null;
@@ -237,6 +257,129 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         }
     }
 
+    /// <summary>
+    /// Sets a breakpoint at an IL offset in a method, by the token the metadata gives it.
+    ///
+    /// This is the shape a managed breakpoint has, and it is the reason for the whole exercise: the
+    /// runtime is told about a method and an offset into its IL, and works out for itself where that
+    /// landed once the JIT had been at it. Nothing here has to know an address, nothing is written
+    /// into the process, and a method that is recompiled keeps its breakpoints.
+    ///
+    /// Works before the module is loaded, which is the normal case. Null when it was taken.
+    /// </summary>
+    public string? SetBreakpoint(string module, uint methodToken, uint ilOffset = 0)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        string name = System.IO.Path.GetFileName(module);
+        var wanted = new ManagedBreakpoint(name, methodToken, ilOffset);
+
+        ICorDebugModule? loaded;
+        lock (_gate)
+        {
+            _wanted.Add(wanted);
+            _loaded.TryGetValue(name, out loaded);
+        }
+
+        if (loaded is null)
+        {
+            Note($"breakpoint recorded for {name}, which is not loaded yet");
+            return null;
+        }
+
+        if (Plant(loaded, wanted) is { } problem)
+        {
+            lock (_gate)
+            {
+                _wanted.Remove(wanted);
+            }
+
+            return problem;
+        }
+
+        return null;
+    }
+
+    /// <summary>Every breakpoint asked for, and whether it is in the process yet.</summary>
+    public IReadOnlyList<ManagedBreakpoint> Breakpoints
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _wanted.ToList();
+            }
+        }
+    }
+
+    /// <summary>Breakpoints waiting on a module that has just arrived.</summary>
+    private List<ManagedBreakpoint> Waiting(string module)
+    {
+        lock (_gate)
+        {
+            return _wanted.Where(b => !b.Planted && string.Equals(b.Module, module, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+    }
+
+    /// <summary>Puts one breakpoint into a loaded module, or says why it would not go.</summary>
+    private string? Plant(ICorDebugModule module, ManagedBreakpoint wanted)
+    {
+        try
+        {
+            int hr = module.GetFunctionFromToken(wanted.MethodToken, out var function);
+            if (hr < 0 || function is null)
+            {
+                return $"{wanted.Module} has no method with token 0x{wanted.MethodToken:X8} (0x{hr:X8})";
+            }
+
+            hr = function.GetILCode(out var code);
+            if (hr < 0 || code is null)
+            {
+                // An abstract method, or one whose IL the runtime will not hand over. Worth naming
+                // rather than reporting as a breakpoint that was set and never hit.
+                Com.Drop(function);
+                return $"method 0x{wanted.MethodToken:X8} has no IL to break in (0x{hr:X8})";
+            }
+
+            hr = code.CreateBreakpoint(wanted.Offset, out IntPtr breakpoint);
+            if (hr < 0 || breakpoint == IntPtr.Zero)
+            {
+                Com.Drop(code);
+                Com.Drop(function);
+                return $"IL_{wanted.Offset:X4} is not somewhere a breakpoint can go in method 0x{wanted.MethodToken:X8} (0x{hr:X8})";
+            }
+
+            // A breakpoint arrives switched off. Creating one and forgetting this is a breakpoint
+            // that exists, lists, and never fires.
+            hr = Activation.Set(breakpoint, true);
+            if (hr < 0)
+            {
+                Marshal.Release(breakpoint);
+                Com.Drop(code);
+                Com.Drop(function);
+                return $"the breakpoint could not be activated (0x{hr:X8})";
+            }
+
+            lock (_gate)
+            {
+                _planted.Add(breakpoint);
+                int at = _wanted.IndexOf(wanted);
+                if (at >= 0)
+                {
+                    _wanted[at] = wanted with { Planted = true };
+                }
+            }
+
+            Com.Drop(code);
+            Com.Drop(function);
+            return null;
+        }
+        catch (COMException ex)
+        {
+            return $"the runtime refused the breakpoint: {ex.Message}";
+        }
+    }
+
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     public void Continue()
     {
@@ -296,7 +439,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     // What the callback reports
     // ------------------------------------------------------------------
 
-    void IManagedEvents.Created(IntPtr process)
+    bool IManagedEvents.Created(IntPtr process)
     {
         try
         {
@@ -319,31 +462,172 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         {
             _attached.Set();
         }
-    }
 
-    void IManagedEvents.ModuleLoaded(IntPtr module)
-    {
-        // Named, not held. A module's name is worth having in the log; the object itself belongs to
-        // the app domain that loaded it and outliving that is how a debugger keeps dead memory alive.
+        if (!_holdAtStart)
+        {
+            return false;
+        }
+
         lock (_gate)
         {
-            _modules.Add($"module {_modules.Count + 1}");
+            State = DebugState.Stopped;
+            StoppedBy = ManagedStopKind.Created;
+            Status = "held before it ran anything";
         }
+
+        Note("held before it ran anything; set breakpoints and continue");
+        _settled.Set();
+        return true;
+    }
+
+    bool IManagedEvents.ModuleLoaded(IntPtr module, IntPtr controller)
+    {
+        var held = Com.Keep<ICorDebugModule>(module);
+        if (held is null)
+        {
+            Note("a module loaded that could not be read");
+            return false;
+        }
+
+        string name = Com.NameOf(held) is { } path ? System.IO.Path.GetFileName(path) : "(unnamed)";
+
+        lock (_gate)
+        {
+            _modules.Add(name);
+            _loaded[name] = held;
+        }
+
+        // Breakpoints outlive the modules they are in. One set before anything ran has been waiting
+        // for exactly this moment, and a debugger that only planted at the time of asking could
+        // never break on a library that loads later — which is most of them.
+        var pending = Waiting(name);
+        if (pending.Count == 0)
+        {
+            return false;
+        }
+
+        // Planted off this thread, and the debuggee held until it is done.
+        //
+        // ICorDebugCode::CreateBreakpoint does not return when it is called on the thread the
+        // runtime is delivering the callback on — the other calls needed to reach it,
+        // GetFunctionFromToken and GetILCode, both answer immediately, and then this one simply
+        // never comes back. So the work goes to another thread and this one returns at once
+        // without continuing, which leaves the debuggee stopped exactly where it was: the module is
+        // loaded and nothing in it has run. The worker continues it when the breakpoints are in.
+        var keeper = Com.Keep<ICorDebugController>(controller);
+        if (keeper is null)
+        {
+            return false;
+        }
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            foreach (var wanted in pending)
+            {
+                if (Plant(held, wanted) is { } problem)
+                {
+                    Note(problem);
+                }
+                else
+                {
+                    Note($"breakpoint planted in {name} at method 0x{wanted.MethodToken:X8}+IL_{wanted.Offset:X4}");
+                }
+            }
+
+            keeper.Continue(0);
+            Com.Drop(keeper);
+        });
+
+        return true;
     }
 
     bool IManagedEvents.Stopped(ManagedStopKind kind, IntPtr controller, IntPtr thread, string text)
     {
+        var at = Where(thread);
+
         lock (_gate)
         {
             State = DebugState.Stopped;
             StoppedBy = kind;
-            Status = text;
+            StoppedAt = at;
+            Status = at is null ? text : $"{text} at {at}";
         }
 
-        Note(text);
+        Note(Status);
         _settled.Set();
         return true;
     }
+
+    /// <summary>Where the program is, once it has stopped: a method and an offset into its IL.</summary>
+    public ManagedLocation? StoppedAt { get; private set; }
+
+    /// <summary>
+    /// Reads the stopped thread's innermost frame.
+    ///
+    /// The frame has to be asked while the debuggee is stopped — this is called from inside the
+    /// callback for that reason — because the moment it continues there is no frame to read and the
+    /// answer would be about a program that has moved on.
+    /// </summary>
+    private static ManagedLocation? Where(IntPtr thread)
+        => Com.Borrow<ICorDebugThread, ManagedLocation>(thread, running =>
+        {
+            if (running.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
+            {
+                return null;   // a thread in native code has no managed frame, which is not a fault
+            }
+
+            return Com.Owned<ICorDebugILFrame, ManagedLocation>(frame, il =>
+            {
+                if (il.GetIP(out uint offset, out int mapping) < 0)
+                {
+                    return null;
+                }
+
+                if (il.GetFunction(out var function) < 0 || function is null)
+                {
+                    return null;
+                }
+
+                try
+                {
+                    if (function.GetToken(out uint token) < 0)
+                    {
+                        return null;
+                    }
+
+                    string? module = function.GetModule(out IntPtr owner) == 0
+                        ? Com.Owned<ICorDebugModule, string>(owner, m => Com.NameOf(m))
+                        : null;
+
+                    return new ManagedLocation(
+                        module is null ? "(unknown)" : System.IO.Path.GetFileName(module),
+                        token,
+                        offset,
+                        Mapped(mapping));
+                }
+                finally
+                {
+                    Com.Drop(function);
+                }
+            });
+        });
+
+    /// <summary>
+    /// Whether the IL offset is exact.
+    ///
+    /// It is not always. A frame stopped in code the JIT reordered, or in a prologue, maps to an
+    /// approximate offset or to none at all, and a listing that highlighted that line as though it
+    /// were the current one would be confidently wrong. The word travels with the number.
+    /// </summary>
+    private static string Mapped(int mapping) => mapping switch
+    {
+        0 => "exact",
+        1 => "approximate",
+        2 => "prologue",
+        3 => "epilogue",
+        4 => "no mapping",
+        _ => "unmapped",
+    };
 
     void IManagedEvents.Exited() => Exited();
 
@@ -391,6 +675,28 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         {
             _ = DbgShim.UnregisterForRuntimeStartup(_unregister);
             _unregister = IntPtr.Zero;
+        }
+
+        // Everything taken during the run, given back in the order it was taken. Breakpoints and
+        // modules are held deliberately — a breakpoint released is a breakpoint removed, and a
+        // module is what later breakpoints are planted into — so they are the session's to drop,
+        // and dropping them is what lets the debugging interface shut down rather than hang on to a
+        // process nobody is watching.
+        lock (_gate)
+        {
+            foreach (IntPtr breakpoint in _planted)
+            {
+                Marshal.Release(breakpoint);
+            }
+
+            _planted.Clear();
+
+            foreach (var module in _loaded.Values)
+            {
+                Com.Drop(module);
+            }
+
+            _loaded.Clear();
         }
 
         if (_process is not null)

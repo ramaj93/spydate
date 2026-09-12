@@ -2,6 +2,29 @@ using System.Runtime.InteropServices;
 
 namespace Spydate.Debugger.Managed;
 
+/// <summary>
+/// Where a stopped program is: a method, and how far into its IL.
+///
+/// No address, deliberately. The address a managed method has is whatever the JIT produced this
+/// time, is different on the next run, and is not what any listing shows. The token and the offset
+/// are the same numbers the IL view prints, which is what makes a stop something a reader can find.
+/// </summary>
+public sealed record ManagedLocation(string Module, uint MethodToken, uint Offset, string Mapping)
+{
+    public override string ToString()
+        => $"{Module}!0x{MethodToken:X8}+IL_{Offset:X4}" + (Mapping == "exact" ? string.Empty : $" ({Mapping})");
+}
+
+/// <summary>A breakpoint asked for, by the method it is in rather than by any address.</summary>
+public sealed record ManagedBreakpoint(string Module, uint MethodToken, uint Offset)
+{
+    /// <summary>Whether it is actually in the process yet, or still waiting for its module.</summary>
+    public bool Planted { get; init; }
+
+    public override string ToString()
+        => $"{Module}!0x{MethodToken:X8}+IL_{Offset:X4}{(Planted ? string.Empty : " (waiting for the module)")}";
+}
+
 /// <summary>What the runtime reported, reduced to the few kinds a debugger acts on.</summary>
 public enum ManagedStopKind
 {
@@ -92,8 +115,10 @@ internal sealed class ManagedCallback : ICorDebugManagedCallback, ICorDebugManag
 
     public int CreateProcess(IntPtr pProcess)
     {
-        _events.Created(pProcess);
-        return Go(pProcess);
+        // The session decides whether to let it go. Holding here is the only moment at which a
+        // breakpoint can be set before the program has run a single managed instruction — after
+        // this the process is away, and anything set later is a race with the code it is about.
+        return _events.Created(pProcess) ? 0 : Go(pProcess);
     }
 
     public int ExitProcess(IntPtr pProcess)
@@ -143,10 +168,7 @@ internal sealed class ManagedCallback : ICorDebugManagedCallback, ICorDebugManag
     }
 
     public int LoadModule(IntPtr pAppDomain, IntPtr pModule)
-    {
-        _events.ModuleLoaded(pModule);
-        return Go(pAppDomain);
-    }
+        => _events.ModuleLoaded(pModule, pAppDomain) ? 0 : Go(pAppDomain);
 
     public int LoadAssembly(IntPtr pAppDomain, IntPtr pAssembly) => Continued(pAppDomain, null);
 
@@ -235,11 +257,16 @@ internal sealed class ManagedCallback : ICorDebugManagedCallback, ICorDebugManag
 /// <summary>What the callback tells the session. Kept narrow so the callback stays about dispatch.</summary>
 internal interface IManagedEvents
 {
-    /// <summary>The process exists and its runtime is debuggable.</summary>
-    void Created(IntPtr process);
+    /// <summary>
+    /// The process exists and its runtime is debuggable. True to hold it here rather than let it run.
+    /// </summary>
+    bool Created(IntPtr process);
 
-    /// <summary>A module was loaded, as a raw <c>ICorDebugModule</c>.</summary>
-    void ModuleLoaded(IntPtr module);
+    /// <summary>
+    /// A module was loaded. True when the session has taken over continuing the debuggee, which it
+    /// does when it has work to do on this module that cannot be done on this thread.
+    /// </summary>
+    bool ModuleLoaded(IntPtr module, IntPtr controller);
 
     /// <summary>Something stopped the debuggee. True to stay stopped, false to carry on.</summary>
     bool Stopped(ManagedStopKind kind, IntPtr controller, IntPtr thread, string text);

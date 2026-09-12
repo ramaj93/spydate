@@ -31,6 +31,14 @@ internal static class CorDebugGuids
     internal const string Controller = "3d6f5f62-7538-11d3-8d5b-00104b35e7ef";
     internal const string Process = "3d6f5f64-7538-11d3-8d5b-00104b35e7ef";
     internal const string AppDomain = "3d6f5f63-7538-11d3-8d5b-00104b35e7ef";
+    internal const string Module = "dba2d8c1-e5c5-4069-8c13-10a7c6abf43d";
+    internal const string Function = "CC7BCAF3-8A68-11d2-983C-0000F808342D";
+    internal const string Code = "CC7BCAF4-8A68-11d2-983C-0000F808342D";
+    internal const string Breakpoint = "CC7BCAF9-8A68-11d2-983C-0000F808342D";
+    internal const string FunctionBreakpoint = "CC7BCAFA-8A68-11d2-983C-0000F808342D";
+    internal const string Thread = "938c6d66-7fb6-4f69-b389-425b8987329b";
+    internal const string Frame = "CC7BCAEF-8A68-11d2-983C-0000F808342D";
+    internal const string IlFrame = "03E26311-4F76-11d3-88C6-006097945418";
 }
 
 [ComImport]
@@ -306,11 +314,224 @@ internal interface ICorDebugAppDomain
 
     [PreserveSig] int IsAttached(out int pbAttached);
 
-    [PreserveSig] int GetName(uint cchName, out uint pcchName, [Out, MarshalAs(UnmanagedType.LPArray)] char[]? szName);
+    [PreserveSig] int GetName(uint cchName, out uint pcchName, IntPtr szName);
 
     [PreserveSig] int GetObject(out IntPtr ppObject);
 
     [PreserveSig] int Attach();
 
     [PreserveSig] int GetID(out uint pId);
+}
+
+/// <summary>
+/// One assembly as the runtime has it loaded. This is where a breakpoint starts: a method token
+/// means nothing on its own, and the module is what turns it into something with code.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Module)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugModule
+{
+    [PreserveSig] int GetProcess(out IntPtr ppProcess);
+
+    [PreserveSig] int GetBaseAddress(out ulong pAddress);
+
+    [PreserveSig] int GetAssembly(out IntPtr ppAssembly);
+
+    /// <summary>
+    /// The module's path, into a buffer the caller supplies.
+    ///
+    /// <c>IntPtr</c> rather than <c>char[]</c>, and that is not a preference. Array parameters on a
+    /// <c>[ComImport]</c> interface default to <c>SafeArray</c>, so a plain <c>char[]</c> here has
+    /// the marshaller read a SAFEARRAY header out of a flat buffer of characters — which does not
+    /// fault politely, it takes the process down. It ran on the runtime's own callback thread, so
+    /// what the test showed was the whole host disappearing mid-run.
+    /// </summary>
+    [PreserveSig] int GetName(uint cchName, out uint pcchName, IntPtr szName);
+
+    [PreserveSig] int EnableJITDebugging(int bTrackJITInfo, int bAllowJitOpts);
+
+    [PreserveSig] int EnableClassLoadCallbacks(int bClassLoadCallbacks);
+
+    [PreserveSig] int GetFunctionFromToken(uint methodDef, out ICorDebugFunction? ppFunction);
+
+    [PreserveSig] int GetFunctionFromRVA(ulong rva, out IntPtr ppFunction);
+
+    [PreserveSig] int GetClassFromToken(uint typeDef, out IntPtr ppClass);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int GetEditAndContinueSnapshot(out IntPtr ppEditAndContinueSnapshot);
+
+    [PreserveSig] int GetMetaDataInterface(ref Guid riid, out IntPtr ppObj);
+
+    [PreserveSig] int GetToken(out uint pToken);
+
+    [PreserveSig] int IsDynamic(out int pDynamic);
+
+    [PreserveSig] int GetGlobalVariableValue(uint fieldDef, out IntPtr ppValue);
+
+    [PreserveSig] int GetSize(out uint pcBytes);
+
+    [PreserveSig] int IsInMemory(out int pInMemory);
+}
+
+[ComImport]
+[Guid(CorDebugGuids.Function)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugFunction
+{
+    [PreserveSig] int GetModule(out IntPtr ppModule);
+
+    [PreserveSig] int GetClass(out IntPtr ppClass);
+
+    [PreserveSig] int GetToken(out uint pMethodDef);
+
+    [PreserveSig] int GetILCode(out ICorDebugCode? ppCode);
+
+    [PreserveSig] int GetNativeCode(out IntPtr ppCode);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int GetLocalVarSigToken(out uint pmdSig);
+
+    [PreserveSig] int GetCurrentVersionNumber(out uint pnCurrentVersion);
+}
+
+/// <summary>
+/// A method's code. The IL form is the one that matters here: a breakpoint on it is placed at an IL
+/// offset, which is the same number the listing prints, and the runtime works out where that landed
+/// after the JIT rather than making anybody guess at an address.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Code)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugCode
+{
+    [PreserveSig] int IsIL(out int pbIL);
+
+    [PreserveSig] int GetFunction(out IntPtr ppFunction);
+
+    [PreserveSig] int GetAddress(out ulong pStart);
+
+    [PreserveSig] int GetSize(out uint pcBytes);
+
+    /// <summary>
+    /// A breakpoint at an IL offset, returned as a raw pointer.
+    ///
+    /// Not typed, because typing it makes the marshaller QueryInterface for an IID, and an IID that
+    /// is one digit wrong fails with E_NOINTERFACE on an object that is in fact exactly what was
+    /// asked for. The pointer already is an <c>ICorDebugFunctionBreakpoint</c>; nothing is gained by
+    /// asking it to prove that, and <see cref="Activation.Set"/> reaches the one method needed
+    /// through the vtable it certainly has.
+    /// </summary>
+    [PreserveSig] int CreateBreakpoint(uint offset, out IntPtr ppBreakpoint);
+
+    [PreserveSig] int GetCode(uint startOffset, uint endOffset, uint cBufferAlloc, IntPtr buffer, out uint pcBufferSize);
+
+    [PreserveSig] int GetVersionNumber(out uint nVersion);
+
+    [PreserveSig] int GetILToNativeMapping(uint cMap, out uint pcMap, IntPtr map);
+
+    [PreserveSig] int GetEHClauses(uint cClauses, out uint pcClauses, IntPtr clauses);
+}
+
+[ComImport]
+[Guid(CorDebugGuids.FunctionBreakpoint)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugFunctionBreakpoint
+{
+    // ICorDebugBreakpoint, repeated: slots come from this interface alone.
+    [PreserveSig] int Activate(int bActive);
+
+    [PreserveSig] int IsActive(out int pbActive);
+
+    [PreserveSig] int GetFunction(out IntPtr ppFunction);
+
+    [PreserveSig] int GetOffset(out uint pnOffset);
+}
+
+[ComImport]
+[Guid(CorDebugGuids.Thread)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugThread
+{
+    [PreserveSig] int GetProcess(out IntPtr ppProcess);
+
+    [PreserveSig] int GetID(out uint pdwThreadId);
+
+    [PreserveSig] int GetHandle(out IntPtr phThreadHandle);
+
+    [PreserveSig] int GetAppDomain(out IntPtr ppAppDomain);
+
+    [PreserveSig] int SetDebugState(int state);
+
+    [PreserveSig] int GetDebugState(out int pState);
+
+    [PreserveSig] int GetUserState(out int pState);
+
+    [PreserveSig] int GetCurrentException(out IntPtr ppExceptionObject);
+
+    [PreserveSig] int ClearCurrentException();
+
+    [PreserveSig] int CreateStepper(out IntPtr ppStepper);
+
+    [PreserveSig] int EnumerateChains(out IntPtr ppChains);
+
+    [PreserveSig] int GetActiveChain(out IntPtr ppChain);
+
+    [PreserveSig] int GetActiveFrame(out IntPtr ppFrame);
+
+    [PreserveSig] int GetRegisterSet(out IntPtr ppRegisters);
+
+    [PreserveSig] int CreateEval(out IntPtr ppEval);
+
+    [PreserveSig] int GetObject(out IntPtr ppObject);
+}
+
+/// <summary>
+/// A frame as the runtime sees it, which is the point of debugging managed code this way: where the
+/// program is, is a method and an offset into its IL, not an address that happens to be inside some
+/// JIT output.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.IlFrame)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugILFrame
+{
+    // ICorDebugFrame, repeated: slots come from this interface alone.
+    [PreserveSig] int GetChain(out IntPtr ppChain);
+
+    [PreserveSig] int GetCode(out IntPtr ppCode);
+
+    [PreserveSig] int GetFunction(out ICorDebugFunction? ppFunction);
+
+    [PreserveSig] int GetFunctionToken(out uint pToken);
+
+    [PreserveSig] int GetStackRange(out ulong pStart, out ulong pEnd);
+
+    [PreserveSig] int GetCaller(out IntPtr ppFrame);
+
+    [PreserveSig] int GetCallee(out IntPtr ppFrame);
+
+    [PreserveSig] int CreateStepper(out IntPtr ppStepper);
+
+    // ICorDebugILFrame itself.
+    [PreserveSig] int GetIP(out uint pnOffset, out int pMappingResult);
+
+    [PreserveSig] int SetIP(uint nOffset);
+
+    [PreserveSig] int EnumerateLocalVariables(out IntPtr ppValueEnum);
+
+    [PreserveSig] int GetLocalVariable(uint dwIndex, out IntPtr ppValue);
+
+    [PreserveSig] int EnumerateArguments(out IntPtr ppValueEnum);
+
+    [PreserveSig] int GetArgument(uint dwIndex, out IntPtr ppValue);
+
+    [PreserveSig] int GetStackDepth(out uint pDepth);
+
+    [PreserveSig] int GetStackValue(uint dwIndex, out IntPtr ppValue);
+
+    [PreserveSig] int CanSetIP(uint nOffset);
 }
