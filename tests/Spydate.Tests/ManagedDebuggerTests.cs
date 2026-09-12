@@ -127,6 +127,62 @@ public class ManagedDebuggerTests
     }
 
     [Fact]
+    public void SteppingMovesOneIlInstructionAtATime()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+        Assert.Equal(0u, session.StoppedAt!.Offset);
+
+        // Stepped over rather than into, so the walk stays inside one method and the offsets can be
+        // compared with each other. Stepping in is the same machinery and would be a different
+        // assertion: at the first call it lands at offset zero of somewhere else, which is correct
+        // and says nothing about whether stepping works.
+        var seen = new List<uint> { session.StoppedAt.Offset };
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Null(session.Step(into: false));
+            Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(20)), $"step {i + 1} never landed");
+            Assert.Equal(ManagedStopKind.Step, session.StoppedBy);
+            Assert.Equal(token, session.StoppedAt!.MethodToken);
+            seen.Add(session.StoppedAt.Offset);
+        }
+
+        // Forwards, one IL instruction at a time, never twice on the same one. These are the
+        // offsets the listing prints, and they are the same on every run — which the addresses the
+        // JIT produced are not.
+        string walked = string.Join(" -> ", seen.Select(o => $"IL_{o:X4}"));
+        Assert.True(seen.Count == seen.Distinct().Count(), "it stepped onto the same instruction twice: " + walked);
+        Assert.True(seen.SequenceEqual(seen.OrderBy(o => o)), $"the walk went backwards: {walked}");
+    }
+
+    [Fact]
+    public void SteppingSomethingThatIsNotStoppedSaysSo()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        using var session = new ManagedDebugSession();
+        Assert.Null(session.Start(target));
+
+        // Running, not stopped. A step accepted here would arm a stepper against nothing and the
+        // caller would wait for a landing that never comes.
+        Assert.Contains("not stopped", session.Step()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ABreakpointWaitsForTheModuleItIsIn()
     {
         if (Target is not { } target)

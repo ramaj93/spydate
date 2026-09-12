@@ -39,6 +39,7 @@ internal static class CorDebugGuids
     internal const string Thread = "938c6d66-7fb6-4f69-b389-425b8987329b";
     internal const string Frame = "CC7BCAEF-8A68-11d2-983C-0000F808342D";
     internal const string IlFrame = "03E26311-4F76-11d3-88C6-006097945418";
+    internal const string Stepper = "CC7BCAEC-8A68-11d2-983C-0000F808342D";
 }
 
 [ComImport]
@@ -474,7 +475,7 @@ internal interface ICorDebugThread
 
     [PreserveSig] int ClearCurrentException();
 
-    [PreserveSig] int CreateStepper(out IntPtr ppStepper);
+    [PreserveSig] int CreateStepper(out ICorDebugStepper? ppStepper);
 
     [PreserveSig] int EnumerateChains(out IntPtr ppChains);
 
@@ -534,4 +535,34 @@ internal interface ICorDebugILFrame
     [PreserveSig] int GetStackValue(uint dwIndex, out IntPtr ppValue);
 
     [PreserveSig] int CanSetIP(uint nOffset);
+}
+
+/// <summary>
+/// One step in progress.
+///
+/// A stepper is armed while the debuggee is stopped and then does its work when it is continued:
+/// the runtime reports <c>StepComplete</c> when the step lands. Stepping by IL rather than by
+/// machine instruction is the point — one IL instruction is a unit of the program, where one
+/// machine instruction is a unit of whatever the JIT decided to emit for it this time.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Stepper)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugStepper
+{
+    [PreserveSig] int IsActive(out int pbActive);
+
+    [PreserveSig] int Deactivate();
+
+    [PreserveSig] int SetInterceptMask(int mask);
+
+    [PreserveSig] int SetUnmappedStopMask(int mask);
+
+    [PreserveSig] int Step(int bStepIn);
+
+    [PreserveSig] int StepRange(int bStepIn, IntPtr ranges, uint cRangeCount);
+
+    [PreserveSig] int StepOut();
+
+    [PreserveSig] int SetRangeIL(int bIL);
 }

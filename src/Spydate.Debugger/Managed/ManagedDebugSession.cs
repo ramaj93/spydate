@@ -35,6 +35,8 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private string? _startupProblem;
     private uint _pid;
     private bool _holdAtStart;
+    private ICorDebugThread? _stopped;
+    private ICorDebugStepper? _stepper;
     private bool _disposed;
 
     /// <summary>How many events to keep. Enough to explain a stop, not a transcript of the run.</summary>
@@ -380,9 +382,160 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         }
     }
 
+    /// <summary>
+    /// Moves one IL instruction, into a call or over it, and lets the debuggee run until it lands.
+    ///
+    /// By IL, not by machine instruction: one IL instruction is a unit of the program, where one
+    /// machine instruction is a unit of whatever the JIT chose to emit for it on this run. Nothing
+    /// about the step refers to an address, which is what makes it repeatable.
+    ///
+    /// Null when the step was armed. It is reported as complete through the usual stop, so a caller
+    /// waits on <see cref="WaitUntilStopped"/> exactly as it would for a breakpoint.
+    /// </summary>
+    public string? Step(bool into = true)
+    {
+        ICorDebugThread? thread;
+        lock (_gate)
+        {
+            if (State != DebugState.Stopped)
+            {
+                return State == DebugState.Exited ? "it has exited" : "it is not stopped, so there is nothing to step";
+            }
+
+            thread = _stopped;
+        }
+
+        if (thread is null)
+        {
+            return "the stop was not on a managed thread, so there is nothing to step";
+        }
+
+        Retire();
+
+        uint from = StoppedAt?.Offset ?? 0;
+
+        int hr = thread.CreateStepper(out var stepper);
+        if (hr < 0 || stepper is null)
+        {
+            return $"the runtime would not make a stepper: 0x{hr:X8}";
+        }
+
+        // Not stopping in code that maps to no IL at all — prologues, stubs, the insides of the
+        // runtime. Without the mask a step regularly lands somewhere with nothing to show.
+        _ = stepper.SetRangeIL(1);
+        _ = stepper.SetUnmappedStopMask(StopNowhereUnmapped);
+
+        // A range, not a plain Step, and that is the whole difference between stepping IL and
+        // stepping the JIT's output. Step() moves one machine instruction, and one IL instruction is
+        // usually several of those — so three steps from IL_0001 reported complete three times
+        // without the IL offset ever changing, which reads as a debugger that will not move.
+        // StepRange runs until execution leaves the range, so a range of exactly this offset is
+        // exactly one IL instruction however many machine instructions that turned out to be.
+        IntPtr range = Marshal.AllocCoTaskMem(sizeof(uint) * 2);
+        try
+        {
+            Marshal.WriteInt32(range, 0, (int)from);
+            Marshal.WriteInt32(range, sizeof(uint), (int)from + 1);
+            hr = stepper.StepRange(into ? 1 : 0, range, 1);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(range);
+        }
+
+        if (hr < 0)
+        {
+            Com.Drop(stepper);
+            return $"the step was refused: 0x{hr:X8}";
+        }
+
+        lock (_gate)
+        {
+            _stepper = stepper;
+        }
+
+        Continue();
+        return null;
+    }
+
+    /// <summary>Runs to the end of the current method and stops in whatever called it.</summary>
+    public string? StepOut()
+    {
+        ICorDebugThread? thread;
+        lock (_gate)
+        {
+            if (State != DebugState.Stopped)
+            {
+                return "it is not stopped, so there is nothing to step out of";
+            }
+
+            thread = _stopped;
+        }
+
+        if (thread is null || thread.CreateStepper(out var stepper) < 0 || stepper is null)
+        {
+            return "the runtime would not make a stepper for this thread";
+        }
+
+        try
+        {
+            _ = stepper.SetUnmappedStopMask(StopNowhereUnmapped);
+            int hr = stepper.StepOut();
+            if (hr < 0)
+            {
+                return $"stepping out was refused: 0x{hr:X8}";
+            }
+        }
+        finally
+        {
+            Com.Drop(stepper);
+        }
+
+        Continue();
+        return null;
+    }
+
+    /// <summary><c>STOP_NONE</c>: never stop in code that maps to no IL.</summary>
+    private const int StopNowhereUnmapped = 0;
+
+    /// <summary>
+    /// Turns off the stepper from the last step, if there is one.
+    ///
+    /// A completed stepper is not finished with. Left alone it stays armed, and the next step
+    /// reports complete straight away at the offset the previous one reached — which reads as a
+    /// debugger that steps once and then refuses to move, with every call returning success. The
+    /// walk went IL_0000, IL_0001, IL_0001, IL_0001.
+    /// </summary>
+    private void Retire()
+    {
+        ICorDebugStepper? previous;
+        lock (_gate)
+        {
+            previous = _stepper;
+            _stepper = null;
+        }
+
+        if (previous is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = previous.Deactivate();
+        }
+        catch (COMException)
+        {
+            // A stepper whose thread has gone cannot be deactivated, and does not need to be.
+        }
+
+        Com.Drop(previous);
+    }
+
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     public void Continue()
     {
+        ICorDebugThread? letting;
         lock (_gate)
         {
             if (State != DebugState.Stopped || _process is null)
@@ -393,8 +546,16 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             State = DebugState.Running;
             Status = "running";
             StoppedBy = ManagedStopKind.None;
+            letting = _stopped;
+            _stopped = null;
+            StoppedAt = null;
             _settled.Reset();
         }
+
+        // The stopped thread is only worth holding while it is stopped. Once it runs, the frames it
+        // had are gone and anything asked of it afterwards is a question about a program that has
+        // moved on.
+        Com.Drop(letting);
 
         int hr = _process!.Continue(0);
         if (hr < 0)
@@ -545,8 +706,15 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     {
         var at = Where(thread);
 
+        // Held only for as long as the stop lasts. A stepper is created on the thread that stopped,
+        // so it has to survive the callback returning — and no longer, because once the program is
+        // continued the thread's frames are a description of somewhere it no longer is.
+        var stopped = Com.Keep<ICorDebugThread>(thread);
+
         lock (_gate)
         {
+            Com.Drop(_stopped);
+            _stopped = stopped;
             State = DebugState.Stopped;
             StoppedBy = kind;
             StoppedAt = at;
@@ -697,6 +865,12 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             }
 
             _loaded.Clear();
+
+            Com.Drop(_stopped);
+            _stopped = null;
+
+            Com.Drop(_stepper);
+            _stepper = null;
         }
 
         if (_process is not null)
