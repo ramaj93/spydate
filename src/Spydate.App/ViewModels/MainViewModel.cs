@@ -10,6 +10,7 @@ using Spydate.App.ViewModels.Documents;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Core.Text;
+using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using SymbolRegular = Wpf.Ui.Controls.SymbolRegular;
 
@@ -1167,7 +1168,7 @@ public sealed partial class MainViewModel : ObservableObject
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
             ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
-            ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member),
+            ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member, Locate),
             _ => null,
         };
 
@@ -1215,6 +1216,17 @@ public sealed partial class MainViewModel : ObservableObject
 
         OpenFunctionGraph(analysis.GetOrDiscoverFunction(entry));
     }
+
+    /// <summary>
+    /// Where a member's IL actually sits, so the listing can carry an address against every line.
+    ///
+    /// Given to the document rather than looked up by it: the body index belongs to the open binary,
+    /// and a document that reached for it would be reaching past the thing that owns its lifetime.
+    /// </summary>
+    private (ManagedBody Body, ulong ImageBase, bool Wide)? Locate(ManagedMember member)
+        => Binary is { } open && open.Bodies?.Of(member.Handle) is { } body
+            ? (body, open.Image.ImageBase, open.Image.Is64Bit)
+            : null;
 
     private void OpenFunctionGraph(Function f)
     {

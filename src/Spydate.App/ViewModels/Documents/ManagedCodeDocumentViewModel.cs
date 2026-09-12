@@ -19,12 +19,22 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     private readonly ManagedMember? _member;
     private CancellationTokenSource? _cts;
 
-    private ManagedCodeDocumentViewModel(string key, string title, SymbolRegular icon, ManagedAssembly assembly, ManagedType? type, ManagedMember? member)
+    private readonly Func<ManagedMember, (ManagedBody Body, ulong ImageBase, bool Wide)?>? _locate;
+
+    private ManagedCodeDocumentViewModel(
+        string key,
+        string title,
+        SymbolRegular icon,
+        ManagedAssembly assembly,
+        ManagedType? type,
+        ManagedMember? member,
+        Func<ManagedMember, (ManagedBody Body, ulong ImageBase, bool Wide)?>? locate = null)
         : base(key, title, icon)
     {
         _assembly = assembly;
         _type = type;
         _member = member;
+        _locate = locate;
     }
 
     public static ManagedCodeDocumentViewModel ForAssembly(ManagedAssembly assembly)
@@ -33,8 +43,12 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     public static ManagedCodeDocumentViewModel ForType(ManagedAssembly assembly, ManagedType type)
         => new($"managed:type:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null);
 
-    public static ManagedCodeDocumentViewModel ForMember(ManagedAssembly assembly, ManagedType type, ManagedMember member)
-        => new($"managed:member:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member);
+    public static ManagedCodeDocumentViewModel ForMember(
+        ManagedAssembly assembly,
+        ManagedType type,
+        ManagedMember member,
+        Func<ManagedMember, (ManagedBody Body, ulong ImageBase, bool Wide)?>? locate = null)
+        => new($"managed:member:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, locate);
 
     public IReadOnlyList<ManagedLanguage> Languages { get; } = new[] { ManagedLanguage.CSharp, ManagedLanguage.IL };
 
@@ -85,6 +99,19 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
         }
     }
 
+    /// <summary>
+    /// The IL listing with a file address against every instruction, when there is a body to locate.
+    ///
+    /// Only for a single member. A whole type's listing restarts its offsets at every method, so
+    /// deciding which body a line belongs to would mean parsing ILSpy's own output for
+    /// <c>.method</c> headers — a guess about a format that is not a contract, in the one place
+    /// where being one method out puts a breakpoint in someone else's code.
+    /// </summary>
+    private string Addressed(string listing, ManagedMember member)
+        => _locate?.Invoke(member) is { } found
+            ? ManagedDecompiler.Addressed(listing, found.Body, found.ImageBase, found.Wide)
+            : listing;
+
     private string Produce(ManagedLanguage language, CancellationToken ct)
     {
         var d = _assembly.Decompiler;
@@ -93,7 +120,7 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             (ManagedLanguage.CSharp, { } m, _) => d.DecompileMember(m, ct),
             (ManagedLanguage.CSharp, null, { } t) => d.DecompileType(t, ct),
             (ManagedLanguage.CSharp, null, null) => d.DecompileAssembly(ct),
-            (ManagedLanguage.IL, { } m, _) => d.DisassembleMember(m, ct),
+            (ManagedLanguage.IL, { } m, _) => Addressed(d.DisassembleMember(m, ct), m),
             (ManagedLanguage.IL, null, { } t) => d.DisassembleType(t, ct),
             _ => d.DisassembleModuleHeader(ct),
         };

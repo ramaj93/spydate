@@ -33,6 +33,19 @@ public sealed class OpenedBinary : IDisposable
 
     public string? ManagedLoadError { get; }
 
+    /// <summary>
+    /// Every method body with the address its IL sits at, for a managed image.
+    ///
+    /// What turns a click in the gutter into a breakpoint. A line of the IL listing carries a file
+    /// address, and the runtime wants a method token and an offset; this is the only thing that can
+    /// get from one to the other, in either direction.
+    ///
+    /// Lazy, because a native image never asks and a managed one only asks once something is run.
+    /// </summary>
+    public ManagedBodies? Bodies => _bodies ??= Managed is null ? null : ManagedBodies.Build(Managed);
+
+    private ManagedBodies? _bodies;
+
     /// <summary>Outcome of looking for this image's <c>.spydate</c> file, when there is an analysis.</summary>
     public ProjectLoadResult? Project { get; }
 

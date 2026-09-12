@@ -29,7 +29,14 @@
             </DockPanel>
         </Border>
 
+        <!-- The same four bindings the disassembly view has, which is what makes the gutter work:
+             an IL listing carries a file address against every instruction, so a click in the
+             margin names a place the debugger can be told about. -->
         <controls:CodeEditor Grid.Row="1" BoundText="{Binding Text, Mode=OneWay}"
-                             HighlightingName="{Binding Highlighting, Mode=OneWay}" />
+                             HighlightingName="{Binding Highlighting, Mode=OneWay}"
+                             BreakpointAddresses="{Binding DataContext.Debugger.BreakpointAddresses, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
+                             BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
+                             ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
+                             ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
     </Grid>
 </UserControl>

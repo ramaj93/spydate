@@ -422,9 +422,21 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Put in while it is held, which is the point of holding: every one of them is in place
+        // before the code it is about has run. A run that planted them afterwards would be racing
+        // the program for the ones near the start, which are the ones people set.
+        foreach (var (module, token, offset) in _pendingManaged.Values)
+        {
+            if (session.SetBreakpoint(module, token, offset) is { } refused)
+            {
+                Add(refused);
+            }
+        }
+
         State = DebugState.Stopped;
         Status = "Held before it ran anything.";
         Add($"started {path} under the .NET debugger, held before it ran anything");
+        SyncManaged();
         NotifyCommands();
     }
 
@@ -561,6 +573,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     public void ToggleBreakpoint(ulong staticVa)
     {
+        if (IsManaged)
+        {
+            ToggleManagedBreakpoint(staticVa);
+            return;
+        }
+
         if (BreakpointAddresses.Remove(staticVa))
         {
             _session?.RemoveBreakpoint(staticVa);
@@ -619,6 +637,29 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         });
     }
 
+    /// <summary>
+    /// The listing address a managed stop corresponds to, or null when there is nothing to point at.
+    ///
+    /// Null is the ordinary answer for a stop in another assembly — the program is somewhere real,
+    /// but not anywhere this window has open, and an arrow drawn on the nearest line of the wrong
+    /// file is worse than no arrow.
+    /// </summary>
+    private ulong? Located(ManagedLocation? at)
+    {
+        if (at is null || _workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        {
+            return null;
+        }
+
+        if (!string.Equals(at.Module, binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(at.MethodToken & 0x00FFFFFF));
+        return bodies.Of(handle) is { } body ? binary.Image.ImageBase + body.RvaOf((int)at.Offset) : null;
+    }
+
     /// <summary>Reads the managed session's state onto the panel.</summary>
     private void SyncManaged()
     {
@@ -629,6 +670,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         State = session.State;
         Status = session.Status is { Length: > 0 } said ? char.ToUpperInvariant(said[0]) + said[1..] : "Running.";
+
+        // Back the other way: a stop is a method token and an IL offset, and the listing is
+        // addressed, so the arrow can be put on the line the program is actually at. The same index
+        // that gave the listing its addresses answers this, so the two cannot disagree.
+        ExecutionAddress = Located(session.StoppedAt);
+        if (ExecutionAddress is { } at)
+        {
+            StoppedAt?.Invoke(this, at);
+        }
 
         Modules.Clear();
         foreach (string module in session.Modules)
@@ -1137,6 +1187,68 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     }
 
     private bool CanStepOut() => IsStopped && IsManaged;
+
+    /// <summary>
+    /// A breakpoint clicked in the IL gutter, turned into the method and offset the runtime wants.
+    ///
+    /// The address is the one the listing printed, which is where that IL byte sits in the file. The
+    /// body index is the only thing that can get from there to a method token and an offset into it,
+    /// and it is the same index the listing's addresses were made from — so a line always maps back
+    /// to the instruction it was drawn for.
+    ///
+    /// The address is kept in <see cref="BreakpointAddresses"/> regardless, because that is what
+    /// draws the dot: the marker is about the line, and the line is addressed either way.
+    /// </summary>
+    private void ToggleManagedBreakpoint(ulong staticVa)
+    {
+        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        {
+            return;
+        }
+
+        if (binary.Image.VaToRva(staticVa) is not { } rva || bodies.At(rva) is not { } body)
+        {
+            Add($"0x{staticVa:X} is not inside any method's IL");
+            return;
+        }
+
+        uint token = (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(body.Method);
+        uint offset = (uint)body.OffsetOf(rva);
+        string module = binary.Image.FileName;
+
+        if (BreakpointAddresses.Remove(staticVa))
+        {
+            // Taken off the listing, but the runtime keeps it: removing one means finding the
+            // breakpoint object the session made and deactivating it, and the session keeps them by
+            // module rather than by method. Saying so beats a dot that vanishes while it still fires.
+            Add(_managed is null
+                ? $"cleared the breakpoint at IL_{offset:X4}"
+                : $"took the marker off IL_{offset:X4}, but the running process keeps the breakpoint "
+                  + "until it is stopped and started");
+        }
+        else
+        {
+            BreakpointAddresses.Add(staticVa);
+
+            // Recorded whether or not anything is running. A breakpoint set before the run is the
+            // useful kind, and the session plants everything it has been given when its module loads.
+            _pendingManaged[staticVa] = (module, token, offset);
+            string? problem = _managed?.SetBreakpoint(module, token, offset);
+            Add(problem ?? $"breakpoint in {module} at method 0x{token:X8}+IL_{offset:X4}");
+        }
+
+        BreakpointsVersion++;
+        RefreshBreakpoints();
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Managed breakpoints set before anything was running, so a run can start with them.
+    ///
+    /// Kept here rather than in the session because the session does not outlive a run and these
+    /// do: a breakpoint put on a line is about the program, not about this particular execution of it.
+    /// </summary>
+    private readonly Dictionary<ulong, (string Module, uint Token, uint Offset)> _pendingManaged = new();
 
     /// <summary>The CLR debugging session, for anything that needs to read it rather than drive it.</summary>
     internal ManagedDebugSession? ManagedSession => _managed;

@@ -210,9 +210,14 @@ native side already reads it, because native is what it is.
   registers; no new tool, on the usual reasoning. The Debug panel swaps its "Threads &amp; registers"
   pane for a **Locals** pane and grows a step-out button, and the assistant drives the same session
   the analyst is watching, as it always has for native.
+  The window's IL view is addressed, so a click in its gutter sets a breakpoint on the method and
+  offset that line stands for, and a stop puts the arrow back on the line it is at — the same body
+  index answers both directions, so the two cannot disagree. Breakpoints set before a run are held
+  and planted while the process is held at the start.
   Still to do: multiple threads and frames beyond the innermost, setting values, evaluation, and
-  breakpoints set from the window's IL view — which needs the addressed IL listing wiring into the
-  document, deliberately left out until there was a debugger that could honour one.
+  clearing a managed breakpoint from a running process — the session keeps them by module rather
+  than by method, so the marker comes off the listing and the runtime keeps firing until it is
+  stopped and started, which the log says rather than hiding.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable
