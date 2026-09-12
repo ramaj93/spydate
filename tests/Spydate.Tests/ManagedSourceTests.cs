@@ -208,6 +208,98 @@ public class ManagedSourceTests
     }
 
     [Fact]
+    public void AStatementRunsFromOneEmptyStackToTheNext()
+    {
+        using var assembly = ManagedAssembly.Load(CorePath);
+        var bodies = ManagedBodies.Build(assembly);
+        var stack = new IlStack(assembly.Metadata);
+        var member = TypeOf(assembly, "Spydate.Core.Text.AddressText").Members.First(m => m.Name == "ParseHex");
+        var body = bodies.Of((System.Reflection.Metadata.MethodDefinitionHandle)member.Handle)!;
+
+        // Every instruction in the method belongs to exactly one statement, and asking from
+        // anywhere inside it gives the same answer — which is what makes this usable for stepping:
+        // the range does not depend on how far into the statement execution happens to be.
+        var byStart = new Dictionary<int, (int From, int To)>();
+        foreach (var instruction in Il.Walk(body.Il))
+        {
+            var found = IlStatements.Containing(body, assembly.Metadata, instruction.Offset);
+            Assert.NotNull(found);
+
+            var (from, to) = found!.Value;
+            Assert.InRange(instruction.Offset, from, to - 1);
+
+            // Both ends are where the stack is empty: the start because that is where a statement
+            // begins, the end because that is the next one's start.
+            Assert.Equal(0, stack.Delta(body.Il, 0, from, body.Method));
+            if (to < body.Il.Length)
+            {
+                Assert.Equal(0, stack.Delta(body.Il, 0, to, body.Method));
+            }
+
+            if (byStart.TryGetValue(from, out var already))
+            {
+                Assert.Equal(already, (from, to));
+            }
+            else
+            {
+                byStart[from] = (from, to);
+            }
+        }
+
+        // Several statements, covering the method end to end with no gaps.
+        Assert.True(byStart.Count > 3, $"only {byStart.Count} statements in a method with several");
+        var ordered = byStart.Values.OrderBy(s => s.From).ToList();
+        Assert.Equal(0, ordered[0].From);
+        Assert.Equal(body.Il.Length, ordered[^1].To);
+        for (int i = 1; i < ordered.Count; i++)
+        {
+            Assert.Equal(ordered[i - 1].To, ordered[i].From);
+        }
+    }
+
+    [Fact]
+    public void AnOffsetInsideAnInstructionIsNotAStatement()
+    {
+        using var assembly = ManagedAssembly.Load(CorePath);
+        var bodies = ManagedBodies.Build(assembly);
+        var member = TypeOf(assembly, "Spydate.Core.Text.AddressText").Members.First(m => m.Name == "ParseHex");
+        var body = bodies.Of((System.Reflection.Metadata.MethodDefinitionHandle)member.Handle)!;
+
+        // An operand byte is not a place. Answering for one would hand the stepper a range starting
+        // mid-instruction, and the runtime would either refuse it or step from somewhere nobody
+        // asked about.
+        var multiByte = Il.Walk(body.Il).First(i => i.Length > 1);
+        Assert.Null(IlStatements.Containing(body, assembly.Metadata, multiByte.Offset + 1));
+
+        // Past the end is not a place either.
+        Assert.Null(IlStatements.Containing(body, assembly.Metadata, body.Il.Length));
+    }
+
+    [Fact]
+    public void NoAddressIsWrittenAgainstTwoLines()
+    {
+        var image = PeImage.Load(CorePath);
+        using var assembly = ManagedAssembly.Load(CorePath);
+        var bodies = ManagedBodies.Build(assembly);
+
+        foreach (var type in assembly.Namespaces.SelectMany(n => n.Types).Take(20))
+        {
+            var source = assembly.Decompiler.SourceForType(type);
+            var written = ManagedDecompiler.Addressed(source, bodies, image.ImageBase)
+                .Split('\n')
+                .Select(AddressText.FromLine)
+                .Where(a => a is not null)
+                .ToList();
+
+            // A switch's case labels are all attributed to the switch instruction — nothing runs
+            // when a label is reached — and several expressions on different lines routinely share
+            // one statement. Eighteen lines carrying one address meant a click beside any of them
+            // set a breakpoint several lines above, on the `switch`.
+            Assert.Equal(written.Count, written.Distinct().Count());
+        }
+    }
+
+    [Fact]
     public void AMethodWithNoBodyIsLeftAloneRatherThanGuessedAt()
     {
         using var assembly = ManagedAssembly.Load(CorePath);

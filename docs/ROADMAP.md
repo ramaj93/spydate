@@ -245,6 +245,17 @@ native side already reads it, because native is what it is.
   offset must sit at an instruction boundary or the line carries no address at all. The address goes
   in a trailing comment, the way pseudo-C has always done it, so the margin, the caret and the
   execution arrow all work without learning anything new.
+  Stepping moves a C# statement, not an IL instruction. A statement is the run of IL between two
+  points where the evaluation stack is empty — that is what the language guarantees and what the JIT
+  records — so the range needs no decompiler and no symbols, only the IL both the debugger and the
+  reader are looking at. `StepRange` over that range lands on the next statement; over one
+  instruction it lands on the next instruction, which is what `Step one IL instruction` (Ctrl+F11)
+  still does for anyone reading the IL view. A Debug build's `nop` between statements is not a
+  boundary, or every second press moved a single byte onto the line the reader was already expecting.
+  A stop is shown in the C# of the method it is in, never as a native listing: those bytes are IL,
+  and disassembling them produced a page of invented x86 on every step. The execution arrow is placed
+  by nearest-preceding line, so a `for` header — three statements in IL, one line on screen — keeps
+  the arrow on the `for` rather than blanking it for two presses out of three.
   Still to do: multiple threads and frames beyond the innermost, setting values, and evaluation.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,

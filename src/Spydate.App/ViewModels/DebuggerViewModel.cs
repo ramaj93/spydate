@@ -8,6 +8,7 @@ using Spydate.App.Services;
 using Spydate.Core.Project;
 using Spydate.Debugger;
 using Spydate.Debugger.Managed;
+using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 
 namespace Spydate.App.ViewModels;
@@ -510,7 +511,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         Resuming();
-        if (_managed is { } into && into.Step(into: true) is { } refused)
+        if (_managed is not null && StepStatement(into: true) is { } refused)
         {
             Add(refused);
             return;
@@ -530,7 +531,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         Resuming();
-        if (_managed is { } over && over.Step(into: false) is { } declined)
+        if (_managed is not null && StepStatement(into: false) is { } declined)
         {
             Add(declined);
             return;
@@ -1198,6 +1199,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         StepInstructionCommand.NotifyCanExecuteChanged();
         StepOverCommand.NotifyCanExecuteChanged();
         StepOutCommand.NotifyCanExecuteChanged();
+        StepIlCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(CanPauseNow));
     }
 
@@ -1316,7 +1318,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         Resuming();
-        if (session.Step(into) is { } problem)
+        if (StepStatement(into) is { } problem)
         {
             Add(problem);
             return problem;
@@ -1378,6 +1380,86 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         SyncManaged();
         return problem;
+    }
+
+    /// <summary>
+    /// One IL instruction, for reading the IL view.
+    ///
+    /// Kept as a command of its own because the ordinary steps became statement steps, and a
+    /// statement is several instructions. Somebody reading the IL listing wants to watch the stack
+    /// being built up, which is exactly what a statement step hides.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanStepIl))]
+    private void StepIl()
+    {
+        if (_managed is not { } session || !IsStopped)
+        {
+            return;
+        }
+
+        Resuming();
+        if (session.Step(into: true) is { } problem)
+        {
+            Add(problem);
+            return;
+        }
+
+        State = DebugState.Running;
+        NotifyCommands();
+    }
+
+    private bool CanStepIl() => IsStopped && IsManaged;
+
+    /// <summary>
+    /// Steps one C# statement, into a call or over it.
+    ///
+    /// A statement rather than an IL instruction, because a statement is what the reader is looking
+    /// at. <c>builder.Logging.ClearProviders();</c> is five instructions — a receiver pushed, a
+    /// property fetched, a call, a result discarded — and stepping through them one at a time shows
+    /// five stops on the same line, which reads as a debugger that is barely moving.
+    ///
+    /// Where the statement ends is worked out here rather than in the session, which has the IL and
+    /// no way to read a signature. When it cannot be worked out — a frame in another assembly, a
+    /// method whose signatures will not read — the session falls back to one instruction on its own,
+    /// which moves a little rather than not at all.
+    /// </summary>
+    private string? StepStatement(bool into)
+    {
+        if (_managed is not { } session)
+        {
+            return "this is not a .NET process";
+        }
+
+        return Statement(session.StoppedAt) is { } range
+            ? session.Step(into, range.From, range.To)
+            : session.Step(into);
+    }
+
+    /// <summary>The IL range of the statement it is stopped in, when the stop is in the open file.</summary>
+    private (uint From, uint To)? Statement(ManagedLocation? at)
+    {
+        if (at is null || _workspace.Current is not { } binary
+            || binary.Bodies is not { } bodies || binary.Managed is not { } managed)
+        {
+            return null;
+        }
+
+        // Only for the binary on screen. A stop in a framework assembly is a real stop and the
+        // debugger keeps working there — it simply has no IL of that method to measure.
+        if (!string.Equals(at.Module, binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var handle = System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(at.MethodToken & 0x00FFFFFF));
+        if (bodies.Of(handle) is not { } body)
+        {
+            return null;
+        }
+
+        return IlStatements.Containing(body, managed.Metadata, (int)at.Offset) is { } span
+            ? ((uint)span.From, (uint)span.To)
+            : null;
     }
 
     /// <summary>Moves the dot in the listing to match a breakpoint set or cleared from elsewhere.</summary>

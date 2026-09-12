@@ -183,6 +183,54 @@ public class ManagedDebuggerTests
     }
 
     [Fact]
+    public void SteppingAStatementSkipsTheInstructionsInsideIt()
+    {
+        if (Target is not { } target)
+        {
+            return;
+        }
+
+        // What a reader means by "step". PeImage.Load's statements are several instructions each —
+        // a path pushed, a call made, a result stored — and stepping one instruction at a time shows
+        // four stops on the same line of C#. Stepping the statement's whole range lands on the next
+        // statement, which is the line beneath the one being read.
+        uint token = TokenOf("Spydate.Core.PE.PeImage", "Load");
+
+        using var assembly = Spydate.Decompiler.Managed.ManagedAssembly.Load(typeof(Spydate.Core.PE.PeImage).Assembly.Location);
+        var bodies = Spydate.Decompiler.Managed.ManagedBodies.Build(assembly);
+        var body = bodies.Of(System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(token & 0xFFFFFF)))!;
+
+        using var session = Headless();
+        Assert.Null(session.Start(target, arguments: @"C:\Windows\System32\where.exe", holdAtStart: true));
+        Assert.Null(session.SetBreakpoint("Spydate.Core.dll", token));
+        session.Continue();
+
+        Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(40)), string.Join("\n", session.Recent.TakeLast(8)));
+
+        var walked = new List<uint> { session.StoppedAt!.Offset };
+        for (int i = 0; i < 3; i++)
+        {
+            var statement = Spydate.Decompiler.Managed.IlStatements.Containing(body, assembly.Metadata, (int)session.StoppedAt!.Offset);
+            Assert.NotNull(statement);
+
+            Assert.Null(session.Step(into: false, (uint)statement!.Value.From, (uint)statement.Value.To));
+            Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(20)), $"step {i + 1} never landed");
+            Assert.Equal(token, session.StoppedAt!.MethodToken);
+
+            // Where the statement said it would end. Not "somewhere after here": a step that
+            // overshot would be stepping over the next statement as well, which reads as lines
+            // being skipped.
+            Assert.Equal((uint)statement.Value.To, session.StoppedAt.Offset);
+            walked.Add(session.StoppedAt.Offset);
+        }
+
+        // And it moved further than an instruction at a time would have. If each of these were one
+        // instruction, three steps could not cover this much of the method.
+        string trail = string.Join(" -> ", walked.Select(o => $"IL_{o:X4}"));
+        Assert.True(walked[^1] - walked[0] > 6, "three statement steps moved less than a few instructions: " + trail);
+    }
+
+    [Fact]
     public void AStoppedFrameSaysWhatItsArgumentsActuallyAre()
     {
         if (Target is not { } target)

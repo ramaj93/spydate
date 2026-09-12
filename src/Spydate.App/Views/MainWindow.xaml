@@ -36,6 +36,7 @@
         <KeyBinding Key="F10" Command="{Binding Debugger.StepOverCommand}" />
         <KeyBinding Key="F10" Modifiers="Control" Command="{Binding RunToCursorCommand}" />
         <KeyBinding Key="F11" Command="{Binding Debugger.StepInstructionCommand}" />
+        <KeyBinding Key="F11" Modifiers="Control" Command="{Binding Debugger.StepIlCommand}" />
         <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Debugger.StopDebuggingCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
@@ -158,7 +159,10 @@
                               ToolTip="Stops it where it is, without ending it" />
                     <MenuItem Header="Step _over" InputGestureText="F10" Command="{Binding Debugger.StepOverCommand}"
                               ToolTip="Runs a call to completion instead of stepping into it" />
-                    <MenuItem Header="Step one _instruction" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}" />
+                    <MenuItem Header="Step _into" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}"
+                              ToolTip="One statement, stopping inside any call it makes. One machine instruction, for a native process." />
+                    <MenuItem Header="Step one I_L instruction" InputGestureText="Ctrl+F11" Command="{Binding Debugger.StepIlCommand}"
+                              ToolTip="One IL instruction, for reading the IL view. .NET processes only." />
                     <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding RunToCursorCommand}" />
                     <Separator />
                     <MenuItem Header="_Test patch live…" InputGestureText="Ctrl+Shift+P" Command="{Binding TestPatchLiveCommand}"

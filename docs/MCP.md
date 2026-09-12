@@ -114,6 +114,10 @@ effect in the process that is already running. `start` always holds the process 
 managed code, because that is the only moment a breakpoint is certainly in place before the code it
 is about; one `continue` lets it go.
 
+`step` and `step_over` move one C# statement rather than one IL instruction — the run of IL between
+two points where the evaluation stack is empty — so a stop is a place in the program rather than a
+place in the middle of an expression.
+
 `debug_state` reports where it stopped as a method and an IL offset, with a word for whether that
 offset is exact — a frame in a prologue or in code the JIT reordered maps approximately — and then
 the frame's arguments and locals as typed values. That last part is the reason for the whole

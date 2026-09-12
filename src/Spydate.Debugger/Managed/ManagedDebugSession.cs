@@ -599,9 +599,22 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// Null when the step was armed. It is reported as complete through the usual stop, so a caller
     /// waits on <see cref="WaitUntilStopped"/> exactly as it would for a breakpoint.
     /// </summary>
-    public string? Step(bool into = true) => Interop(() => StepCore(into));
+    public string? Step(bool into = true) => Interop(() => StepCore(into, null));
 
-    private string? StepCore(bool into)
+    /// <summary>
+    /// Runs until execution leaves an IL range, stepping into calls made inside it or over them.
+    ///
+    /// The range is what turns this from stepping IL into stepping the program. One statement is
+    /// several instructions — a receiver pushed, arguments pushed, a call, a result stored — and a
+    /// reader who steps through them one at a time is shown four stops that are all the same line.
+    /// Which offsets bound a statement is not this type's business to work out: it has the IL of the
+    /// method it is stopped in and no way to read a signature, so the caller says.
+    /// </summary>
+    /// <param name="from">First IL offset of the range.</param>
+    /// <param name="to">One past its last, which is where the step lands.</param>
+    public string? Step(bool into, uint from, uint to) => Interop(() => StepCore(into, (from, to)));
+
+    private string? StepCore(bool into, (uint From, uint To)? over)
     {
         ICorDebugThread? thread;
         lock (_gate)
@@ -621,7 +634,12 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         Retire();
 
-        uint from = StoppedAt?.Offset ?? 0;
+        uint at = StoppedAt?.Offset ?? 0;
+
+        // One instruction when nobody said otherwise. A caller that cannot work out where the
+        // statement ends — code in another assembly, a method whose signatures will not read — is
+        // better served by a step that moves a little than by one that refuses to move at all.
+        var (from, to) = over ?? (at, at + 1);
 
         int hr = thread.CreateStepper(out var stepper);
         if (hr < 0 || stepper is null)
@@ -638,13 +656,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         // stepping the JIT's output. Step() moves one machine instruction, and one IL instruction is
         // usually several of those — so three steps from IL_0001 reported complete three times
         // without the IL offset ever changing, which reads as a debugger that will not move.
-        // StepRange runs until execution leaves the range, so a range of exactly this offset is
-        // exactly one IL instruction however many machine instructions that turned out to be.
+        // StepRange runs until execution leaves the range, whatever that range is: one instruction
+        // wide steps IL, a statement wide steps the program.
         IntPtr range = Marshal.AllocCoTaskMem(sizeof(uint) * 2);
         try
         {
             Marshal.WriteInt32(range, 0, (int)from);
-            Marshal.WriteInt32(range, sizeof(uint), (int)from + 1);
+            Marshal.WriteInt32(range, sizeof(uint), (int)to);
             hr = stepper.StepRange(into ? 1 : 0, range, 1);
         }
         finally

@@ -174,6 +174,26 @@ public sealed partial class MainViewModel : ObservableObject
     /// </summary>
     private void ShowWhereItStopped(ulong va)
     {
+        // A .NET stop is inside a method body, and those bytes are IL. Handing them to the
+        // disassembler produces a page of plausible-looking x86 — `add dh, [edx+1]`, `call far` —
+        // invented from bytes that are nothing of the sort, and that is what the window used to do
+        // on every step: leave the C# the reader was stepping through and open a fabricated native
+        // listing named after the address. The method the reader is in is the right answer, and it
+        // is usually the tab they are already looking at.
+        if (Managed(va) is { } member)
+        {
+            OpenTarget(member);
+            return;
+        }
+
+        if (Binary is { Managed: not null })
+        {
+            // Somewhere in a .NET file with no method of its own — compiler-generated code whose
+            // declaring type is not listed, or a stop the body index does not cover. Staying put
+            // beats opening a listing of something that is not machine code.
+            return;
+        }
+
         if (Binary?.Analysis is { } analysis && analysis.FunctionContaining(va) is { } function)
         {
             OpenTarget(new DisassemblyTarget(function.EntryVa, NameOf(function.EntryVa)));
@@ -181,6 +201,30 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         OpenTarget(new DisassemblyTarget(va, NameOf(va)));
+    }
+
+    /// <summary>The member whose IL covers an address, when the open file is a .NET assembly.</summary>
+    private ManagedMemberTarget? Managed(ulong va)
+    {
+        if (Binary is not { Managed: { } managed, Bodies: { } bodies } binary
+            || binary.Image.VaToRva(va) is not { } rva
+            || bodies.At(rva) is not { } body)
+        {
+            return null;
+        }
+
+        foreach (var type in managed.Namespaces.SelectMany(n => n.Types))
+        {
+            foreach (var member in type.Members)
+            {
+                if (member.Handle == body.Method)
+                {
+                    return new ManagedMemberTarget(type, member);
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Runs until the caret, without leaving a breakpoint behind.</summary>

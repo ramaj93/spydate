@@ -180,20 +180,33 @@ function Invoke-Menu {
 
     $top = Find-Element $Ui MenuItem $Menu
     if ($null -eq $top) { throw "no '$Menu' menu" }
-    $top.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-    Start-Sleep -Milliseconds 900
 
-    foreach ($i in 1..20) {
-        $all = $script:A::RootElement.FindAll($script:Scope,
-            [System.Windows.Automation.PropertyCondition]::new(
-                $script:A::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem))
-        foreach ($m in $all) {
-            if ($m.Current.Name -like "$Item*") {
-                $m.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-                return
+    # Three attempts, each starting by closing whatever is open. Driving the same menu twice in a
+    # row is where this goes wrong: the previous popup may still be up, and expanding then toggles
+    # it shut instead of open, so the item is looked for in a menu that is not there.
+    foreach ($attempt in 1..3) {
+        [void][SpydateWin]::SetForegroundWindow($Ui.Handle)
+        [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+        Start-Sleep -Milliseconds 400
+
+        $top.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+        Start-Sleep -Milliseconds 900
+
+        foreach ($i in 1..10) {
+            $all = $script:A::RootElement.FindAll($script:Scope,
+                [System.Windows.Automation.PropertyCondition]::new(
+                    $script:A::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem))
+            foreach ($m in $all) {
+                if ($m.Current.Name -like "$Item*") {
+                    # A disabled item is not a failure to find it, and saying which it was beats
+                    # an ElementNotEnabledException from somewhere inside UIA.
+                    if (-not $m.Current.IsEnabled) { throw "'$Item' is disabled" }
+                    $m.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+                    return
+                }
             }
+            Start-Sleep -Milliseconds 300
         }
-        Start-Sleep -Milliseconds 300
     }
     throw "no '$Item' in the '$Menu' menu"
 }

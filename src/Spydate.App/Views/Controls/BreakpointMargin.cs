@@ -32,6 +32,24 @@ public sealed class BreakpointMargin : AbstractMargin
 
     protected override Size MeasureOverride(Size availableSize) => new(StripWidth, 0);
 
+    private LineAddressMap _map = LineAddressMap.Empty;
+    private int _mapped = -1;
+
+    /// <summary>
+    /// The document's addresses, rebuilt only when the text changes. Rendering happens on every
+    /// scroll and every caret move; parsing a few thousand lines each time would be felt.
+    /// </summary>
+    private LineAddressMap Map(ICSharpCode.AvalonEdit.Document.TextDocument document)
+    {
+        if (_mapped != document.Version?.GetHashCode())
+        {
+            _map = LineAddressMap.Build(document.Text);
+            _mapped = document.Version?.GetHashCode() ?? -1;
+        }
+
+        return _map;
+    }
+
     protected override void OnRender(DrawingContext drawingContext)
     {
         ArgumentNullException.ThrowIfNull(drawingContext);
@@ -48,6 +66,15 @@ public sealed class BreakpointMargin : AbstractMargin
         var breakpoints = _editor.BreakpointAddresses;
         ulong? current = _editor.ExecutionAddress;
 
+        // Which line the arrow belongs on, asked of the whole document rather than matched against
+        // each line as it is drawn. Most stops have a line of their own and the two agree; the ones
+        // that do not are the reason this exists. A `for` header is three statements in IL — the
+        // initialiser, the condition compiled after the body, the increment — and only the first of
+        // them has a line to itself, so stepping round a loop used to blank the arrow for two
+        // presses out of three. The last line at or before the address is the statement that
+        // instruction ended up inside, which is what the reader means by "where it is".
+        int? arrow = current is { } stopped ? Map(Document).LineFor(stopped) : null;
+
         foreach (var line in view.VisualLines)
         {
             ulong? address = AddressText.FromLine(Document.GetText(line.FirstDocumentLine.Offset, line.FirstDocumentLine.Length));
@@ -58,7 +85,7 @@ public sealed class BreakpointMargin : AbstractMargin
 
             double middle = line.GetTextLineVisualYPosition(line.TextLines[0], VisualYPosition.TextMiddle) - view.VerticalOffset;
 
-            if (current == va)
+            if (arrow == line.FirstDocumentLine.LineNumber)
             {
                 // The instruction about to run, called out before the breakpoint on the same line:
                 // where execution actually is matters more than what put it there.

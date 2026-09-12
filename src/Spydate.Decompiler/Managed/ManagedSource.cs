@@ -54,8 +54,7 @@ internal static class SequencePoints
         var recorder = new Recorder(output);
         tree.AcceptVisitor(new CSharpOutputVisitor(recorder, settings.CSharpFormattingOptions));
 
-        var lines = recorder.Lines.Values.ToList();
-        lines.Sort((a, b) => a.Line.CompareTo(b.Line));
+        var lines = recorder.Lines.Values.OrderBy(l => l.Line).ToList();
         return new ManagedSource(output.ToString(), lines);
     }
 
@@ -149,6 +148,8 @@ internal static class SequencePoints
         }
 
         var addresses = new Dictionary<int, ulong>();
+        var taken = new HashSet<ulong>();
+
         foreach (var line in source.Lines)
         {
             var handle = MetadataTokens.MethodDefinitionHandle((int)(line.MethodToken & 0x00FFFFFF));
@@ -171,7 +172,20 @@ internal static class SequencePoints
                 continue;
             }
 
-            addresses[line.Line] = imageBase + body.RvaOf(offset);
+            ulong va = imageBase + body.RvaOf(offset);
+
+            // One line per place. A switch's case labels are all attributed to the switch
+            // instruction — nothing runs when a label is reached — and several expressions on
+            // different lines can share a statement, so eighteen lines came back carrying one
+            // address and a click beside any of them set a breakpoint on the `switch` several lines
+            // above. The first line to claim a place keeps it; for the rest there is nowhere the
+            // program can be, and saying so by writing nothing is the honest answer.
+            if (!taken.Add(va))
+            {
+                continue;
+            }
+
+            addresses[line.Line] = va;
         }
 
         var sb = new StringBuilder();
@@ -205,62 +219,20 @@ internal static class SequencePoints
     }
 
     /// <summary>
-    /// Where the statement containing an offset begins: the nearest point at or before it at which
-    /// the evaluation stack is empty.
+    /// Where the statement containing an offset begins.
     ///
     /// This is the difference between a breakpoint and a breakpoint that is quietly refused. The
-    /// runtime will only bind one where the stack is empty, because that is where the JIT's
-    /// IL-to-native map has entries, and what ILSpy hands back is the offset of the expression a
-    /// line was made from rather than of the statement holding it. So
+    /// runtime will only bind one where the evaluation stack is empty, because that is where the
+    /// JIT's IL-to-native map has entries, and what ILSpy hands back is the offset of the expression
+    /// a line was made from rather than of the statement holding it. So
     /// <c>builder.Logging.ClearProviders();</c> came back as the <c>ldfld</c> that loads
     /// <c>Logging</c> — one instruction after a <c>ldarg.0</c> that had already pushed <c>this</c> —
     /// and the runtime answered with <c>BreakpointSetError</c>, which arrives asynchronously long
     /// after the call that created it said yes. Walking back to the empty stack lands on the
     /// <c>ldarg.0</c>, which is where the statement really starts.
-    ///
-    /// Null when the walk cannot be trusted that far — an unreadable signature means the depth after
-    /// it is unknown, and a guess here is a breakpoint in the middle of an expression.
     /// </summary>
     private static int? Statement(ManagedBody body, MetadataReader metadata, int target)
-    {
-        var stack = new IlStack(metadata);
-        int depth = 0;
-        int empty = 0;
-
-        foreach (var instruction in Il.Walk(body.Il))
-        {
-            if (instruction.Offset > target)
-            {
-                break;
-            }
-
-            if (depth == 0)
-            {
-                empty = instruction.Offset;
-            }
-
-            if (instruction.Offset == target)
-            {
-                return empty;
-            }
-
-            if (stack.Delta(instruction, body.Il, body.Method) is not { } delta)
-            {
-                return null;
-            }
-
-            // A depth that has gone negative means the walk has lost its place — a branch landed
-            // somewhere this straight-line reading did not account for — and every offset after it
-            // is a guess.
-            depth += delta;
-            if (depth < 0)
-            {
-                return null;
-            }
-        }
-
-        return null;
-    }
+        => IlStatements.Containing(body, metadata, target)?.From;
 
     /// <summary>How wide a line is once tabs are expanded, which is what the reader sees.</summary>
     private static int Width(string line)

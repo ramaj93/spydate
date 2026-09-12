@@ -330,6 +330,14 @@ dbgshim is still needed for is the runtime-startup handshake, which is the part 
 documented contract. The launch keeps the process handle, so a target whose runtime never publishes
 itself can still be killed.
 
+**A statement is the IL between two empty evaluation stacks, and that is what a step moves.** It
+needs no decompiler and no symbols: an empty stack is where the language says a statement may end
+and where the JIT's IL-to-native map has entries, which is also why a breakpoint binds nowhere else.
+So `ManagedDebugSession.Step` takes a range and the caller — which has the metadata to read a
+signature — says what the range is; one instruction wide steps IL, a statement wide steps the
+program. The session falls back to one instruction when nobody can say, which is the honest answer
+for a frame in an assembly that is not open.
+
 **A line of decompiled C# is addressed by the decompiler, not by a PDB.** Sequence points in a
 portable PDB map IL offsets onto lines of a source file, and the C# on screen is not that file — it
 was produced from the IL a moment ago and exists nowhere else. So the mapping comes from ILSpy's own
