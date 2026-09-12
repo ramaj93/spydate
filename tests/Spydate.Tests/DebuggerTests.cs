@@ -12,6 +12,7 @@ namespace Spydate.Tests;
 /// Nothing here runs anything from the corpus, and nothing runs anything that outlives the test.
 /// </summary>
 [SupportedOSPlatform("windows")]
+[Collection(Debugging.Name)]
 public sealed class DebuggerTests
 {
     private static readonly string Trivial = Path.Combine(

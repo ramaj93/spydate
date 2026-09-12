@@ -154,7 +154,17 @@ public static class ManagedTargets
         int mark = text.IndexOf("::", StringComparison.Ordinal);
         if (mark > 0)
         {
-            return InType(index, text[..mark], text[(mark + 2)..].Trim(), text);
+            string owner = text[..mark];
+            var named = InType(index, owner, text[(mark + 2)..].Trim(), text);
+            if (named.Found || named.Problem is not null)
+            {
+                return named;
+            }
+
+            // The separator said which half is the type, so the failure can be about that half
+            // rather than about the whole string. Asking "did you mean PeImage" of
+            // "Namespace.PeImagg::Load" finds nothing; asking it of "Namespace.PeImagg" finds it.
+            return ManagedTarget.Failed($"'{owner}' is not a type in this assembly{Near(index, owner)}");
         }
 
         // A dot could be the last namespace separator or the one before a member name. The search

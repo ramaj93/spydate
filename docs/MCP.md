@@ -104,6 +104,23 @@ computed, and a mismatch is refused with the number of values it is out by, so t
 message. Depth only: a patch that removes a call says so, because removing
 `call uint8[] ReadAllBytes(string)` is depth-neutral and still will not verify. `force` overrides.
 
+`debug_run`, `debug_break` and `debug_state` drive the CLR debugger rather than the process when the
+open binary is a .NET assembly — the same four verbs, taking different things. A breakpoint is a
+method: `debug_break(target="Namespace.Type::Method")`, or `Type::Method+IL_7` for an offset into
+it, resolved by the same names `read_function` takes. It works before the module it is in has
+loaded, which is the normal case. `start` always holds the process before it runs any managed code,
+because that is the only moment a breakpoint is certainly in place before the code it is about; one
+`continue` lets it go.
+
+`debug_state` reports where it stopped as a method and an IL offset, with a word for whether that
+offset is exact — a frame in a prologue or in code the JIT reordered maps approximately — and then
+the frame's arguments and locals as typed values. That last part is the reason for the whole
+exercise: a native stop reports registers and leaves you to work out which one is the path being
+opened, and this reports the path. `debug_memory` is refused with the reason, because a listing
+address in an IL-only assembly names a byte of IL in the file and the bytes at that address in the
+process belong to something else. `pause` and `run_to` are named as not implemented rather than
+quietly doing nothing.
+
 `get_overview` describes the assembly as an assembly: full name, target framework, entry point,
 type and member counts, what it references. It also says which of the file's two readings is about
 the program. For an IL-only assembly the native lines above it describe the CLR loader stub, and

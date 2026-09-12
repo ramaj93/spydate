@@ -205,8 +205,14 @@ native side already reads it, because native is what it is.
   normal case — stops reported as a method and an IL offset with a word for whether that offset is
   exact, stepping one IL instruction at a time (in, over, out), locals and arguments read as typed
   values, continue, and terminate. `ManagedDebugSession` is a second `IDebugControl`, as planned.
-  Still to do: the panel and the MCP surface, multiple threads and frames beyond the innermost,
-  setting values, and evaluation.
+  It is wired into both front ends. The four `debug_*` tools drive it when the open binary is
+  managed, taking a method rather than an address and reporting the frame's values rather than
+  registers; no new tool, on the usual reasoning. The Debug panel swaps its "Threads &amp; registers"
+  pane for a **Locals** pane and grows a step-out button, and the assistant drives the same session
+  the analyst is watching, as it always has for native.
+  Still to do: multiple threads and frames beyond the innermost, setting values, evaluation, and
+  breakpoints set from the window's IL view — which needs the addressed IL listing wiring into the
+  document, deliberately left out until there was a debugger that could honour one.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable

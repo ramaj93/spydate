@@ -46,7 +46,7 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_run")]
-    [Description("Move a debugged process: start, stop, continue, pause, step, step_over, run_to, wait. \"wait\" waits for the next stop without moving it - a DLL runs only once its host loads it. Reports where it got.")]
+    [Description("Move a debugged process: start, stop, continue, pause, step, step_over, step_out, run_to, wait. \"wait\" waits for the next stop without moving it - a DLL runs only once its host loads it. Reports where it got.")]
     public string Run(
         [Description("One of the actions above.")] string action,
         [Description("Address, sub_XXXX or a name. Only for run_to.")] string? target = null,
@@ -55,6 +55,11 @@ public sealed class DebugTools
         if (Refusal() is { } refused)
         {
             return refused;
+        }
+
+        if (_store.ManagedDebug is { } managed)
+        {
+            return ManagedDebugging.Run(managed, action);
         }
 
         var debug = _store.Debug!;
@@ -197,14 +202,19 @@ public sealed class DebugTools
             : "\n\nwhat it has done:\n" + string.Join("\n", snapshot.Recent.Select(line => $"  {line}"));
 
     [McpServerTool(Name = "debug_break")]
-    [Description("Set or clear a breakpoint at a listing address. Works before anything runs, and on a DLL before its host loads it.")]
+    [Description("Set or clear a breakpoint at a listing address, or in .NET at Type::Method or Type::Method+IL_7. Works before anything runs, and before the module it is in loads.")]
     public string Break(
-        [Description("Address, sub_XXXX, or an existing name.")] string target,
+        [Description("Address, sub_XXXX, an existing name, or a .NET method.")] string target,
         [Description("True to set it, false to clear it.")] bool on = true)
     {
         if (Refusal() is { } refused)
         {
             return refused;
+        }
+
+        if (_store.ManagedDebug is { } managed)
+        {
+            return ManagedDebugging.Break(_store.Current!, managed, target, on);
         }
 
         if (Address(target) is not { } va)
@@ -224,6 +234,11 @@ public sealed class DebugTools
         if (Refusal() is { } refused)
         {
             return refused;
+        }
+
+        if (_store.ManagedDebug is { } managed)
+        {
+            return ManagedDebugging.Describe(managed.Snapshot());
         }
 
         var debug = _store.Debug!;
@@ -261,6 +276,15 @@ public sealed class DebugTools
             return refused;
         }
 
+        if (_store.ManagedDebug is not null)
+        {
+            // Refused rather than approximated. In an IL-only assembly a listing address names a
+            // byte of IL in the file, and the bytes at that address in the process are the JIT's
+            // output for something else entirely. What a managed stop holds is in debug_state.
+            return "this is a .NET process, where a listing address names IL in the file rather than "
+                   + "anything in the running program. debug_state reports what the stopped frame holds.";
+        }
+
         if (Address(target) is not { } va)
         {
             return $"could not work out an address from \"{target}\"";
@@ -293,7 +317,7 @@ public sealed class DebugTools
                    + "or use the assistant panel in the window.";
         }
 
-        if (_store.Debug is null)
+        if (_store.Debug is null && _store.ManagedDebug is null)
         {
             return "this host has no debugger to drive.";
         }

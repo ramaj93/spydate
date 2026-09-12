@@ -19,6 +19,15 @@ public sealed class SessionStore : IDisposable
     /// </summary>
     public IDebugControl? Debug { get; set; }
 
+    /// <summary>
+    /// The debugger for a .NET process, when the host offers one and the open binary is managed.
+    ///
+    /// Never both this and <see cref="Debug"/> at once for the same program: ICorDebug takes the
+    /// native debug port and means to be the only debugger attached. Which one a host supplies is
+    /// decided by what was opened, and the tools answer with whichever is there.
+    /// </summary>
+    public IManagedDebugControl? ManagedDebug { get; set; }
+
     /// <summary>Replaces whatever was open. The previous session is disposed once nothing is using it.</summary>
     public async Task<BinarySession> OpenAsync(Func<BinarySession> open, CancellationToken cancellationToken)
     {

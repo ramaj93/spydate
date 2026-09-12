@@ -436,6 +436,18 @@
                                                     AutomationProperties.Name="Step one instruction">
                                                 <ui:SymbolIcon Symbol="ArrowStepIn20" />
                                             </Button>
+                                            <!-- Managed only, and not an oversight on the native
+                                                 side: stepping out of a native function means
+                                                 knowing where its return address is, which is a
+                                                 question about an unwinding convention rather than
+                                                 about the program. The runtime already knows. -->
+                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
+                                                    Command="{Binding StepOutCommand}"
+                                                    Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                    ToolTip="Step out — run to the end of this method"
+                                                    AutomationProperties.Name="Step out">
+                                                <ui:SymbolIcon Symbol="ArrowStepOut20" />
+                                            </Button>
                                             <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
                                                     Command="{Binding StopDebuggingCommand}"
                                                     ToolTip="Stop, which ends the process (Shift+F5)"
@@ -458,10 +470,22 @@
 
                                             <!-- Tabs on the same row as the actions, so the panes
                                                  below get the whole of the height there is. -->
+                                            <!-- One of these two is showing at a time, decided by
+                                                 what was opened. Registers and stack words are what
+                                                 a native stop has to say; a managed stop has the
+                                                 frame's own values, which is the same question
+                                                 answered by something that knows the answer. -->
                                             <RadioButton x:Name="PaneThreads" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" IsChecked="True"
                                                          Content="Threads &amp; registers"
+                                                         Visibility="{Binding ShowsRegisters, Converter={StaticResource BoolToVisibility}}"
                                                          AutomationProperties.Name="Threads and registers" />
+                                            <RadioButton x:Name="PaneLocals" DockPanel.Dock="Left"
+                                                         Style="{StaticResource StripTab}" Content="Locals"
+                                                         IsChecked="{Binding IsManaged, Mode=OneWay}"
+                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         ToolTip="Arguments and locals of the frame it stopped in"
+                                                         AutomationProperties.Name="Locals pane" />
                                             <RadioButton x:Name="PaneModules" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Modules"
                                                          AutomationProperties.Name="Modules pane" />
@@ -560,6 +584,23 @@
                                                 </DataGrid.Columns>
                                             </DataGrid>
                                         </Grid>
+
+                                        <!-- What the stopped frame is holding, which is the thing the
+                                             native debugger cannot say. It can report rcx; this can
+                                             report the path being opened, because the runtime knows
+                                             what every slot is. -->
+                                        <DataGrid ItemsSource="{Binding Locals}" AutoGenerateColumns="False"
+                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  Visibility="{Binding IsChecked, ElementName=PaneLocals, Converter={StaticResource BoolToVisibility}}"
+                                                  AutomationProperties.Name="Locals and arguments">
+                                            <DataGrid.Columns>
+                                                <DataGridTextColumn Header="slot" Binding="{Binding Slot}"
+                                                                    Foreground="{DynamicResource Text.Tertiary}" />
+                                                <DataGridTextColumn Header="type" Binding="{Binding Kind}" />
+                                                <DataGridTextColumn Header="value" Binding="{Binding Value}" Width="*"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+                                            </DataGrid.Columns>
+                                        </DataGrid>
 
                                         <DataGrid ItemsSource="{Binding Modules}" AutoGenerateColumns="False"
                                                   IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"

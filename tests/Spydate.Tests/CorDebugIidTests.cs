@@ -16,6 +16,7 @@ namespace Spydate.Tests;
 /// expected ids out independently of the ones the code uses. A drift in either shows up here as a
 /// failing test rather than as a debugger that has quietly stopped reading strings.
 /// </summary>
+[Collection(Debugging.Name)]
 public class CorDebugIidTests
 {
     private const string Value = "CC7BCAF7-8A68-11D2-983C-0000F808342D";

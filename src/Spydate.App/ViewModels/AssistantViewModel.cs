@@ -578,7 +578,17 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         // all — and the analyst approved running it once. Debugging is allowed here for the same
         // reason: a person answers "run this binary?" and is watching the panel while it runs, which
         // is exactly what the stdio server has none of.
-        _session.Debug = new PanelDebugControl(_debugger);
+        // One or the other, never both: the two debuggers cannot attach to the same process, and
+        // which applies is decided by the file rather than by anything asked for here. Setting both
+        // would leave the tools choosing, and they would choose wrongly for a mixed-mode assembly.
+        if (binary.Image.ClrHeader?.IsILOnly == true)
+        {
+            _session.ManagedDebug = new PanelManagedDebugControl(_debugger);
+        }
+        else
+        {
+            _session.Debug = new PanelDebugControl(_debugger);
+        }
         var options = McpOptions.Default with { AllowDebug = true };
 
         _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, _earlier);

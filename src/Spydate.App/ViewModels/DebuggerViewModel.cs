@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.Core.Project;
 using Spydate.Debugger;
+using Spydate.Debugger.Managed;
 using Spydate.Disassembly;
 
 namespace Spydate.App.ViewModels;
@@ -17,6 +18,14 @@ public sealed record RegisterRow(string Name, string Value, bool Changed);
 
 /// <summary>One qword on the stack.</summary>
 public sealed record StackRow(string Address, string Value);
+
+/// <summary>
+/// One local or argument of a stopped managed frame, as it reads.
+///
+/// <paramref name="Kind"/> is the type the runtime says it is, which is the part that makes the
+/// value worth anything: 0x1F2A40 is a number, and "string" tells you it is somewhere to look.
+/// </summary>
+public sealed record SlotRow(string Slot, string Kind, string Value);
 
 /// <summary>
 /// One module the debuggee has loaded. <paramref name="IsTarget"/> marks the one the listing is
@@ -57,6 +66,7 @@ public sealed record LivePatchRow(uint Rva, ulong Va, string Was, string Now, st
 public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 {
     private readonly WorkspaceService _workspace;
+    private ManagedDebugSession? _managed;
     private readonly Func<string, string, bool> _confirm;
     private DebugSession? _session;
 
@@ -87,7 +97,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         WorkingDirectory = target?.WorkingDirectory ?? string.Empty;
         Modules.Clear();
         Threads.Clear();
+        Locals.Clear();
         OnPropertyChanged(nameof(NeedsHost));
+
+        // Which debugger applies is a fact about the file, so the panel rearranges itself when a
+        // different one is opened rather than when something is run.
+        OnPropertyChanged(nameof(IsManaged));
+        OnPropertyChanged(nameof(ShowsRegisters));
+        OnPropertyChanged(nameof(CanPause));
+        OnPropertyChanged(nameof(CanPauseNow));
     }
 
     /// <summary>
@@ -159,6 +177,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>Registers as of the last stop. Empty while it is running, because they would be a guess.</summary>
     public ObservableCollection<RegisterRow> Registers { get; } = new();
 
+    /// <summary>
+    /// The locals and arguments of a stopped managed frame.
+    ///
+    /// What replaces registers and stack words when the debuggee is .NET. They are not an addition
+    /// to those — they are the same question answered by something that knows the answer. A native
+    /// stop can say <c>rcx = 0x1F2A40</c>; this can say the path being opened.
+    /// </summary>
+    public ObservableCollection<SlotRow> Locals { get; } = new();
+
     /// <summary>The top of the stack as of the last stop.</summary>
     public ObservableCollection<StackRow> Stack { get; } = new();
 
@@ -190,6 +217,21 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>Whether the open binary cannot be started without a host being chosen first.</summary>
     public bool NeedsHost => _workspace.Current?.Image.IsDll == true && Host.Trim().Length == 0;
+
+    /// <summary>
+    /// Whether debugging this binary means driving the CLR rather than the process.
+    ///
+    /// Decided by the file, not by a setting: an IL-only assembly has no native code of its own to
+    /// stop in, and the two debuggers cannot both attach. A mixed-mode assembly stays native, where
+    /// its real machine instructions are.
+    /// </summary>
+    public bool IsManaged => _workspace.Current?.Image.ClrHeader?.IsILOnly == true;
+
+    /// <summary>Registers and stack words are worth showing only when there is native code.</summary>
+    public bool ShowsRegisters => !IsManaged;
+
+    /// <summary>Pausing and running to a cursor are native-only, so far.</summary>
+    public bool CanPause => !IsManaged;
 
     /// <summary>The processor flags, spelled out. "ZF 1 CF 0" is read; 0x246 is decoded.</summary>
     [ObservableProperty]
@@ -227,6 +269,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public bool IsStopped => State == DebugState.Stopped;
 
     public bool IsRunning => State == DebugState.Running;
+
+    /// <summary>Pausing is native-only so far, so the button says so by being off.</summary>
+    public bool CanPauseNow => IsRunning && CanPause;
 
     /// <summary>Raised when a breakpoint is set or cleared, so listings can redraw their markers.</summary>
     public event EventHandler? BreakpointsChanged;
@@ -273,6 +318,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             Status = "That host program is not there.";
             Add($"the host {host} does not exist");
+            return;
+        }
+
+        if (IsManaged)
+        {
+            StartManaged(binary, path);
             return;
         }
 
@@ -334,6 +385,49 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
+    /// <summary>
+    /// Runs a .NET assembly under the CLR debugging interface.
+    ///
+    /// Held before it runs anything, always. That is the only moment at which a breakpoint is
+    /// certainly in place before the code it is about, and it costs nothing: the panel comes up
+    /// stopped and one click on continue lets it go.
+    /// </summary>
+    private void StartManaged(OpenedBinary binary, string path)
+    {
+        if (!_confirm(
+                "Run this binary?",
+                $"{binary.DisplayName} will be started on this machine under the .NET debugger and "
+                + "will do whatever it does.\n\nEverything else in Spydate only reads the file. Debug "
+                + "it in a virtual machine if you do not know what it is.\n\nStart it?"))
+        {
+            return;
+        }
+
+        var session = new ManagedDebugSession();
+        session.Reported += OnManagedReported;
+        _managed = session;
+
+        string? problem = session.Start(
+            path,
+            Arguments is { Length: > 0 } arguments ? arguments : null,
+            WorkingDirectory is { Length: > 0 } directory ? directory : null,
+            holdAtStart: true);
+
+        if (problem is not null)
+        {
+            Add($"could not start it: {problem}");
+            Status = problem;
+            StopSession();
+            NotifyCommands();
+            return;
+        }
+
+        State = DebugState.Stopped;
+        Status = "Held before it ran anything.";
+        Add($"started {path} under the .NET debugger, held before it ran anything");
+        NotifyCommands();
+    }
+
     [RelayCommand(CanExecute = nameof(IsDebugging))]
     private void StopDebugging()
     {
@@ -361,6 +455,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         Resuming();
+        _managed?.Continue();
         _session?.Continue();
         State = DebugState.Running;
         Status = "Running.";
@@ -371,7 +466,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// Stops it where it is, without ending it. Guarded like the others, because the assistant calls
     /// the command directly and a pause asked of a stopped process would be answered by nothing.
     /// </summary>
-    [RelayCommand(CanExecute = nameof(IsRunning))]
+    [RelayCommand(CanExecute = nameof(CanPauseNow))]
     private void Pause()
     {
         if (!IsRunning || _session is not { } session)
@@ -391,6 +486,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         Resuming();
+        if (_managed is { } into && into.Step(into: true) is { } refused)
+        {
+            Add(refused);
+            return;
+        }
+
         _session?.StepInstruction();
         State = DebugState.Running;
         NotifyCommands();
@@ -405,6 +506,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         Resuming();
+        if (_managed is { } over && over.Step(into: false) is { } declined)
+        {
+            Add(declined);
+            return;
+        }
+
         _session?.StepOver();
         State = DebugState.Running;
         NotifyCommands();
@@ -485,6 +592,78 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     }
 
     // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Everything the CLR debugger reports, reduced to what the panel shows.
+    ///
+    /// Coarser than the native handler on purpose. The managed session has no separate event kinds —
+    /// it reports a line of text and keeps its own state — so rather than parsing those lines this
+    /// reads the state back after every one of them. There are tens of events in a run, not
+    /// thousands, and a handler that inferred meaning from wording would be wrong the first time the
+    /// wording changed.
+    /// </summary>
+    private void OnManagedReported(object? sender, DebugEvent e)
+    {
+        // From the runtime's own callback thread, or a worker, so nothing here touches a bound
+        // collection directly.
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null)
+        {
+            return;
+        }
+
+        dispatcher.BeginInvoke(() =>
+        {
+            Add(e.Text);
+            SyncManaged();
+        });
+    }
+
+    /// <summary>Reads the managed session's state onto the panel.</summary>
+    private void SyncManaged()
+    {
+        if (_managed is not { } session)
+        {
+            return;
+        }
+
+        State = session.State;
+        Status = session.Status is { Length: > 0 } said ? char.ToUpperInvariant(said[0]) + said[1..] : "Running.";
+
+        Modules.Clear();
+        foreach (string module in session.Modules)
+        {
+            Modules.Add(new ModuleRow(module, string.Empty, string.Empty, false));
+        }
+
+        Breakpoints.Clear();
+        foreach (var breakpoint in session.Breakpoints)
+        {
+            Breakpoints.Add(breakpoint.ToString());
+        }
+
+        Locals.Clear();
+        if (State != DebugState.Stopped)
+        {
+            // Cleared rather than left, for the same reason the registers are: values belonging to a
+            // frame that has run on read as current, and anything reasoning from them is reasoning
+            // about somewhere the program no longer is.
+            NotifyCommands();
+            return;
+        }
+
+        foreach (var argument in session.Values(arguments: true))
+        {
+            Locals.Add(new SlotRow($"arg {argument.Index}", argument.Kind, argument.Text));
+        }
+
+        foreach (var local in session.Values())
+        {
+            Locals.Add(new SlotRow($"local {local.Index}", local.Kind, local.Text));
+        }
+
+        NotifyCommands();
+    }
 
     private void OnReported(object? sender, DebugEvent e)
     {
@@ -896,6 +1075,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             _session = null;
         }
 
+        if (_managed is { } managed)
+        {
+            managed.Reported -= OnManagedReported;
+            managed.Dispose();
+            _managed = null;
+        }
+
+        Locals.Clear();
+
         LivePatches.Clear();
         OnPropertyChanged(nameof(HasLivePatches));
 
@@ -918,6 +1106,115 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         PauseCommand.NotifyCanExecuteChanged();
         StepInstructionCommand.NotifyCanExecuteChanged();
         StepOverCommand.NotifyCanExecuteChanged();
+        StepOutCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(CanPauseNow));
+    }
+
+    /// <summary>
+    /// Runs to the end of the current method and stops in whatever called it.
+    ///
+    /// Managed only, and not an oversight on the native side: stepping out of a native function
+    /// means knowing where its return address is, which is a question about an unwinding convention
+    /// rather than about the program. The runtime already knows.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanStepOut))]
+    private void StepOut()
+    {
+        if (_managed is not { } session || !IsStopped)
+        {
+            return;
+        }
+
+        Resuming();
+        if (session.StepOut() is { } problem)
+        {
+            Add(problem);
+            return;
+        }
+
+        State = DebugState.Running;
+        NotifyCommands();
+    }
+
+    private bool CanStepOut() => IsStopped && IsManaged;
+
+    /// <summary>The CLR debugging session, for anything that needs to read it rather than drive it.</summary>
+    internal ManagedDebugSession? ManagedSession => _managed;
+
+    /// <summary>
+    /// One IL instruction, for the assistant. Returns the reason rather than only logging it, because
+    /// an agent that is told nothing goes round again.
+    /// </summary>
+    internal string? StepManaged(bool into)
+    {
+        if (_managed is not { } session)
+        {
+            return "this is not a .NET process";
+        }
+
+        if (!IsStopped)
+        {
+            return "it is not stopped, so there is nothing to step";
+        }
+
+        Resuming();
+        if (session.Step(into) is { } problem)
+        {
+            Add(problem);
+            return problem;
+        }
+
+        State = DebugState.Running;
+        NotifyCommands();
+        return null;
+    }
+
+    internal string? StepOutManaged()
+    {
+        if (_managed is not { } session)
+        {
+            return "this is not a .NET process";
+        }
+
+        if (!IsStopped)
+        {
+            return "it is not stopped, so there is nothing to step out of";
+        }
+
+        Resuming();
+        if (session.StepOut() is { } problem)
+        {
+            Add(problem);
+            return problem;
+        }
+
+        State = DebugState.Running;
+        NotifyCommands();
+        return null;
+    }
+
+    /// <summary>
+    /// Sets or clears a breakpoint in a managed method, so the panel and the agent share one set.
+    ///
+    /// Clearing is not implemented below: the runtime's own breakpoint object would have to be found
+    /// and deactivated, and the session keeps them by module rather than by method. Saying so beats
+    /// reporting success and leaving it armed.
+    /// </summary>
+    internal string? SetManagedBreakpoint(string module, uint methodToken, uint ilOffset, bool on)
+    {
+        if (_managed is not { } session)
+        {
+            return "nothing is running under the .NET debugger; start it first";
+        }
+
+        if (!on)
+        {
+            return "clearing a .NET breakpoint is not implemented yet; stop and start to drop them all";
+        }
+
+        string? problem = session.SetBreakpoint(module, methodToken, ilOffset);
+        SyncManaged();
+        return problem;
     }
 
     private static bool DefaultConfirm(string title, string message)

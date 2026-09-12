@@ -14,6 +14,7 @@ namespace Spydate.Tests;
 /// a host, and then blocks reading stdin, which is exactly what a debuggee should do while it is
 /// being looked at.
 /// </summary>
+[Collection(Debugging.Name)]
 public class ManagedDebuggerTests
 {
     /// <summary>A managed program to debug, or null when this build has not produced one.</summary>
