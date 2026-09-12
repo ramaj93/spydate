@@ -330,6 +330,17 @@ dbgshim is still needed for is the runtime-startup handshake, which is the part 
 documented contract. The launch keeps the process handle, so a target whose runtime never publishes
 itself can still be killed.
 
+**A line of decompiled C# is addressed by the decompiler, not by a PDB.** Sequence points in a
+portable PDB map IL offsets onto lines of a source file, and the C# on screen is not that file — it
+was produced from the IL a moment ago and exists nowhere else. So the mapping comes from ILSpy's own
+annotations, recorded by a token writer as the text is written. Three rules make the result
+bindable: an async or iterator method's offsets belong to its state machine's `MoveNext`; the offset
+walks back to the nearest point where the evaluation stack is empty, because that is where the JIT's
+IL-to-native map has entries and the runtime will bind nothing else; and an offset not at an
+instruction boundary is dropped rather than guessed at. The address is written into a trailing
+comment, as pseudo-C already does, so the breakpoint margin, the caret and the execution arrow need
+no new concept.
+
 **Every call into ICorDebug is made from an MTA thread, by the session itself.** Its interface
 pointers arrive on the runtime's own threads, which are MTA, and they cannot be marshalled into a
 COM apartment: asking one for anything from a WPF window's STA thread fails the QueryInterface with

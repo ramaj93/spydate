@@ -231,6 +231,20 @@ native side already reads it, because native is what it is.
   threw before it was made; and `CorDebugMappingResult` is a flag set, so the word beside a stop's
   offset said "unmapped" on every ordinary stop. The panel is now driven end to end from a probe
   outside the repo, which is what found all three.
+  The C# view carries breakpoints too, which needed no PDB. A portable PDB's sequence points map IL
+  onto lines of a source file nobody here has; what this view shows was invented by the decompiler a
+  moment ago, so the only thing that can say which line is which is the decompiler — ILSpy annotates
+  every syntax node with the IL it was made from, and a token writer that knows its own line records
+  them as the text is written. (Its `CreateSequencePoints` cannot be used from outside the ILSpy
+  application: it reads node locations that a decompiled tree does not have, so every point it hands
+  back says line zero.) Three corrections were needed on top of that, and each was invisible until
+  the thing was run: an async or iterator method's offsets belong to its state machine's `MoveNext`,
+  not to the stub the reader is looking at; a breakpoint binds only where the evaluation stack is
+  empty, so the offset walks back from the expression ILSpy names to the statement holding it — the
+  runtime refuses the rest with an asynchronous `BreakpointSetError` long after saying yes; and an
+  offset must sit at an instruction boundary or the line carries no address at all. The address goes
+  in a trailing comment, the way pseudo-C has always done it, so the margin, the caret and the
+  execution arrow all work without learning anything new.
   Still to do: multiple threads and frames beyond the innermost, setting values, and evaluation.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,

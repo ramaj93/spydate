@@ -1167,7 +1167,7 @@ public sealed partial class MainViewModel : ObservableObject
             DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
-            ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type),
+            ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type, Locate),
             ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member, Locate),
             _ => null,
         };
@@ -1223,9 +1223,9 @@ public sealed partial class MainViewModel : ObservableObject
     /// Given to the document rather than looked up by it: the body index belongs to the open binary,
     /// and a document that reached for it would be reaching past the thing that owns its lifetime.
     /// </summary>
-    private (ManagedBody Body, ulong ImageBase, bool Wide)? Locate(ManagedMember member)
-        => Binary is { } open && open.Bodies?.Of(member.Handle) is { } body
-            ? (body, open.Image.ImageBase, open.Image.Is64Bit)
+    private Documents.ManagedImage? Locate()
+        => Binary is { Bodies: { } bodies } open
+            ? new Documents.ManagedImage(bodies, open.Image.ImageBase, open.Image.Is64Bit)
             : null;
 
     private void OpenFunctionGraph(Function f)

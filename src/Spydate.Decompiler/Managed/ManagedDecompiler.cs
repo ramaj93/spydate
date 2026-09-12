@@ -37,6 +37,48 @@ public sealed class ManagedDecompiler
         return d.DecompileAsString(member.Handle);
     }
 
+    /// <summary>
+    /// C# for one member, with the IL offset behind each line of it.
+    ///
+    /// The pairing is what makes decompiled C# debuggable. A breakpoint is a method and an offset
+    /// into its IL; a line of this text is something the decompiler invented out of that IL a moment
+    /// ago and corresponds to no file anywhere. Only the decompiler can say which is which, and
+    /// <see cref="ICSharpCode.Decompiler.CSharp.CSharpDecompiler.CreateSequencePoints"/> is it.
+    /// </summary>
+    public ManagedSource SourceForMember(ManagedMember member, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(member);
+
+        var d = _assembly.CSharpDecompiler;
+        d.CancellationToken = cancellationToken;
+        return SequencePoints.Of(d, d.Decompile(member.Handle), _assembly.Settings);
+    }
+
+    /// <summary>C# for a whole type, with the IL offset behind each line — every method in it.</summary>
+    public ManagedSource SourceForType(ManagedType type, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(type);
+
+        var d = _assembly.CSharpDecompiler;
+        d.CancellationToken = cancellationToken;
+        return SequencePoints.Of(d, d.DecompileType(new FullTypeName(type.Definition.ReflectionName)), _assembly.Settings);
+    }
+
+    /// <summary>
+    /// The same C#, with each line's file address in a trailing comment.
+    ///
+    /// Written into the text rather than carried beside it because that is how every other view
+    /// here works: the breakpoint margin, the caret's address and the execution arrow all read the
+    /// address back off the line. Pseudo-C has done it this way since before there was a debugger.
+    /// </summary>
+    public static string Addressed(ManagedSource source, ManagedBodies bodies, ulong imageBase)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(bodies);
+
+        return SequencePoints.Addressed(source, bodies, imageBase);
+    }
+
     // ---------------- IL ----------------
 
     public string DisassembleModuleHeader(CancellationToken cancellationToken = default)

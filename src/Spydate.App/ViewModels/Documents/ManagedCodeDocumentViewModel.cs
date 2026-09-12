@@ -11,6 +11,15 @@ public enum ManagedLanguage
     IL,
 }
 
+/// <summary>
+/// Where the open binary's method bodies are, so a listing can carry a file address against its
+/// lines.
+///
+/// Handed to the document rather than looked up by it: the body index belongs to the open binary,
+/// and a document that reached for it would be reaching past the thing that owns its lifetime.
+/// </summary>
+public sealed record ManagedImage(ManagedBodies Bodies, ulong ImageBase, bool Wide);
+
 /// <summary>C# or IL view of a managed assembly, type or member.</summary>
 public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
 {
@@ -19,7 +28,7 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     private readonly ManagedMember? _member;
     private CancellationTokenSource? _cts;
 
-    private readonly Func<ManagedMember, (ManagedBody Body, ulong ImageBase, bool Wide)?>? _locate;
+    private readonly Func<ManagedImage?>? _image;
 
     private ManagedCodeDocumentViewModel(
         string key,
@@ -28,27 +37,30 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
         ManagedAssembly assembly,
         ManagedType? type,
         ManagedMember? member,
-        Func<ManagedMember, (ManagedBody Body, ulong ImageBase, bool Wide)?>? locate = null)
+        Func<ManagedImage?>? image = null)
         : base(key, title, icon)
     {
         _assembly = assembly;
         _type = type;
         _member = member;
-        _locate = locate;
+        _image = image;
     }
 
     public static ManagedCodeDocumentViewModel ForAssembly(ManagedAssembly assembly)
         => new($"managed:assembly", assembly.Name, SymbolRegular.Library24, assembly, null, null);
 
-    public static ManagedCodeDocumentViewModel ForType(ManagedAssembly assembly, ManagedType type)
-        => new($"managed:type:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null);
+    public static ManagedCodeDocumentViewModel ForType(
+        ManagedAssembly assembly,
+        ManagedType type,
+        Func<ManagedImage?>? image = null)
+        => new($"managed:type:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null, image);
 
     public static ManagedCodeDocumentViewModel ForMember(
         ManagedAssembly assembly,
         ManagedType type,
         ManagedMember member,
-        Func<ManagedMember, (ManagedBody Body, ulong ImageBase, bool Wide)?>? locate = null)
-        => new($"managed:member:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, locate);
+        Func<ManagedImage?>? image = null)
+        => new($"managed:member:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, image);
 
     public IReadOnlyList<ManagedLanguage> Languages { get; } = new[] { ManagedLanguage.CSharp, ManagedLanguage.IL };
 
@@ -108,17 +120,29 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     /// where being one method out puts a breakpoint in someone else's code.
     /// </summary>
     private string Addressed(string listing, ManagedMember member)
-        => _locate?.Invoke(member) is { } found
-            ? ManagedDecompiler.Addressed(listing, found.Body, found.ImageBase, found.Wide)
+        => _image?.Invoke() is { } image && image.Bodies.Of(member.Handle) is { } body
+            ? ManagedDecompiler.Addressed(listing, body, image.ImageBase, image.Wide)
             : listing;
+
+    /// <summary>
+    /// Decompiled C# with each line's file address in a trailing comment.
+    ///
+    /// A whole type is fine here, unlike the IL listing: the decompiler says which method each line
+    /// came from, so there is nothing to infer from the shape of the text. That is the difference
+    /// between reading a listing and being told by the thing that wrote it.
+    /// </summary>
+    private string Addressed(ManagedSource source)
+        => _image?.Invoke() is { } image
+            ? ManagedDecompiler.Addressed(source, image.Bodies, image.ImageBase)
+            : source.Text;
 
     private string Produce(ManagedLanguage language, CancellationToken ct)
     {
         var d = _assembly.Decompiler;
         return (language, _member, _type) switch
         {
-            (ManagedLanguage.CSharp, { } m, _) => d.DecompileMember(m, ct),
-            (ManagedLanguage.CSharp, null, { } t) => d.DecompileType(t, ct),
+            (ManagedLanguage.CSharp, { } m, _) => Addressed(d.SourceForMember(m, ct)),
+            (ManagedLanguage.CSharp, null, { } t) => Addressed(d.SourceForType(t, ct)),
             (ManagedLanguage.CSharp, null, null) => d.DecompileAssembly(ct),
             (ManagedLanguage.IL, { } m, _) => Addressed(d.DisassembleMember(m, ct), m),
             (ManagedLanguage.IL, null, { } t) => d.DisassembleType(t, ct),

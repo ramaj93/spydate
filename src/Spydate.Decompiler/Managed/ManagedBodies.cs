@@ -51,12 +51,19 @@ public sealed class ManagedBodies
     /// <summary>Bodies whose header or content could not be read, which is a fact about the file.</summary>
     public int Unreadable { get; private set; }
 
+    /// <summary>
+    /// The metadata these bodies came from, for anything that has to read a signature to make sense
+    /// of one — working out what an instruction leaves on the stack, most of all.
+    /// </summary>
+    public MetadataReader Metadata { get; private set; } = null!;
+
     public static ManagedBodies Build(ManagedAssembly assembly)
     {
         ArgumentNullException.ThrowIfNull(assembly);
 
         var bodies = new ManagedBodies();
         var reader = assembly.Metadata;
+        bodies.Metadata = reader;
         var pe = assembly.Module.Reader;
 
         foreach (var handle in reader.MethodDefinitions)
