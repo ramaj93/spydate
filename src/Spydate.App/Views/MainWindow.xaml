@@ -660,8 +660,36 @@
                                                     AutomationProperties.Name="Configure assistant" />
                                             <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Clear"
                                                     Command="{Binding StartOverCommand}"
-                                                    ToolTip="Forget this conversation"
+                                                    ToolTip="Empty this conversation, keeping the others"
                                                     AutomationProperties.Name="Clear assistant" />
+
+                                            <!-- Which conversation about this binary you are in. One
+                                                 program is rarely one question, and two faults
+                                                 chased in one transcript spend the model's context
+                                                 on whichever it is not being asked about. Titled by
+                                                 the question each opened with, which is what the
+                                                 reader went in to find out and so what they look
+                                                 for coming back. -->
+                                            <ComboBox DockPanel.Dock="Right" Width="190" Margin="0,0,3,0"
+                                                      VerticalAlignment="Center"
+                                                      ItemsSource="{Binding Sessions}"
+                                                      SelectedItem="{Binding ActiveSession, Mode=TwoWay}"
+                                                      IsEnabled="{Binding IsIdle}"
+                                                      ToolTip="Which conversation about this binary you are in"
+                                                      AutomationProperties.Name="Assistant chat session">
+                                                <ComboBox.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock Text="{Binding Title}" ToolTip="{Binding Title}"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                    </DataTemplate>
+                                                </ComboBox.ItemTemplate>
+                                            </ComboBox>
+
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="New"
+                                                    Command="{Binding NewSessionCommand}"
+                                                    ToolTip="Start another conversation about this binary"
+                                                    AutomationProperties.Name="New assistant chat" />
+
                                             <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="4,0,0,0"
                                                        Foreground="{DynamicResource Text.Secondary}" />
                                         </DockPanel>
@@ -674,12 +702,22 @@
                                          of wrapped variable-height paragraphs never did reliably. -->
                                     <RichTextBox Grid.Row="1" x:Name="AssistantTranscript"
                                                  IsReadOnly="True" IsReadOnlyCaretVisible="False"
-                                                 IsDocumentEnabled="False"
-                                                 BorderThickness="0" Background="Transparent" Padding="6,4"
+                                                 IsDocumentEnabled="True"
+                                                 BorderThickness="0" Background="Transparent"
                                                  VerticalScrollBarVisibility="Auto"
                                                  HorizontalScrollBarVisibility="Disabled"
                                                  Foreground="{DynamicResource Text.Primary}"
-                                                 AutomationProperties.Name="Assistant transcript" />
+                                                 AutomationProperties.Name="Assistant transcript">
+                                        <!-- Zero, and the inset lives on the blocks instead - see
+                                             MarkdownFlow.Inset. A RichTextBox manages its own
+                                             document's padding, so a value set here is not reliably
+                                             what you get; the gap on the right went missing exactly
+                                             because it was asked for in this one place. A margin on
+                                             a Block is the author's and nothing overrides it. -->
+                                        <RichTextBox.Document>
+                                            <FlowDocument PagePadding="0" />
+                                        </RichTextBox.Document>
+                                    </RichTextBox>
 
                                     <DockPanel Grid.Row="2" Margin="4">
                                         <!-- One button in one place, not two that trade places. Ask

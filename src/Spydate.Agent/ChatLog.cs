@@ -19,6 +19,35 @@ public sealed record ChatEntry
 }
 
 /// <summary>
+/// One conversation about a binary: what was said, and when it started.
+///
+/// Several of these live alongside each other because one binary is rarely one question. Tracking
+/// down two unrelated faults in the same program means two lines of reasoning, and holding both in
+/// a single transcript costs the model context on whichever one it is not being asked about.
+/// </summary>
+public sealed record ChatSession
+{
+    [JsonPropertyName("id")]
+    public string Id { get; init; } = Guid.NewGuid().ToString("n");
+
+    [JsonPropertyName("at")]
+    public DateTimeOffset At { get; init; } = DateTimeOffset.Now;
+
+    [JsonPropertyName("entries")]
+    public IReadOnlyList<ChatEntry> Entries { get; init; } = [];
+}
+
+/// <summary>Every conversation about one binary, and which was last in front.</summary>
+public sealed record ChatBook
+{
+    [JsonPropertyName("sessions")]
+    public IReadOnlyList<ChatSession> Sessions { get; init; } = [];
+
+    [JsonPropertyName("active")]
+    public string? Active { get; init; }
+}
+
+/// <summary>
 /// The conversation about one binary, kept between runs.
 ///
 /// What is stored is the transcript as it was displayed, not the model's own message history: the
@@ -137,6 +166,105 @@ public static class ChatLog
 
     /// <summary>Kept for callers; the rule itself lives in ToolCallMarkup, which the agent shares.</summary>
     public static string WithoutMarkup(string? text) => Text.ToolCallMarkup.Without(text);
+
+    /// <summary>
+    /// A name for a conversation, for the picker: the question it opened with, shortened.
+    ///
+    /// The first question and not the last, because it is what the reader went in to find out and so
+    /// is what they will look for when coming back. Cut on a word rather than mid-way through one —
+    /// a list of titles is scanned, not read, and a severed word costs more than the space it saves.
+    /// </summary>
+    public static string TitleOf(IReadOnlyList<ChatEntry> entries, int maxChars = 44)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+
+        string? asked = null;
+        foreach (var entry in entries)
+        {
+            if (entry.Kind == "you")
+            {
+                asked = entry.Text;
+                break;
+            }
+        }
+
+        // Newlines and runs of spaces would make a one-line picker entry ragged.
+        string clean = string.Join(' ', WithoutMarkup(asked).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        if (clean.Length == 0)
+        {
+            return "New chat";
+        }
+
+        if (clean.Length <= maxChars)
+        {
+            return clean;
+        }
+
+        int cut = clean.LastIndexOf(' ', maxChars - 1);
+        return string.Concat(clean.AsSpan(0, cut < maxChars / 2 ? maxChars - 1 : cut).TrimEnd(), "…");
+    }
+
+    /// <summary>
+    /// Every conversation about this binary. Never throws, for the same reason as <see cref="Load"/>.
+    ///
+    /// A file written before there were sessions is a bare array of entries, and is read back as the
+    /// single conversation it was. Doing otherwise would quietly discard everything already on disk
+    /// at the moment this feature arrived, which is the one outcome nobody would forgive.
+    /// </summary>
+    public static ChatBook LoadBook(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return new ChatBook();
+            }
+
+            string text = File.ReadAllText(path);
+
+            if (text.AsSpan().TrimStart().StartsWith("["))
+            {
+                var entries = JsonSerializer.Deserialize<List<ChatEntry>>(text, Options) ?? [];
+                return entries.Count == 0
+                    ? new ChatBook()
+                    : new ChatBook { Sessions = [new ChatSession { At = entries[0].At, Entries = entries }] };
+            }
+
+            return JsonSerializer.Deserialize<ChatBook>(text, Options) ?? new ChatBook();
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return new ChatBook();
+        }
+    }
+
+    /// <summary>Writes every conversation, dropping the empty ones. Never throws, as above.</summary>
+    public static void SaveBook(string path, ChatBook book)
+    {
+        ArgumentNullException.ThrowIfNull(book);
+
+        // An untouched new chat is not worth a line in the file, nor a row in the picker next time.
+        var kept = book.Sessions.Where(session => session.Entries.Count > 0).ToList();
+
+        try
+        {
+            if (kept.Count == 0)
+            {
+                File.Delete(path);
+                return;
+            }
+
+            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+            string temporary = $"{path}.{Environment.ProcessId:X}.tmp";
+            File.WriteAllText(temporary, JsonSerializer.Serialize(book with { Sessions = kept }, Options));
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+        }
+    }
 
     /// <summary>
     /// Writes the conversation, or deletes the file when there is nothing left to remember. Never

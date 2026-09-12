@@ -19,6 +19,24 @@ internal static class MarkdownFlow
 {
     private static object? Resource(string key) => Application.Current?.TryFindResource(key);
 
+    /// <summary>
+    /// How far every block is held off the left and right edges of the panel.
+    ///
+    /// Here rather than on the document, because a RichTextBox manages its own document's
+    /// PagePadding and a value set there does not reliably survive. The right-hand gap went missing
+    /// for exactly that reason: it was asked for in the one place that could be overruled, so the
+    /// text ran under the scrollbar while the left side kept its margin.
+    ///
+    /// The right is wider than the left because the scrollbar stands in it. Equal numbers look
+    /// unequal on a control whose scrollbar sits inside its own content area.
+    /// </summary>
+    private const double Left = 10;
+
+    private const double Right = 22;
+
+    /// <summary>The standard block inset, with whatever vertical spacing that block wants.</summary>
+    private static Thickness Inset(double top, double bottom) => new(Left, top, Right, bottom);
+
     private static FontFamily Mono =>
         Resource("Mono.FontFamily") as FontFamily ?? new FontFamily("Consolas");
 
@@ -53,10 +71,32 @@ internal static class MarkdownFlow
     /// </summary>
     public static IEnumerable<Block> Plain(string text)
     {
-        var paragraph = new System.Windows.Documents.Paragraph { Margin = new Thickness(0, 0, 0, 6) };
-        AppendWithLineBreaks(paragraph.Inlines, text);
-        yield return paragraph;
+        yield return PlainParagraph(text);
     }
+
+    /// <summary>
+    /// The same thing as <see cref="Plain"/>, for a caller that keeps hold of the paragraph.
+    ///
+    /// A streaming answer is appended to rather than redrawn, so the view needs the paragraph
+    /// itself and not a sequence it has to go looking through. See MainWindow's RedrawStreamingLine.
+    /// </summary>
+    public static System.Windows.Documents.Paragraph PlainParagraph(string text)
+    {
+        var paragraph = new System.Windows.Documents.Paragraph { Margin = Inset(0, 6) };
+        AppendWithLineBreaks(paragraph.Inlines, text);
+        return paragraph;
+    }
+
+    /// <summary>
+    /// Adds more plain text to the end of a paragraph that is already on screen.
+    ///
+    /// Appending chunk by chunk gives the same inlines as one call on the whole string: a chunk that
+    /// ends on a newline has already had its break added, and one that starts mid-line continues the
+    /// Run before it. That equivalence is what lets an answer be drawn once as it arrives instead of
+    /// once per token.
+    /// </summary>
+    public static void AppendPlain(InlineCollection inlines, string text) =>
+        AppendWithLineBreaks(inlines, text);
 
     /// <summary>
     /// What somebody typed, in a bubble along the right.
@@ -94,7 +134,7 @@ internal static class MarkdownFlow
             // does not shrink to a stub. The document is narrow when the panel is, so this is a
             // fraction of it rather than a fixed width.
             MaxWidth = 620,
-            Margin = new Thickness(60, 2, 0, 2),
+            Margin = new Thickness(60, 2, Right, 2),
         };
 
         yield return new BlockUIContainer(border) { Margin = new Thickness(0, 4, 0, 6) };
@@ -105,7 +145,7 @@ internal static class MarkdownFlow
     {
         var paragraph = new System.Windows.Documents.Paragraph
         {
-            Margin = new Thickness(0, 6, 0, 6),
+            Margin = Inset(6, 6),
             FontStyle = FontStyles.Italic,
             Foreground = Dim,
         };
@@ -119,7 +159,7 @@ internal static class MarkdownFlow
     {
         var paragraph = new System.Windows.Documents.Paragraph
         {
-            Margin = new Thickness(0, 0, 0, 4),
+            Margin = Inset(0, 4),
             FontFamily = Mono,
             FontSize = 11,
             Foreground = Dim,
@@ -134,23 +174,113 @@ internal static class MarkdownFlow
         var paragraph = Paragraph(heading.Spans);
         paragraph.FontWeight = FontWeights.SemiBold;
         paragraph.FontSize = heading.Level <= 2 ? 15 : 13;
-        paragraph.Margin = new Thickness(0, 8, 0, 4);
+        paragraph.Margin = Inset(8, 4);
         return paragraph;
     }
 
+    /// <summary>
+    /// A fenced block: the language it was tagged with, a button that copies it, and the code.
+    ///
+    /// The code itself stays a Paragraph in the document's own flow, so it can still be selected
+    /// along with the prose around it and copied a few lines at a time. Only the strip above it is
+    /// a UI container. Putting the code in a container too would have made the button the only way
+    /// to get at it, which is a poorer trade than it sounds — a listing is often wanted in part.
+    /// </summary>
     private static Block Code(CodeBlock code)
     {
+        // The tint sits on the Section so that it covers the strip and the code as one block.
+        // The inset then goes on the pieces inside it, equally on both sides, rather than on the
+        // Section itself: padding there would move the tint's edges instead of the text's.
+        var section = new Section
+        {
+            Background = CodeBackground,
+            Margin = Inset(4, 8),
+            Padding = default,
+        };
+
+        section.Blocks.Add(Strip(code));
+
         var paragraph = new System.Windows.Documents.Paragraph
         {
             FontFamily = Mono,
             FontSize = 12,
-            Background = CodeBackground,
-            Padding = new Thickness(8, 6, 8, 6),
-            Margin = new Thickness(0, 4, 0, 8),
+            Margin = new Thickness(10, 0, 10, 8),
         };
 
         AppendWithLineBreaks(paragraph.Inlines, code.Text);
-        return paragraph;
+        section.Blocks.Add(paragraph);
+        return section;
+    }
+
+    /// <summary>The strip above a code block: which language it is, and a button to copy it.</summary>
+    private static Block Strip(CodeBlock code)
+    {
+        var language = new TextBlock
+        {
+            Text = code.Language ?? string.Empty,
+            Foreground = Dim,
+            FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var copy = new Button
+        {
+            Content = Glyph(),
+            Style = Resource("ToolButton") as Style,
+            Padding = new Thickness(5, 1, 5, 1),
+            Foreground = Dim,
+            ToolTip = "Copy this block",
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+
+        System.Windows.Automation.AutomationProperties.SetName(copy, "Copy code");
+        copy.Click += (_, _) => Copy(code.Text, copy);
+
+        // The same inset as the code below it, so the icon lines up with the code's right edge
+        // rather than standing proud of it.
+        var strip = new DockPanel { Margin = new Thickness(10, 4, 10, 2), LastChildFill = false };
+        DockPanel.SetDock(copy, Dock.Right);
+        strip.Children.Add(copy);
+        strip.Children.Add(language);
+
+        return new BlockUIContainer(strip) { Margin = default };
+    }
+
+    private static Wpf.Ui.Controls.SymbolIcon Glyph() =>
+        new() { Symbol = Wpf.Ui.Controls.SymbolRegular.Copy20, FontSize = 13 };
+
+    /// <summary>
+    /// Copies the block, and says on the button what happened.
+    ///
+    /// The clipboard is shared with every other program running, and any of them can be holding it
+    /// when this is called, so this fails from time to time through no fault of the caller. A silent
+    /// failure would be read as a copy that worked, and whatever was in the clipboard already would
+    /// be pasted somewhere else in the belief that it was this code.
+    /// </summary>
+    private static void Copy(string text, Button button)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+            button.Content = new TextBlock { Text = "Copied", FontSize = 11 };
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            button.Content = new TextBlock { Text = "Busy", FontSize = 11 };
+            button.ToolTip = "Another program is holding the clipboard. Try again.";
+        }
+
+        // Back to an icon afterwards, so the strip does not end up a row of stale words in a
+        // conversation where several blocks have been copied.
+        var settle = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        settle.Tick += (_, _) =>
+        {
+            settle.Stop();
+            button.Content = Glyph();
+            button.ToolTip = "Copy this block";
+        };
+
+        settle.Start();
     }
 
     private static Block Bulleted(MdList block)
@@ -158,7 +288,7 @@ internal static class MarkdownFlow
         var list = new System.Windows.Documents.List
         {
             MarkerStyle = block.Ordered ? TextMarkerStyle.Decimal : TextMarkerStyle.Disc,
-            Margin = new Thickness(16, 0, 0, 6),
+            Margin = new Thickness(Left + 16, 0, Right, 6),
             Padding = default,
         };
 
@@ -174,7 +304,7 @@ internal static class MarkdownFlow
 
     private static System.Windows.Documents.Paragraph Paragraph(IReadOnlyList<MarkdownSpan> spans)
     {
-        var paragraph = new System.Windows.Documents.Paragraph { Margin = new Thickness(0, 0, 0, 6) };
+        var paragraph = new System.Windows.Documents.Paragraph { Margin = Inset(0, 6) };
 
         foreach (var span in spans)
         {

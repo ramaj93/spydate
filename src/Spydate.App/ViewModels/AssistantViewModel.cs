@@ -44,6 +44,34 @@ public sealed partial class AssistantLine : ObservableObject
 }
 
 /// <summary>
+/// One conversation in the picker.
+///
+/// A class with a settable title rather than the immutable <see cref="ChatSession"/> it is saved as,
+/// because the title changes the moment the first question is asked. Replacing a record in the
+/// collection would do it too, but replacing the item that is selected clears the selection — the
+/// picker would empty itself exactly when the conversation became worth naming.
+/// </summary>
+public sealed partial class ChatSessionRow : ObservableObject
+{
+    public string Id { get; init; } = Guid.NewGuid().ToString("n");
+
+    public DateTimeOffset At { get; init; } = DateTimeOffset.Now;
+
+    /// <summary>What was said, as last stashed. The live one is in the panel's Transcript.</summary>
+    public IReadOnlyList<ChatEntry> Entries { get; set; } = [];
+
+    [ObservableProperty]
+    private string _title = "New chat";
+
+    /// <summary>
+    /// The conversation's name, for anything that falls back to the object's own text rather than
+    /// reading the template — an automation client naming the picker's rows, chiefly, which
+    /// otherwise announces the name of this class to a screen reader twice over.
+    /// </summary>
+    public override string ToString() => Title;
+}
+
+/// <summary>
 /// The assistant panel: a model with the analysis tools, working on the binary that is open.
 ///
 /// It acts on the window's own <c>BinaryAnalysis</c>, not a copy — so a name it gives appears in the
@@ -82,6 +110,97 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     }
 
     public ObservableCollection<AssistantLine> Transcript { get; } = new();
+
+    /// <summary>Every conversation about the open binary, newest last.</summary>
+    public ObservableCollection<ChatSessionRow> Sessions { get; } = new();
+
+    /// <summary>
+    /// Which conversation is in front. Setting it swaps the transcript and starts a fresh agent:
+    /// the other conversation's history belongs to the other conversation, and carrying it across
+    /// would be the same mistake as carrying one binary's reasoning onto the next.
+    /// </summary>
+    [ObservableProperty]
+    private ChatSessionRow? _activeSession;
+
+    /// <summary>True while this class is setting ActiveSession itself, so the swap does not re-enter.</summary>
+    private bool _switching;
+
+    partial void OnActiveSessionChanged(ChatSessionRow? oldValue, ChatSessionRow? newValue)
+    {
+        if (_switching || newValue is null)
+        {
+            return;
+        }
+
+        if (oldValue is not null)
+        {
+            Stash(oldValue);
+        }
+
+        ResetAgent();
+        LoadInto(newValue);
+        Remember();
+        UpdateStatus();
+    }
+
+    /// <summary>Copies what is on screen back into the row, and renames it from its first question.</summary>
+    private void Stash(ChatSessionRow row)
+    {
+        row.Entries = Transcript
+            .Where(line => line.Kind != "note")
+            .Select(line => new ChatEntry { Kind = line.Kind, Text = line.Text, At = line.At })
+            .ToList();
+
+        row.Title = ChatLog.TitleOf(row.Entries);
+    }
+
+    /// <summary>Puts a stored conversation on screen, and hands its end to the next agent built.</summary>
+    private void LoadInto(ChatSessionRow row)
+    {
+        Transcript.Clear();
+
+        foreach (var entry in row.Entries)
+        {
+            Transcript.Add(new AssistantLine(entry.Kind, entry.Text, entry.At));
+        }
+
+        _earlier = ChatLog.Recap(row.Entries);
+    }
+
+    private void Select(ChatSessionRow row)
+    {
+        _switching = true;
+        ActiveSession = row;
+        _switching = false;
+    }
+
+    /// <summary>
+    /// Another conversation about the same binary.
+    ///
+    /// An untouched new chat is reused rather than added to, so that pressing this twice does not
+    /// leave a row of identical blanks in the picker.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanAsk))]
+    private void NewSession()
+    {
+        if (ActiveSession is { } active)
+        {
+            Stash(active);
+        }
+
+        var blank = Sessions.FirstOrDefault(row => row.Entries.Count == 0);
+        if (blank is null)
+        {
+            blank = new ChatSessionRow();
+            Sessions.Add(blank);
+        }
+
+        ResetAgent();
+        Select(blank);
+        LoadInto(blank);
+        Remember();
+        UpdateStatus();
+    }
 
     public AgentSettings Settings { get; private set; }
 
@@ -141,6 +260,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         {
             IsBusy = true;
             AskCommand.NotifyCanExecuteChanged();
+            NewSessionCommand.NotifyCanExecuteChanged();
 
             // A turn can be a long silence — a slow provider, or several tool calls before it says
             // anything. Without this the panel looks broken rather than busy, and the reasonable
@@ -214,6 +334,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             _turn = null;
             _answer = null;
             AskCommand.NotifyCanExecuteChanged();
+            NewSessionCommand.NotifyCanExecuteChanged();
             UpdateStatus();
 
             // Before the turn is drawn and before it is written down, so neither shows a template.
@@ -241,13 +362,21 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>Empties the conversation in front. The others are left alone.</summary>
     [RelayCommand]
     private void StartOver()
     {
         ResetAgent();
         Transcript.Clear();
         _earlier = null;       // nothing on screen to refer back to, so nothing to resolve against
-        Remember();            // nothing left to remember, so the stored log goes too
+
+        if (ActiveSession is { } active)
+        {
+            active.Entries = [];
+            active.Title = "New chat";
+        }
+
+        Remember();            // nothing left in this one to remember, so it drops out of the file
         UpdateStatus();
     }
 
@@ -282,12 +411,23 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     /// </summary>
     private void Remember()
     {
-        if (LogPath is { } path)
+        if (LogPath is not { } path)
         {
-            ChatLog.Save(path, Transcript
-                .Where(line => line.Kind != "note")
-                .Select(line => new ChatEntry { Kind = line.Kind, Text = line.Text, At = line.At }));
+            return;
         }
+
+        if (ActiveSession is { } active)
+        {
+            Stash(active);
+        }
+
+        ChatLog.SaveBook(path, new ChatBook
+        {
+            Sessions = Sessions
+                .Select(row => new ChatSession { Id = row.Id, At = row.At, Entries = row.Entries })
+                .ToList(),
+            Active = ActiveSession?.Id,
+        });
     }
 
     /// <summary>
@@ -300,31 +440,51 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     /// </summary>
     private void Recall()
     {
+        // Cleared without going through the swap: there is nothing to stash into, and the rows are
+        // about to be replaced wholesale.
+        _switching = true;
+        ActiveSession = null;
+        _switching = false;
+        Sessions.Clear();
+
         if (LogPath is not { } path)
         {
             return;
         }
 
-        var entries = ChatLog.Load(path);
-        if (entries.Count == 0)
+        var book = ChatLog.LoadBook(path);
+
+        foreach (var session in book.Sessions)
         {
+            Sessions.Add(new ChatSessionRow
+            {
+                Id = session.Id,
+                At = session.At,
+                Entries = session.Entries,
+                Title = ChatLog.TitleOf(session.Entries),
+            });
+        }
+
+        // The one that was in front last time, or the most recent, or a fresh one for a binary
+        // nothing has been asked about yet.
+        var pick = Sessions.FirstOrDefault(row => row.Id == book.Active) ?? Sessions.LastOrDefault();
+        if (pick is null)
+        {
+            NewSession();
             return;
         }
 
-        foreach (var entry in entries)
-        {
-            Transcript.Add(new AssistantLine(entry.Kind, entry.Text, entry.At));
-        }
+        Select(pick);
+        LoadInto(pick);
 
-        // Handed to the next agent built for this binary, so that answering the question the last
-        // session ended on means something. See AnalysisAgent.Earlier.
+        // LoadInto has already handed the end of it to the next agent built for this binary, so that
+        // answering the question the last session ended on means something. See AnalysisAgent.Earlier.
         //
         // Nothing is added to say so. There was a line here explaining that the conversation had
         // been restored and how much of it the assistant would be given, which was two sentences of
         // apology for a discontinuity that no longer exists: it picks up from the end of this, and
         // the names are in the project. A panel that explains itself every time it opens is one
         // more thing to read past.
-        _earlier = ChatLog.Recap(entries);
     }
 
     /// <summary>

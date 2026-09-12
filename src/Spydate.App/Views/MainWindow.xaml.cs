@@ -53,6 +53,34 @@ public partial class MainWindow : FluentWindow
 
         AssistantTranscript.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(OnTranscriptScrolled));
         AssistantTranscript.GotKeyboardFocus += (_, _) => HoldTranscriptStill();
+
+        // What the reader does with the wheel, the keys and the scrollbar is the only evidence of
+        // whether they still want the end followed. Preview, because the scrollbar lives inside this
+        // control's own template and a tunnelling event reaches here before it reaches the bar.
+        AssistantTranscript.PreviewMouseWheel += (_, _) => Gesture();
+        AssistantTranscript.PreviewKeyDown += (_, e) =>
+        {
+            if (Scrolls(e.Key))
+            {
+                Gesture();
+            }
+        };
+
+        AssistantTranscript.PreviewMouseLeftButtonDown += (_, _) => _dragging = true;
+        AssistantTranscript.PreviewMouseLeftButtonUp += (_, _) =>
+        {
+            _dragging = false;
+            Gesture();
+        };
+
+        // A drag that ends off the control never sees its button-up here, and a _dragging left true
+        // would treat every later move as the reader's doing.
+        AssistantTranscript.LostMouseCapture += (_, _) => _dragging = false;
+
+        // The window coming forward restores focus inside itself, which brings a caret into view and
+        // moves the transcript for reasons that have nothing to do with the reader. Alt-tabbing away
+        // and back while an answer was arriving was the commonest way to see it jump.
+        Activated += (_, _) => HoldTranscriptStill();
     }
 
     /// <summary>Ctrl+G: focus the go-to box.</summary>
@@ -175,8 +203,43 @@ public partial class MainWindow : FluentWindow
     // item. The view model still owns the lines; this only draws them.
     // ------------------------------------------------------------------
 
-    /// <summary>How many blocks the line being streamed into currently occupies, so it can be redrawn.</summary>
-    private int _streamingBlocks;
+    /// <summary>The paragraph an answer is streaming into, or null when nothing is arriving.</summary>
+    private System.Windows.Documents.Paragraph? _streamingParagraph;
+
+    /// <summary>How much of that line is already drawn, so that only the rest of it is added.</summary>
+    private int _drawn;
+
+    /// <summary>Whether a scroll-to-end is already queued, so a turn queues one pass and not one per token.</summary>
+    private bool _scrollPending;
+
+    /// <summary>
+    /// How many scrolls this class has asked for and not yet seen land.
+    ///
+    /// ScrollChanged does not say who caused it, and the only thing that should stop the view
+    /// following an answer is the reader scrolling away from the end themselves. A move this code
+    /// made — following the answer down, or putting the view back after focus moved the caret — is
+    /// not a vote about where to look, and counting it as one turned every focus change during a
+    /// turn into a silent decision to stop following, which is the jump.
+    ///
+    /// A count rather than a flag because these overlap, and it is cleared at Input priority rather
+    /// than straight after the call: the layout pass that raises ScrollChanged runs at Render, which
+    /// is higher, so a flag reset inline would already be down by the time the event arrived.
+    /// </summary>
+    private int _ourScrolls;
+
+    private void StopStreaming()
+    {
+        _streamingParagraph = null;
+        _drawn = 0;
+    }
+
+    /// <summary>Moves the view, and has the move ignored as evidence of what the reader wants.</summary>
+    private void Scrolling(Action move)
+    {
+        _ourScrolls++;
+        move();
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => _ourScrolls--));
+    }
 
     /// <summary>
     /// Whether new lines pull the view down with them. True until somebody scrolls up, and true
@@ -185,14 +248,54 @@ public partial class MainWindow : FluentWindow
     /// </summary>
     private bool _followTranscript = true;
 
+    /// <summary>How many scroll gestures the reader has made that have not yet been accounted for.</summary>
+    private int _gesture;
+
+    /// <summary>Whether the mouse is down on the transcript, which covers a drag of the scrollbar.</summary>
+    private bool _dragging;
+
+    /// <summary>The keys that move the view. Typing does not, since this is read-only.</summary>
+    private static bool Scrolls(Key key) =>
+        key is Key.PageUp or Key.PageDown or Key.Up or Key.Down or Key.Home or Key.End;
+
+    /// <summary>
+    /// Notes that the reader just did something that moves the view.
+    ///
+    /// Cleared at Background priority, which is below the Render pass that raises ScrollChanged, so
+    /// the gesture is still counted when the scroll it caused comes back.
+    /// </summary>
+    private void Gesture()
+    {
+        _gesture++;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => _gesture--));
+    }
+
+    private bool AtBottom() =>
+        AssistantTranscript.VerticalOffset
+            >= AssistantTranscript.ExtentHeight - AssistantTranscript.ViewportHeight - 4;
+
+    /// <summary>
+    /// Decides whether the reader still wants the end followed.
+    ///
+    /// Only a gesture they made counts. This used to infer it from the event instead — if the extent
+    /// and viewport had not changed, a person must have scrolled — and that reasoning is wrong for a
+    /// FlowDocument, which measures lazily: scrolling through text that has not been laid out yet
+    /// changes the extent as you go. So a genuine scroll upwards was read as layout noise and
+    /// discarded, following stayed on, and the next thing to call ScrollAssistantToEnd — a window
+    /// being activated was enough — threw the reader back to the bottom of a conversation they were
+    /// in the middle of reading. That needed no streaming at all, which is why it happened when
+    /// nothing was arriving.
+    /// </summary>
     private void OnTranscriptScrolled(object sender, ScrollChangedEventArgs e)
     {
-        // Only a scroll somebody made says anything about whether they want to follow along. The
-        // view moving because the document grew underneath it says nothing, and reading it as an
-        // instruction would turn every streamed token into a vote about where to look.
-        if (e.ExtentHeightChange == 0 && e.ViewportHeightChange == 0)
+        if (_ourScrolls > 0)
         {
-            _followTranscript = e.VerticalOffset >= e.ExtentHeight - e.ViewportHeight - 1;
+            return;
+        }
+
+        if (_gesture > 0 || _dragging)
+        {
+            _followTranscript = AtBottom();
         }
     }
 
@@ -207,15 +310,29 @@ public partial class MainWindow : FluentWindow
     private void HoldTranscriptStill()
     {
         double offset = AssistantTranscript.VerticalOffset;
+        bool follow = _followTranscript;
+
+        // Counted from here rather than around the correction below, because the scroll being
+        // corrected is the caret being brought into view, and that happens in between the two.
+        _ourScrolls++;
 
         // Later than Render and Loaded, which is when the caret is brought into view, and earlier
         // than the Background pass that follows a growing answer down.
         Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
         {
-            if (Math.Abs(AssistantTranscript.VerticalOffset - offset) > 0.5)
+            // Where to look is already decided when the end is being followed, and this offset was
+            // measured before the last tokens arrived. Putting it back would haul the view up and
+            // let the next pass drop it to the bottom again - the flicker this is meant to prevent.
+            if (follow)
+            {
+                ScrollAssistantToEnd();
+            }
+            else if (Math.Abs(AssistantTranscript.VerticalOffset - offset) > 0.5)
             {
                 AssistantTranscript.ScrollToVerticalOffset(offset);
             }
+
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => _ourScrolls--));
         }));
     }
 
@@ -224,7 +341,7 @@ public partial class MainWindow : FluentWindow
         if (e.Action == NotifyCollectionChangedAction.Reset)
         {
             AssistantTranscript.Document.Blocks.Clear();
-            _streamingBlocks = 0;
+            StopStreaming();
             _followTranscript = true;
             return;
         }
@@ -232,7 +349,7 @@ public partial class MainWindow : FluentWindow
         foreach (ViewModels.AssistantLine line in e.NewItems?.OfType<ViewModels.AssistantLine>() ?? [])
         {
             // A new line means the previous one is finished, whatever it was.
-            _streamingBlocks = 0;
+            StopStreaming();
 
             // Asking is a request to be shown the answer, wherever the reader had scrolled to.
             _followTranscript |= line.IsYou;
@@ -242,17 +359,41 @@ public partial class MainWindow : FluentWindow
         ScrollAssistantToEnd();
     }
 
-    /// <summary>The last line grew. Redraw just that line, as plain text while it is still arriving.</summary>
+    /// <summary>
+    /// The last line grew. Add what is new to it, as plain text while it is still arriving.
+    ///
+    /// Only the new characters. This used to redraw the whole line on every token — throw away its
+    /// blocks, re-split the entire answer so far, and rebuild every Run and LineBreak in it — which
+    /// is work proportional to the answer's length, done once per token, so the cost of a turn grew
+    /// as the square of its length. A long code listing is exactly the case where that gets large,
+    /// and with a full document re-layout behind each pass the window stopped responding.
+    /// </summary>
     private void RedrawStreamingLine()
     {
-        if (_streamingBlocks == 0 || _viewModel.Assistant.Transcript.Count == 0)
+        if (_streamingParagraph is not { } paragraph || _viewModel.Assistant.Transcript.Count == 0)
         {
             return;
         }
 
-        var line = _viewModel.Assistant.Transcript[^1];
-        RemoveLastBlocks(_streamingBlocks);
-        _streamingBlocks = Add(MarkdownFlow.Plain(line.Text), line);
+        string text = _viewModel.Assistant.Transcript[^1].Text;
+
+        // Normally the line has only grown. If it has somehow shrunk, the paragraph is built again
+        // rather than having the difference appended to text that is no longer underneath it. The
+        // check is on length alone: comparing the whole prefix would cost per token exactly what
+        // this method exists to stop paying.
+        if (text.Length < _drawn)
+        {
+            paragraph.Inlines.Clear();
+            _drawn = 0;
+        }
+
+        if (text.Length == _drawn)
+        {
+            return;
+        }
+
+        MarkdownFlow.AppendPlain(paragraph.Inlines, text[_drawn..]);
+        _drawn = text.Length;
         ScrollAssistantToEnd();
     }
 
@@ -266,7 +407,7 @@ public partial class MainWindow : FluentWindow
         // only the one at the end. A transcript is a few hundred blocks and this happens once a
         // turn at most.
         AssistantTranscript.Document.Blocks.Clear();
-        _streamingBlocks = 0;
+        StopStreaming();
 
         foreach (var line in _viewModel.Assistant.Transcript)
         {
@@ -279,25 +420,32 @@ public partial class MainWindow : FluentWindow
     /// <summary>The turn ended: draw the answer properly, now that all of it is known.</summary>
     private void FinishStreamingLine()
     {
-        if (_streamingBlocks == 0 || _viewModel.Assistant.Transcript.Count == 0)
+        if (_streamingParagraph is not { } paragraph || _viewModel.Assistant.Transcript.Count == 0)
         {
             return;
         }
 
         var line = _viewModel.Assistant.Transcript[^1];
-        RemoveLastBlocks(_streamingBlocks);
-        _streamingBlocks = 0;
+        AssistantTranscript.Document.Blocks.Remove(paragraph);
+        StopStreaming();
         Append(line);
         ScrollAssistantToEnd();
     }
 
     private void Append(ViewModels.AssistantLine line)
     {
-        int count = Add(Blocks(line), line);
+        // An answer still arriving is one paragraph of plain text, kept so the tokens that follow
+        // can be added to it rather than replacing it.
         if (line.Kind == "assistant" && _viewModel.Assistant.IsBusy)
         {
-            _streamingBlocks = count;
+            var paragraph = MarkdownFlow.PlainParagraph(line.Text);
+            AssistantTranscript.Document.Blocks.Add(paragraph);
+            _streamingParagraph = paragraph;
+            _drawn = line.Text.Length;
+            return;
         }
+
+        Add(Blocks(line), line);
     }
 
     private static IEnumerable<Block> Blocks(ViewModels.AssistantLine line) => line.Kind switch
@@ -328,14 +476,6 @@ public partial class MainWindow : FluentWindow
         return count;
     }
 
-    private void RemoveLastBlocks(int count)
-    {
-        for (int i = 0; i < count && AssistantTranscript.Document.Blocks.LastBlock is { } last; i++)
-        {
-            AssistantTranscript.Document.Blocks.Remove(last);
-        }
-    }
-
     /// <summary>
     /// After layout, not during it. Blocks have just been added and the document has not been
     /// measured yet, so scrolling now scrolls to the end of what was there a moment ago — which for
@@ -347,21 +487,28 @@ public partial class MainWindow : FluentWindow
     /// </summary>
     private void ScrollAssistantToEnd(int attempts = 12)
     {
-        if (!_followTranscript || attempts <= 0)
+        // One pass in flight at a time. Every token asks to be followed, and each ask used to queue
+        // a chain of up to twelve, each of which measures the whole document: a streamed answer was
+        // scheduling thousands of full re-measurements it did not need. The pass already queued
+        // re-reads the extent when it runs, so it covers whatever arrived while it was waiting.
+        if (!_followTranscript || attempts <= 0 || _scrollPending)
         {
             return;
         }
 
+        _scrollPending = true;
         double was = AssistantTranscript.ExtentHeight;
 
         Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
         {
+            _scrollPending = false;
+
             if (!_followTranscript)
             {
                 return;
             }
 
-            AssistantTranscript.ScrollToEnd();
+            Scrolling(() => AssistantTranscript.ScrollToEnd());
 
             // Again if the document grew under that scroll, or if it landed short of the bottom:
             // a FlowDocument of several hundred messages is not measured in one pass, so the first
