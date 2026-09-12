@@ -59,7 +59,10 @@
                      Foreground="{DynamicResource Text.Primary}"
                      ShowMaximize="True" ShowMinimize="True">
             <ui:TitleBar.Icon>
-                <ui:SymbolIcon Symbol="Bug24" FontSize="14" />
+                <!-- Pulled left to sit on the same edge as File below it. The TitleBar gives its
+                     icon a wider inset than a Menu gives its first item (10 = Menu padding 2 plus
+                     item padding 8), and the two controls know nothing of each other. -->
+                <ui:SymbolIcon Symbol="Bug24" FontSize="14" Margin="-6.67,0,0,0" />
             </ui:TitleBar.Icon>
         </ui:TitleBar>
 
