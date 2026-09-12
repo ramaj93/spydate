@@ -211,6 +211,99 @@ public class McpManagedTests
     // Finding
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // Following references
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void WhatAMethodCallsIsReadOutOfItsOwnIl()
+    {
+        string text = Nav().Xrefs("Spydate.Core.PE.PeImage::Load", direction: "from");
+
+        Assert.Contains("System.IO.File::ReadAllBytes", text, StringComparison.Ordinal);
+        Assert.Contains("IL_", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WhoCallsAMemberOfAnotherAssemblyIsAFairQuestion()
+    {
+        // The managed "who calls CreateFileW". A .NET assembly's import directory holds one entry,
+        // so nothing in the PE tables can answer this - only the IL can.
+        string text = Nav().Xrefs("System.IO.File::ReadAllBytes");
+
+        Assert.Contains("not defined in this assembly", text, StringComparison.Ordinal);
+        Assert.Contains("Spydate.Core.PE.PeImage::Load", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryXrefRowNamesSomethingReadFunctionAccepts()
+    {
+        // A row that has to be translated before it can be used is a row that gets translated
+        // wrongly. The site column is the same form read_function takes, and this proves it rather
+        // than asserting it in a comment.
+        var code = Code();
+        string text = Nav().Xrefs("System.IO.File::ReadAllBytes");
+
+        var sites = text.Split('\n')
+            .Where(l => l.Contains("::", StringComparison.Ordinal) && l.StartsWith("Spydate", StringComparison.Ordinal))
+            .Select(l => l.Split("  ", StringSplitOptions.RemoveEmptyEntries)[0].Trim())
+            .ToList();
+
+        Assert.NotEmpty(sites);
+        foreach (string site in sites)
+        {
+            Assert.DoesNotContain("is not a type or member", code.ReadFunction(site), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void AskingATypeWhatItRefersToSaysWhyThatIsNotAQuestion()
+    {
+        var nav = Nav();
+
+        Assert.Contains("Name a method", nav.Xrefs("Spydate.Core.PE.PeImage", direction: "from"), StringComparison.Ordinal);
+
+        // And the inward direction on a type is empty for a reason worth stating: a type is named by
+        // its members' signatures far more often than by an instruction, and signatures are not IL.
+        Assert.Contains("members are referred to individually", nav.Xrefs("Spydate.Core.PE.PeImage"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheRealImportListIsWhatTheCodeCallsElsewhere()
+    {
+        string text = Nav().ListImports(module: "System.IO");
+
+        Assert.Contains("System.IO", text, StringComparison.Ordinal);
+        Assert.Contains("xrefs", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.Ordinal);
+    }
+
+    // ------------------------------------------------------------------
+    // Literals
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void LiteralsComeFromTheIlAndNameTheMethodThatLoadsThem()
+    {
+        string text = new StringTools(Store()).FindStrings("MSF");
+
+        Assert.Contains("MsfFile", text, StringComparison.Ordinal);
+        Assert.Contains("Not an MSF 7.00", text, StringComparison.Ordinal);
+        Assert.Contains("treat them as data", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFilterThatCannotDoAnythingSaysSoRatherThanLookingApplied()
+    {
+        // referenced_only has nothing to remove here, because a literal is in the metadata only if
+        // an instruction loads it. Ignoring it silently would hand back an unfiltered list that
+        // looks filtered, and nothing in the answer would show it.
+        var tools = new StringTools(Store());
+
+        Assert.Contains("referenced_only did nothing", tools.FindStrings("MSF", referencedOnly: true), StringComparison.Ordinal);
+        Assert.DoesNotContain("referenced_only did nothing", tools.FindStrings("MSF"), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void NoAnswerTellsTheAgentToCallSomethingThatIsNotThere()
     {

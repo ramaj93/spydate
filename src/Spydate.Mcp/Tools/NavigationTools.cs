@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Reflection.Metadata;
 using ModelContextProtocol.Server;
 using Spydate.Core.Symbols;
+using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
@@ -137,7 +139,7 @@ public sealed class NavigationTools
     }
 
     [McpServerTool(Name = "list_imports")]
-    [Description("List imported functions with the IAT slot address to pass to xrefs, and how many arguments each takes where that could be read from the DLL on disk.")]
+    [Description("What the binary calls from elsewhere: imported functions with the IAT slot address to pass to xrefs, or in .NET the members it calls in other assemblies.")]
     public string ListImports(
         [Description("Only modules whose name contains this.")] string? module = null,
         [Description("Only functions whose name contains this.")] string? filter = null,
@@ -145,9 +147,21 @@ public sealed class NavigationTools
         [Description("Rows to skip, for paging.")] int offset = 0,
         [Description("Rows to return, at most 200.")] int limit = 60)
     {
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } open)
         {
             return SessionTools.NothingOpen;
+        }
+
+        // An IL-only assembly's import directory holds one entry, for the loader. Answering from it
+        // would be truthfully describing the wrong table: what the program uses is in its MemberRefs.
+        if (open.Managed is not null && open.Image.ClrHeader?.IsILOnly == true)
+        {
+            return ManagedImports(open, module, filter, sort, Math.Max(0, offset), Math.Clamp(limit, 1, MaxLimit));
+        }
+
+        if (open is not { Analysis: { } analysis } session)
+        {
+            return $"there is no import table to read: {open.Image.Machine} is not a machine this disassembles";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -186,7 +200,7 @@ public sealed class NavigationTools
     }
 
     [McpServerTool(Name = "xrefs")]
-    [Description("Every place that refers to an address, or everything one address refers to. This answers \"who calls this import\" and \"who reads this global\".")]
+    [Description("Every place that refers to an address, or everything one address refers to. This answers \"who calls this import\" and \"who reads this global\". In .NET: a type, a member, or one in another assembly like System.IO.File::Delete.")]
     public string Xrefs(
         [Description("Address, sub_XXXX, or a name. For an import use its IAT slot address from list_imports.")] string target,
         [Description("\"to\" (who refers to it) or \"from\" (what it refers to). Default \"to\".")] string direction = "to",
@@ -194,15 +208,41 @@ public sealed class NavigationTools
         [Description("Rows to skip, for paging.")] int offset = 0,
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
     {
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } open)
         {
             return SessionTools.NothingOpen;
+        }
+
+        // Resolved before the scan is paid for, not after. Walking every method body is the most
+        // expensive thing in this server, and a mixed-mode assembly can be asked about an address -
+        // for which the answer is native and the walk would have bought nothing.
+        var managed = ManagedTargets.Resolve(open, target);
+        if (managed.Found)
+        {
+            return ManagedXrefs(open, managed, direction, kind, offset, Math.Clamp(limit, 1, MaxLimit));
+        }
+
+        if (open is not { Analysis: { } analysis } session)
+        {
+            // Asked before giving up, not only on the way past a native miss: an ARM64 assembly has
+            // no analysis to fall through, and "who calls File.Delete" is still a fair question.
+            return open.References?.Import(target) is { } only
+                ? Outside(open, only, offset, Math.Clamp(limit, 1, MaxLimit))
+                : managed.Problem ?? $"there is nothing to cross-reference: {open.Image.Machine} is not a machine this disassembles";
         }
 
         var resolved = Targets.Resolve(session, target);
         if (!resolved.Found)
         {
-            return resolved.Problem!;
+            // Nothing here is an address or a name in this image, so the last thing it can be is a
+            // member of another assembly: "who calls File.Delete" is the managed question that the
+            // native side answers with list_imports and an IAT slot.
+            if (open.References?.Import(target) is { } import)
+            {
+                return Outside(open, import, offset, Math.Clamp(limit, 1, MaxLimit));
+            }
+
+            return managed.Problem ?? resolved.Problem!;
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -240,6 +280,147 @@ public sealed class NavigationTools
     }
 
     // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Who refers to a type or member of this assembly, or what one of its methods refers to.
+    ///
+    /// Every row names its site as <c>Namespace.Type::Member</c>, which is deliberately the same
+    /// form <c>read_function</c> takes: the point of an answer here is the call it leads to, and a
+    /// row that has to be translated before it can be used is a row that will be translated wrongly.
+    /// </summary>
+    private static string ManagedXrefs(BinarySession session, ManagedTarget target, string direction, string kind, int offset, int limit)
+    {
+        var references = session.References!;
+        offset = Math.Max(0, offset);
+        bool to = direction != "from";
+
+        if (!to)
+        {
+            if (target.Member is not { Handle.Kind: HandleKind.MethodDefinition } method)
+            {
+                return $"\"from\" reads what a method's own code refers to, and {target.Describe()} is "
+                       + (target.Member is null ? "a type" : "not a method") + ". Name a method.";
+            }
+
+            var edges = references.From((MethodDefinitionHandle)method.Handle)
+                .Where(e => Wanted(e.Site.Kind, kind))
+                .ToList();
+
+            var outward = new TextTable(("at", 7), ("kind", 6), ("refers to", 84));
+            foreach (var (entity, site) in edges.Skip(offset).Take(limit))
+            {
+                outward.Add($"IL_{site.Offset:X4}", site.Kind.ToString().ToLowerInvariant(), references.NameOf(entity));
+            }
+
+            return Budget.Clip($"what {target.Describe()} refers to\n"
+                               + outward.Render("it refers to nothing") + '\n'
+                               + Page(edges.Count, offset, limit, target.Key(), direction, kind));
+        }
+
+        var handle = target.Member?.Handle ?? target.Type!.Handle;
+        var sites = references.To(handle).Where(s => Wanted(s.Kind, kind)).ToList();
+
+        var table = new TextTable(("in", 84), ("at", 7), ("kind", 6));
+        foreach (var site in sites.Skip(offset).Take(limit))
+        {
+            table.Add(references.NameOf(site.From), $"IL_{site.Offset:X4}", site.Kind.ToString().ToLowerInvariant());
+        }
+
+        // An empty answer about a type is worth a sentence, because it is usually not what it looks
+        // like: a type is named by its members' signatures far more often than by an instruction,
+        // and none of that is in the IL to be found.
+        string nothing = target.Member is null
+            ? "no instruction names this type. Its members are referred to individually - ask about one of those"
+            : "nothing refers to it";
+
+        return Budget.Clip($"references to {target.Describe()}\n"
+                           + table.Render(nothing) + '\n'
+                           + Page(sites.Count, offset, limit, target.Key(), direction, kind));
+    }
+
+    /// <summary>
+    /// What the assembly calls in other assemblies, which is its real import list.
+    ///
+    /// Nothing in the PE import directory says any of this. A managed binary imports one function —
+    /// the loader's — and everything it actually uses is a MemberRef reached only by reading the
+    /// code, so this column of counts is the product of the IL walk rather than of a table lookup.
+    /// </summary>
+    private static string ManagedImports(BinarySession session, string? module, string? filter, string sort, int offset, int limit)
+    {
+        var references = session.References!;
+        var matching = references.Imports
+            .Where(i => module is null || i.Assembly.Contains(module, StringComparison.OrdinalIgnoreCase))
+            .Where(i => filter is null || i.FullName.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (sort == "name")
+        {
+            matching = matching
+                .OrderBy(i => i.Assembly, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(i => i.FullName, StringComparer.Ordinal)
+                .ToList();
+        }
+
+        var table = new TextTable(("assembly", 28), ("member", 72), ("refs", 5));
+        foreach (var import in matching.Skip(offset).Take(limit))
+        {
+            table.Add(
+                import.Assembly.Length == 0 ? "-" : import.Assembly,
+                import.FullName,
+                import.Count.ToString(CultureInfo.InvariantCulture));
+        }
+
+        int returned = Math.Max(0, Math.Min(limit, matching.Count - offset));
+        string? next = offset + returned < matching.Count ? $"list_imports(offset={offset + returned})" : null;
+
+        return Budget.Clip(table.Render("it calls nothing outside itself") + '\n'
+                           + TextTable.Meta(returned, matching.Count, references.Imports.Count, "members", next, $"sort={sort}")
+                           + "\n-- pass a member to xrefs to see every call to it --");
+    }
+
+    /// <summary>Where a member of another assembly is used. Always inward: its own code is not here.</summary>
+    private static string Outside(BinarySession session, ManagedImport import, int offset, int limit)
+    {
+        var references = session.References!;
+        offset = Math.Max(0, offset);
+
+        var table = new TextTable(("in", 84), ("at", 7), ("kind", 6));
+        foreach (var site in import.Sites.Skip(offset).Take(limit))
+        {
+            table.Add(references.NameOf(site.From), $"IL_{site.Offset:X4}", site.Kind.ToString().ToLowerInvariant());
+        }
+
+        string from = import.Assembly.Length > 0 ? $", from {import.Assembly}" : string.Empty;
+        return Budget.Clip($"references to {import.FullName}{from} - it is not defined in this assembly\n"
+                           + table.Render("nothing refers to it") + '\n'
+                           + Page(import.Sites.Count, offset, limit, import.FullName, "to", "all"));
+    }
+
+    private static string Page(int total, int offset, int limit, string target, string direction, string kind)
+    {
+        int returned = Math.Max(0, Math.Min(limit, total - offset));
+        string? next = offset + returned < total
+            ? $"xrefs(target=\"{target}\", direction=\"{direction}\", offset={offset + returned})"
+            : null;
+
+        return TextTable.Meta(returned, total, total, "references", next, $"kind={kind}");
+    }
+
+    /// <summary>
+    /// Whether a managed reference passes the native filter words.
+    ///
+    /// <c>code</c> and <c>data</c> are what every other binary is asked in, so they keep meaning
+    /// something here: calling and constructing are code, and touching a field, naming a type or
+    /// loading a literal are data. The managed kind names are accepted too, for an agent that has
+    /// read one out of a previous answer's own column.
+    /// </summary>
+    private static bool Wanted(ManagedRefKind actual, string kind) => kind switch
+    {
+        "all" => true,
+        "code" => actual is ManagedRefKind.Call or ManagedRefKind.New,
+        "data" => actual is ManagedRefKind.Read or ManagedRefKind.Write or ManagedRefKind.Type or ManagedRefKind.String,
+        _ => string.Equals(actual.ToString(), kind, StringComparison.OrdinalIgnoreCase),
+    };
 
     /// <summary>
     /// Type and member names matching a substring — the whole managed listing surface, since there

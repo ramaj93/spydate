@@ -35,6 +35,7 @@ public sealed class BinarySession : IDisposable
     private int _functionsAt = -1;
     private bool _namesChanged;
     private ManagedIndex? _index;
+    private ManagedReferences? _references;
 
     /// <param name="save">
     /// How annotations reach disk. Injectable so tests can watch a write without one landing in the
@@ -99,6 +100,14 @@ public sealed class BinarySession : IDisposable
     /// resolving a name cost the size of the assembly.
     /// </summary>
     public ManagedIndex? ManagedIndex => _index ??= Managed is null ? null : new ManagedIndex(Managed);
+
+    /// <summary>
+    /// Who refers to what, read out of the IL. Null for a native binary.
+    ///
+    /// Lazy, and worth being lazy about: it walks every method body in the assembly, which is the
+    /// most expensive thing here and is wasted on a session that only ever reads one type.
+    /// </summary>
+    public ManagedReferences? References => _references ??= Managed is null ? null : ManagedReferences.Build(Managed);
 
     public ProjectLoadResult? Project { get; }
 

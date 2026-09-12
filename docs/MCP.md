@@ -70,6 +70,26 @@ An overloaded name is refused with its overloads named rather than resolved to o
 reading the wrong overload produces something that looks exactly like reading the right one. Pass a
 signature — `Type::Method(String, Int32)` — to pick.
 
+`xrefs`, `find_strings` and `list_imports` are answered from a walk over every method body, because
+nothing else can answer them. ILSpy decompiles a member and will not say who calls it — its
+analyzers live in the ILSpy application rather than in the package — so the scan is ours, and one
+pass produces all three, since a string reference *is* a reference.
+
+`xrefs` takes a member of this assembly in either direction, or one of another assembly inward:
+`xrefs(target="System.IO.File::Delete")` is the managed "who calls `CreateFileW`". Every row names
+its site in the form `read_function` takes, so an answer leads directly to the next call. Asking a
+*type* what refers to it is usually empty and says why — a type is named by its members' signatures
+far more often than by an instruction, and signatures are not IL.
+
+`list_imports` on a managed assembly lists what it calls elsewhere, with counts, grouped by the
+assembly each member comes from. This is the real import list: the PE import directory of a .NET
+file holds a single entry, for the loader, and everything the program actually uses is a MemberRef
+that only the code mentions.
+
+`find_strings` returns the literals from the metadata with the method that loads each, which is the
+address column's job done better — the native side needs a second `xrefs` call to learn the same
+thing. `referenced_only` has nothing to filter there and says so rather than looking applied.
+
 `get_overview` describes the assembly as an assembly: full name, target framework, entry point,
 type and member counts, what it references. It also says which of the file's two readings is about
 the program. For an IL-only assembly the native lines above it describe the CLR loader stub, and

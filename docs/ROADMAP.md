@@ -169,11 +169,17 @@ native side already reads it, because native is what it is.
   every tool's schema is sent on every turn of every conversation, including the ones that never
   open a .NET file, and an empty `find_symbol` query lists types already. Reading a type's members
   is `read_function`, since in managed code the listing and the source are the same answer
-- ⬜ **Managed cross-references and strings.** `xrefs` on a method, and `find_strings` over `ldstr`
-  operands. This is the piece with no library behind it: ILSpy's analyzers live in the ILSpy
-  application, not in the `ICSharpCode.Decompiler` package, so scanning method bodies for
-  `call`/`callvirt`/`newobj`/`ldsfld`/`ldstr` tokens is ours to write. One pass produces both
-  answers, since a string reference *is* an xref
+- ✅ **Managed cross-references and strings.** `ManagedReferences` walks every method body once and
+  answers all of it: `xrefs` in both directions, `find_strings` from the literals with the method
+  that loads each, and `list_imports` as what the assembly calls elsewhere — which is its real
+  import list, since the PE import directory of a .NET file holds one entry, for the loader. The
+  piece with no library behind it, as expected: ILSpy's analyzers live in the ILSpy application
+  rather than in the package. Decided by operand *type* rather than by a list of opcodes, and the
+  opcode table is taken from `System.Reflection.Emit.OpCodes` instead of transcribed, because a
+  table that is wrong in one place mis-decodes every instruction after it in that method. Two
+  things had to be decoded rather than skipped: a MethodSpec, or every call to a generic method
+  would be counted against one instantiation; and a TypeSpec, without which `List.Add` and
+  `HashSet.Add` collapsed into one fictional member with ninety calls against it
 - ⬜ **IL patching.** A method body is bytes at an RVA, so `PatchStore`, `PatchWriter` and the
   overlap and original-bytes checks all apply unchanged. Two things are missing: an IL listing
   that carries the RVA in its first column, because `AddressText.FromLine` wants 8 or 16 hex
