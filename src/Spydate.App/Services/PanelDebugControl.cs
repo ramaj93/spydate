@@ -30,7 +30,17 @@ public sealed class PanelDebugControl : IDebugControl
     {
         // The confirmation the view model puts up is the point of routing through it: a person says
         // yes to running this binary, once, whoever asked for it.
-        OnUi(() => _debugger.StartCommand.Execute(null));
+        //
+        // The native path never yields, so the task is finished by the time Execute returns — but it
+        // is waited for anyway rather than relying on that, because which path runs is decided by
+        // the file that happens to be open.
+        Task? starting = null;
+        OnUi(() => starting = _debugger.StartCommand.ExecuteAsync(null));
+        if (starting is { IsCompleted: false } && Application.Current?.Dispatcher.CheckAccess() != true)
+        {
+            starting.GetAwaiter().GetResult();
+        }
+
         return _debugger.IsDebugging ? null : _debugger.Status;
     }
 

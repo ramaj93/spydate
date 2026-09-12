@@ -67,15 +67,25 @@ internal interface ICorDebug
 
     [PreserveSig] int SetUnmanagedHandler(IntPtr pCallback);
 
+    /// <summary>
+    /// Launches a program under this debugger. The .NET Framework route, and only that one —
+    /// CoreCLR answers <c>E_NOTIMPL</c>, which is the whole reason dbgshim exists.
+    ///
+    /// The strings are spelled out as <c>LPWStr</c> rather than left to the default, which for a COM
+    /// interface is <c>BSTR</c>: the runtime passes these straight to <c>CreateProcessW</c>, and a
+    /// BSTR arriving there is a pointer four bytes past a length the callee does not know about. The
+    /// command line is a pointer for a second reason — <c>CreateProcessW</c> may write into that
+    /// buffer, and a marshalled string is not ours to have written in.
+    /// </summary>
     [PreserveSig] int CreateProcess(
-        string? lpApplicationName,
-        string? lpCommandLine,
+        [MarshalAs(UnmanagedType.LPWStr)] string? lpApplicationName,
+        IntPtr lpCommandLine,
         IntPtr lpProcessAttributes,
         IntPtr lpThreadAttributes,
         int bInheritHandles,
         uint dwCreationFlags,
         IntPtr lpEnvironment,
-        string? lpCurrentDirectory,
+        [MarshalAs(UnmanagedType.LPWStr)] string? lpCurrentDirectory,
         IntPtr lpStartupInfo,
         IntPtr lpProcessInformation,
         int debuggingFlags,

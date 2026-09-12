@@ -261,6 +261,21 @@ native side already reads it, because native is what it is.
   it, and the type name comes from the module's own metadata rather than from `IMetaDataImport`.
   Two levels deep and six wide — a graph has no end and a line has a width — so what is not shown is
   an expandable tree, which is the next thing worth building here.
+  .NET Framework is debugged too, and until recently was not debugged at all. dbgshim's handshake
+  answers for CoreCLR and only for CoreCLR, and a .NET Framework program simply never signals the
+  event it waits on — so the program was launched, ran to the end undebugged, exited, and half a
+  minute later the panel reported that its runtime had never become debuggable. Nothing failed
+  anywhere. Those go through the metahost instead — `CLRCreateInstance`, `GetRuntime`,
+  `GetInterface(CLSID_CLRDebuggingLegacy)` — and `ICorDebug::CreateProcess` does the launching, which
+  is the call CoreCLR does not implement. Which route a file takes is decided from the file before
+  anything runs: a `.runtimeconfig.json` beside it, else its `TargetFrameworkAttribute`, else whether
+  it binds `mscorlib` or `System.Runtime`. Bitness is checked at the same time and refused with a
+  sentence, because ICorDebug does not cross that line and the failure is otherwise the same silence.
+  A .NET Framework 4.8 WPF application now holds before its first instruction, breaks on a line of
+  its own decompiled C#, and reads its arguments as values.
+  Starting no longer happens on the window's thread. That wait is bounded by a timeout rather than by
+  the debuggee, and on the UI thread it froze the whole application for its duration — which is what
+  anyone starting a .NET Framework binary saw, on top of it not working.
   Still to do: multiple threads and frames beyond the innermost, setting values, evaluation, and
   expanding a value in place.
   Four things cost real time and are worth knowing before touching this again. Registering for

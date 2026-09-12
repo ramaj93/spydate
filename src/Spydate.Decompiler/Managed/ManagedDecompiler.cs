@@ -12,30 +12,47 @@ public sealed class ManagedDecompiler
 {
     private readonly ManagedAssembly _assembly;
 
+    /// <summary>
+    /// One decompilation at a time, because there is one decompiler.
+    ///
+    /// ILSpy's <c>CSharpDecompiler</c> is not thread-safe and this one is shared by every open
+    /// document — and each document produces its text on a thread of its own, so opening a type and
+    /// a member together is two threads inside the same object. The cancellation token alone is
+    /// shared mutable state, before anything the decompiler does internally. It fails as a
+    /// <c>NullReferenceException</c> from somewhere inside ILSpy, which the document catches and
+    /// shows as "Decompilation failed" on a method that decompiles perfectly well when opened on
+    /// its own — so it looks like a bad binary rather than a race, and it comes and goes.
+    ///
+    /// A lock rather than a decompiler each: building one means building a type system for the
+    /// whole assembly, which for a real application is most of a second and several tens of
+    /// megabytes. Waiting for the tab next door is cheaper than that, and it happens off the
+    /// window's thread.
+    /// </summary>
+    private readonly Lock _oneAtATime = new();
+
     internal ManagedDecompiler(ManagedAssembly assembly) => _assembly = assembly;
+
+    /// <summary>Runs something on the shared decompiler, alone, with the caller's cancellation on it.</summary>
+    private T Decompiling<T>(CancellationToken cancellationToken, Func<ICSharpCode.Decompiler.CSharp.CSharpDecompiler, T> work)
+    {
+        lock (_oneAtATime)
+        {
+            var d = _assembly.CSharpDecompiler;
+            d.CancellationToken = cancellationToken;
+            return work(d);
+        }
+    }
 
     // ---------------- C# ----------------
 
     public string DecompileAssembly(CancellationToken cancellationToken = default)
-    {
-        var d = _assembly.CSharpDecompiler;
-        d.CancellationToken = cancellationToken;
-        return d.DecompileWholeModuleAsString();
-    }
+        => Decompiling(cancellationToken, d => d.DecompileWholeModuleAsString());
 
     public string DecompileType(ManagedType type, CancellationToken cancellationToken = default)
-    {
-        var d = _assembly.CSharpDecompiler;
-        d.CancellationToken = cancellationToken;
-        return d.DecompileTypeAsString(new FullTypeName(type.Definition.ReflectionName));
-    }
+        => Decompiling(cancellationToken, d => d.DecompileTypeAsString(new FullTypeName(type.Definition.ReflectionName)));
 
     public string DecompileMember(ManagedMember member, CancellationToken cancellationToken = default)
-    {
-        var d = _assembly.CSharpDecompiler;
-        d.CancellationToken = cancellationToken;
-        return d.DecompileAsString(member.Handle);
-    }
+        => Decompiling(cancellationToken, d => d.DecompileAsString(member.Handle));
 
     /// <summary>
     /// C# for one member, with the IL offset behind each line of it.
@@ -49,9 +66,7 @@ public sealed class ManagedDecompiler
     {
         ArgumentNullException.ThrowIfNull(member);
 
-        var d = _assembly.CSharpDecompiler;
-        d.CancellationToken = cancellationToken;
-        return SequencePoints.Of(d, d.Decompile(member.Handle), _assembly.Settings);
+        return Decompiling(cancellationToken, d => SequencePoints.Of(d, d.Decompile(member.Handle), _assembly.Settings));
     }
 
     /// <summary>
@@ -62,20 +77,16 @@ public sealed class ManagedDecompiler
     /// the decompiler is given that method and the ranges come back for the body it really has.
     /// </summary>
     public IReadOnlyList<SourceStatement> StatementsFor(MethodDefinitionHandle method, CancellationToken cancellationToken = default)
-    {
-        var d = _assembly.CSharpDecompiler;
-        d.CancellationToken = cancellationToken;
-        return SequencePoints.Statements(d, d.Decompile(method));
-    }
+        => Decompiling(cancellationToken, d => SequencePoints.Statements(d, d.Decompile(method)));
 
     /// <summary>C# for a whole type, with the IL offset behind each line — every method in it.</summary>
     public ManagedSource SourceForType(ManagedType type, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(type);
 
-        var d = _assembly.CSharpDecompiler;
-        d.CancellationToken = cancellationToken;
-        return SequencePoints.Of(d, d.DecompileType(new FullTypeName(type.Definition.ReflectionName)), _assembly.Settings);
+        return Decompiling(
+            cancellationToken,
+            d => SequencePoints.Of(d, d.DecompileType(new FullTypeName(type.Definition.ReflectionName)), _assembly.Settings));
     }
 
     /// <summary>

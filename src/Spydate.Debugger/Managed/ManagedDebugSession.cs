@@ -147,6 +147,14 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         string? workingDirectory = null,
         TimeSpan timeout = default,
         bool holdAtStart = false)
+        => Interop(() => StartCore(path, arguments, workingDirectory, timeout, holdAtStart));
+
+    private string? StartCore(
+        string path,
+        string? arguments,
+        string? workingDirectory,
+        TimeSpan timeout,
+        bool holdAtStart)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -161,6 +169,20 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             return $"there is no file at {path}";
         }
 
+        // Asked of the file before anything is launched, because the answer decides which of two
+        // entirely different routes gets hold of the runtime, and there is no second chance at it:
+        // by the time a program is running, the moment to have attached has gone.
+        var target = ManagedTarget.Of(path);
+
+        if (target.Wide != Environment.Is64BitProcess)
+        {
+            string them = target.Wide ? "64-bit" : "32-bit";
+            string us = Environment.Is64BitProcess ? "64-bit" : "32-bit";
+            return $"{System.IO.Path.GetFileName(path)} runs as a {them} process and this is a {us} "
+                   + $"Spydate. The CLR debugging interface does not cross that line, so a {us} "
+                   + $"debugger cannot drive it — it would need the {them} build.";
+        }
+
         string command = arguments is { Length: > 0 } ? $"\"{path}\" {arguments}" : $"\"{path}\"";
         _holdAtStart = holdAtStart;
         _callback = new ManagedCallback(this);
@@ -170,6 +192,50 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         _attached.Reset();
         _settled.Reset();
 
+        var patience = timeout == default ? TimeSpan.FromSeconds(30) : timeout;
+
+        // Said before the wait rather than after it. Getting hold of a runtime takes a moment and
+        // can take the whole timeout, and for all of it the panel read "nothing is running" — which
+        // is what it says when nobody has asked for anything, so a start in progress was
+        // indistinguishable from a start that had been ignored.
+        lock (_gate)
+        {
+            Status = $"starting {System.IO.Path.GetFileName(path)}";
+        }
+
+        if ((target.Framework
+                ? StartUnderFramework(path, command, workingDirectory, patience, target.Runtime)
+                : StartUnderCore(path, command, workingDirectory, patience)) is { } refused)
+        {
+            // Kept, so that anything asking the session afterwards is told why rather than being
+            // told nothing ever ran. The caller gets the same sentence to show straight away.
+            lock (_gate)
+            {
+                Status = refused;
+            }
+
+            return refused;
+        }
+
+        lock (_gate)
+        {
+            // Not overwritten when it is being held: the callback got there first and stopping is
+            // what was asked for.
+            if (State != DebugState.Stopped)
+            {
+                State = DebugState.Running;
+                Status = "running";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Launches under CoreCLR, through dbgshim's runtime-startup handshake. Null when it attached.
+    /// </summary>
+    private string? StartUnderCore(string path, string command, string? workingDirectory, TimeSpan patience)
+    {
         if (Launch(command, workingDirectory, out uint pid, out IntPtr resume) is { } refused)
         {
             Release();
@@ -202,9 +268,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         _ = Native.ResumeThread(resume);
         _ = Native.CloseHandle(resume);
 
+        lock (_gate)
+        {
+            Status = "waiting for its runtime";
+        }
+
         Note($"launched {System.IO.Path.GetFileName(path)} as process {pid}, waiting for its runtime");
 
-        var patience = timeout == default ? TimeSpan.FromSeconds(30) : timeout;
         if (!_ready.Wait(patience))
         {
             // Asked of the process rather than guessed at. The old sentence listed the two things
@@ -247,19 +317,124 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             return "its runtime started but never reported the process, so there is nothing to drive";
         }
 
-        lock (_gate)
+        return null;
+    }
+
+    /// <summary>
+    /// Launches under .NET Framework, through the metahost. Null when it attached.
+    ///
+    /// Shorter than the CoreCLR route and not because it does less. There is no handshake to wait
+    /// for: the runtime is already installed and already known, so its debugging interface can be
+    /// had before the process exists, and the interface then does the launching itself. Holding at
+    /// the start comes free with that — the first callback arrives with the program stopped before
+    /// its first managed instruction, which is the same place the other route reaches by creating
+    /// the process suspended.
+    ///
+    /// <c>ICorDebug::CreateProcess</c> is the call CoreCLR does not implement.
+    /// </summary>
+    private string? StartUnderFramework(
+        string path,
+        string command,
+        string? workingDirectory,
+        TimeSpan patience,
+        string runtime)
+    {
+        if (MetaHost.Debugger(runtime, out string? refused) is not { } debug)
         {
-            // Not overwritten when it is being held: the callback got there first and stopping is
-            // what was asked for.
-            if (State != DebugState.Stopped)
+            Release();
+            return refused ?? "the .NET Framework debugging interface could not be reached";
+        }
+
+        _debug = debug;
+
+        int hr = debug.Initialize();
+        if (hr < 0)
+        {
+            Release();
+            return $"ICorDebug::Initialize failed: 0x{hr:X8}";
+        }
+
+        // Set before anything is launched, for the same reason as on the other route: the first
+        // callback arrives during the call below, and one arriving with no handler is a debuggee
+        // stopped with nobody to let it go.
+        hr = debug.SetManagedHandler(_callback!);
+        if (hr < 0)
+        {
+            Release();
+            return $"ICorDebug::SetManagedHandler failed: 0x{hr:X8}";
+        }
+
+        Native.PROCESS_INFORMATION info;
+        IntPtr line = Marshal.StringToHGlobalUni(command);
+        try
+        {
+            unsafe
             {
-                State = DebugState.Running;
-                Status = "running";
+                var startup = new Native.STARTUPINFO { cb = (uint)sizeof(Native.STARTUPINFO) };
+                Native.PROCESS_INFORMATION started = default;
+
+                hr = debug.CreateProcess(
+                    null,
+                    line,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    0,
+                    ShowConsole ? Native.CREATE_NEW_CONSOLE : Native.CREATE_NO_WINDOW,
+                    IntPtr.Zero,
+                    workingDirectory,
+                    (IntPtr)(&startup),
+                    (IntPtr)(&started),
+                    NoSpecialOptions,
+                    out IntPtr process);
+
+                info = started;
+
+                // The process comes back held by the callback below, which is where it is wanted.
+                // This reference is the call's, not the session's: Created claims its own.
+                if (process != IntPtr.Zero)
+                {
+                    Marshal.Release(process);
+                }
             }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(line);
+        }
+
+        if (hr < 0)
+        {
+            Release();
+            return $"could not launch {System.IO.Path.GetFileName(path)} under the .NET Framework debugger: 0x{hr:X8}";
+        }
+
+        _pid = info.dwProcessId;
+        ProcessId = info.dwProcessId;
+        _launched = info.hProcess;
+        if (info.hThread != IntPtr.Zero)
+        {
+            _ = Native.CloseHandle(info.hThread);
+        }
+
+        Note($"launched {System.IO.Path.GetFileName(path)} as process {info.dwProcessId} under .NET Framework {runtime}");
+
+        if (!_attached.Wait(patience))
+        {
+            if (Ended() is null)
+            {
+                _ = Native.TerminateProcess(_launched, 1);
+            }
+
+            Release();
+            return $"{System.IO.Path.GetFileName(path)} started but its runtime never reported the process "
+                   + $"within {patience.TotalSeconds:0}s, so there is nothing to drive. It has been stopped.";
         }
 
         return null;
     }
+
+    /// <summary><c>CorDebugCreateProcessFlags.DEBUG_NO_SPECIAL_OPTIONS</c> — launch it as it is.</summary>
+    private const int NoSpecialOptions = 0;
 
     /// <summary>
     /// Creates the process suspended, so a debugger can be registered before it runs anything.
@@ -898,7 +1073,17 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                 int hr = process.Terminate(0);
                 if (hr < 0)
                 {
-                    Note($"the runtime would not terminate it: 0x{hr:X8}");
+                    // Asked once through the runtime and then done anyway. A process that will not
+                    // synchronise inside the timeout — a big application still starting, which is
+                    // exactly when somebody changes their mind about running it — refuses this with
+                    // CORDBG_E_PROCESS_NOT_SYNCHRONIZED, and stopping there leaves the debuggee
+                    // running under a session that is about to drop the interface to it. The
+                    // handle from the launch does not need the runtime's cooperation.
+                    Note($"the runtime would not terminate it (0x{hr:X8}), so it was killed outright");
+                    if (_launched != IntPtr.Zero)
+                    {
+                        _ = Native.TerminateProcess(_launched, 1);
+                    }
                 }
 
                 _ = process.Continue(0);

@@ -308,6 +308,27 @@ package is where it now lives. It contains exactly one file and no build targets
 build resolves the reference, succeeds, and leaves the DLL absent at run time; `Spydate.Debugger`
 copies it explicitly rather than taking a `RuntimeIdentifier` it has no other use for.
 
+**dbgshim answers for CoreCLR only, so .NET Framework goes the other way.** Its runtime-startup
+handshake waits on an event that only CoreCLR signals, and a .NET Framework program does not signal
+it — which is not an error anywhere. The registration succeeds, the program runs to completion
+undebugged, and thirty seconds later the debugger reports that nothing became debuggable, having
+watched the whole thing happen. No exception, no failing HRESULT, no breakpoint. Every .NET
+Framework binary behaved that way, which is most of what anybody opens a disassembler for.
+
+Those are reached through the metahost instead: `CLRCreateInstance` for `ICLRMetaHost`, `GetRuntime`
+for the version the file names, and `ICLRRuntimeInfo::GetInterface(CLSID_CLRDebuggingLegacy)` for an
+`ICorDebug`. From there it is the same interface and the same code — callbacks, breakpoints,
+stepping, values — so the split is four dozen lines at the start and nothing after it. That route
+also launches the process itself, through `ICorDebug::CreateProcess`, which CoreCLR does not
+implement and which is why dbgshim exists at all; holding before the first managed instruction comes
+free with it, where the other route gets there by creating the process suspended.
+
+Which of the two a file will use is decided before anything is launched, because afterwards it is
+too late to have attached: a `.runtimeconfig.json` beside it means .NET, otherwise its
+`TargetFrameworkAttribute` says, otherwise whether it binds `mscorlib` or `System.Runtime` does.
+Width is settled at the same time and for the same reason — ICorDebug does not cross the 32/64-bit
+line, and a debugger that tries fails by saying nothing.
+
 **It cannot extend `DebugSession`, and that is a fact about ICorDebug rather than a preference.**
 ICorDebug takes the process's native debug port and intends to be the only debugger attached, so
 managed debugging is a second `IDebugControl` implementation chosen when a binary is opened — which
@@ -382,3 +403,22 @@ process running, and found out only when the next callback arrived from it. `Sta
 signal raised *after* the create-process callback continues the debuggee rather than during it: told
 any earlier, a caller could terminate in the gap and have the callback's own continue resume what it
 had just killed.
+
+**A start does not happen on the window's thread.** Getting hold of a runtime is a wait bounded by a
+timeout rather than by anything the debuggee owes anybody, and run on the UI thread that wait is the
+window: menus stop opening, the panel stops repainting, and a launch that was never going to work
+holds the whole application for half a minute before saying why. The command is asynchronous and the
+session is told what it is doing as it does it — "starting", then "waiting for its runtime" — so the
+panel reads as busy rather than as idle. The assistant's adapter waits on the returned task from its
+own thread, which costs it what it cost before and costs the window nothing.
+
+**One decompiler, one caller at a time.** ILSpy's `CSharpDecompiler` is not thread-safe and there is
+one per assembly, shared by every open document — and each document produces its text on a thread of
+its own, so opening a type and a member together puts two threads inside it. The cancellation token
+alone is shared mutable state. It fails from somewhere inside ILSpy with whatever exception the torn
+state produces, which the document shows as "Decompilation failed" on a method that decompiles
+perfectly well on its own: it looks like a bad binary, and it comes and goes. A lock rather than a
+decompiler each, because building one means building a type system for the whole assembly — for a
+real application most of a second and tens of megabytes, against a wait for the tab next door that
+happens off the window's thread. A big type's tab can now keep a member's tab waiting, and the
+member's tab says "decompiling…" while it does.

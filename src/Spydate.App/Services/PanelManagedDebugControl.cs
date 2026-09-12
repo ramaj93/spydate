@@ -31,8 +31,33 @@ public sealed class PanelManagedDebugControl : IManagedDebugControl
         // The confirmation the view model puts up is the point of routing through it: a person says
         // yes to running this binary, once, whoever asked for it. It always holds at the start, so
         // the flag is not passed on — an agent that wants it running says continue.
-        OnUi(() => _debugger.StartCommand.Execute(null));
+        //
+        // Waited for on this thread rather than the window's. Starting is asynchronous now, so that
+        // the window stays alive while a runtime is being got hold of; Execute would hand back a
+        // promise and the answer below would be about a process that did not exist yet. Waiting
+        // here costs the agent what it cost before and costs the window nothing.
+        Task? starting = null;
+        OnUi(() => starting = _debugger.StartCommand.ExecuteAsync(null));
+        Settle(starting);
         return _debugger.IsDebugging ? null : _debugger.Status;
+    }
+
+    /// <summary>
+    /// Waits for a command that is still running.
+    ///
+    /// Not from the window's own thread, where the continuation it is waiting for would need that
+    /// thread to be free — the two would hold each other. That case does not arise: these are called
+    /// by the assistant, from its own thread. It is guarded rather than assumed because the cost of
+    /// being wrong is a window that never comes back.
+    /// </summary>
+    private static void Settle(Task? running)
+    {
+        if (running is null || running.IsCompleted || Application.Current?.Dispatcher.CheckAccess() == true)
+        {
+            return;
+        }
+
+        running.GetAwaiter().GetResult();
     }
 
     public void Stop() => OnUi(() => _debugger.StopDebuggingCommand.Execute(null));

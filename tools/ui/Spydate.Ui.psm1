@@ -11,11 +11,13 @@
 #     not enough for some of them - a real click is.
 #   * The window exposes no ComboBox to UIA. Click it and use {DOWN} then {ENTER}; without the
 #     {ENTER} the list stays open and the next click dismisses it and reverts the selection.
-#   * Modal dialogs are answered with a keystroke rather than by hunting the automation tree.
 #   * PrintWindow draws the window on its own and so misses every dialog, popup and dropdown, which
 #     are exactly the things worth photographing. Capture from the screen instead.
 #   * Non-ASCII in a menu header (an ellipsis, say) will not survive a script file read as ANSI, so
 #     match names by prefix rather than exactly.
+#   * A modal dialog is invisible to UIA - there is no button to find. Answer it with a keystroke,
+#     after waiting for a #32770 to take the foreground, and photograph only once it is gone:
+#     Save-Shot fronts the main window and would push the dialog behind it.
 #
 # Usage:
 #   Import-Module .\tools\ui\Spydate.Ui.psm1
@@ -46,6 +48,14 @@ public class SpydateWin {
     System.Threading.Thread.Sleep(150);
     mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);
     mouse_event(0x0004, 0, 0, 0, IntPtr.Zero);
+  }
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+  /// <summary>The class of whatever has the keyboard. "#32770" is every Win32 dialog.</summary>
+  public static string ForegroundClass() {
+    var name = new System.Text.StringBuilder(256);
+    GetClassName(GetForegroundWindow(), name, 256);
+    return name.ToString();
   }
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [StructLayout(LayoutKind.Sequential)] public struct R { public int L, T, Rr, B; }
@@ -215,13 +225,36 @@ function Confirm-Dialog {
     <#
     .SYNOPSIS Answers a modal dialog by keystroke. A MessageBox takes the foreground and its buttons
               carry access keys, so "y" is Yes - and this works whether or not the dialog publishes
-              itself to UIA, which is where an afternoon went.
-    #>
-    param($Ui, [string]$Key = "y", [int]$Wait = 2)
+              itself to UIA, which it does not: a MessageBox put up by this window appears in no
+              automation query at all, so there is nothing to find and click.
 
-    Start-Sleep -Seconds $Wait
+              Waited for by class rather than by clock. A dialog answered a fixed two seconds after
+              the menu item was invoked is a race, and losing it is silent and confusing: the
+              keystroke lands on the main window, the dialog comes up afterwards and is never
+              answered, and the run reads as a debugger that refused to start. #32770 is the
+              window class every Win32 dialog has.
+
+              Nothing may touch the foreground between the menu and this. Save-Shot in particular
+              fronts the main window, which puts a modal dialog behind it and sends the keystroke
+              to the wrong place - photograph after answering, not before.
+    #>
+    param($Ui, [string]$Key = "y", [int]$Wait = 10)
+
+    foreach ($i in 1..($Wait * 4)) {
+        if ([SpydateWin]::ForegroundClass() -eq '#32770') { break }
+        Start-Sleep -Milliseconds 250
+    }
+
     [System.Windows.Forms.SendKeys]::SendWait($Key)
-    Start-Sleep -Milliseconds 800
+
+    # And waited for again, because the answer is what the caller is really waiting on. A dialog
+    # still up here was not answered, and saying so beats letting the next step fail somewhere else.
+    foreach ($i in 1..20) {
+        if ([SpydateWin]::ForegroundClass() -ne '#32770') { return }
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw "the dialog did not answer to '$Key'"
 }
 
 function Save-Shot {

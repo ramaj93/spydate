@@ -284,10 +284,28 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     // ------------------------------------------------------------------
 
-    private bool CanStart() => _workspace.Current is not null && !IsDebugging;
+    private bool CanStart() => _workspace.Current is not null && !IsDebugging && !_starting;
 
+    /// <summary>
+    /// Whether a start is in flight. Not the same as running: getting hold of a runtime takes a
+    /// moment, and in that moment the state is still "not started", so nothing else says no.
+    /// </summary>
+    private bool _starting;
+
+    /// <summary>
+    /// Starts the open binary under a debugger.
+    ///
+    /// Asynchronous for the managed half of it, and that is not a refinement. Getting hold of a
+    /// runtime is a wait — for CoreCLR to publish itself, or for the first callback to arrive — and
+    /// it is bounded by a timeout rather than by anything the debuggee is obliged to do. Run on the
+    /// window's thread, that wait is the window: the menus stop opening, the panel does not repaint,
+    /// and a launch that is never going to work holds the whole application for half a minute before
+    /// saying so. Which is what a .NET Framework program did here, every time.
+    ///
+    /// The native path has no such wait and finishes inside this method without ever yielding.
+    /// </summary>
     [RelayCommand(CanExecute = nameof(CanStart))]
-    private void Start()
+    private async Task StartAsync()
     {
         if (_workspace.Current is not { } binary || binary.Image.Path is not { Length: > 0 } path)
         {
@@ -298,9 +316,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // not — and the assistant calls it directly. A second start does not replace the first: it
         // leaves the running process orphaned and begins another, so the analyst who agreed to run
         // this binary once has two of it, and the panel is showing only one.
-        if (IsDebugging)
+        if (IsDebugging || _starting)
         {
-            Status = "It is already running.";
+            Status = _starting ? "It is already starting." : "It is already running.";
             Add("already running — stop it before starting it again");
             return;
         }
@@ -335,7 +353,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             // reported after thirty seconds that the target did not look like .NET. The breakpoints
             // are unaffected: they name the module they are in and are planted when it loads, which
             // is exactly what running under a host does.
-            StartManaged(binary, run, host);
+            await StartManagedAsync(binary, run, host);
             return;
         }
 
@@ -402,7 +420,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// certainly in place before the code it is about, and it costs nothing: the panel comes up
     /// stopped and one click on continue lets it go.
     /// </summary>
-    private void StartManaged(OpenedBinary binary, string run, string? host)
+    private async Task StartManagedAsync(OpenedBinary binary, string run, string? host)
     {
         if (!_confirm(
                 "Run this binary?",
@@ -422,11 +440,26 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         session.Reported += OnManagedReported;
         _managed = session;
 
-        string? problem = session.Start(
-            run,
-            Arguments is { Length: > 0 } arguments ? arguments : null,
-            WorkingDirectory is { Length: > 0 } directory ? directory : null,
-            holdAtStart: true);
+        Status = $"Starting {Path.GetFileName(run)}…";
+        Add($"starting {run} under the .NET debugger");
+
+        string? arguments = Arguments is { Length: > 0 } given ? given : null;
+        string? directory = WorkingDirectory is { Length: > 0 } where ? where : null;
+
+        string? problem;
+        _starting = true;
+        NotifyCommands();
+        try
+        {
+            // Off the window's thread and waited for, rather than done on it. The await comes back
+            // here, on the thread that owns the bound collections, so everything below is unchanged.
+            problem = await Task.Run(
+                () => session.Start(run, arguments, directory, holdAtStart: true));
+        }
+        finally
+        {
+            _starting = false;
+        }
 
         if (problem is not null)
         {
