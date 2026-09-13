@@ -22,14 +22,6 @@ public sealed record RegisterRow(string Name, string Value, bool Changed);
 public sealed record StackRow(string Address, string Value);
 
 /// <summary>
-/// One local or argument of a stopped managed frame, as it reads.
-///
-/// <paramref name="Kind"/> is the type the runtime says it is, which is the part that makes the
-/// value worth anything: 0x1F2A40 is a number, and "string" tells you it is somewhere to look.
-/// </summary>
-public sealed record SlotRow(string Slot, string Kind, string Value);
-
-/// <summary>
 /// One module the debuggee has loaded. <paramref name="IsTarget"/> marks the one the listing is
 /// about, which under a host is the whole question — whether the DLL has been loaded yet.
 /// </summary>
@@ -99,8 +91,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         WorkingDirectory = target?.WorkingDirectory ?? string.Empty;
         Modules.Clear();
         Threads.Clear();
-        Locals.Clear();
+        Variables.Clear();
+        ManagedThreads.Clear();
+        _expanded.Clear();
         _statements.Clear();   // a different binary has different methods under the same tokens
+        _localNames.Clear();
         OnPropertyChanged(nameof(NeedsHost));
 
         // Which debugger applies is a fact about the file, so the panel rearranges itself when a
@@ -181,13 +176,46 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public ObservableCollection<RegisterRow> Registers { get; } = new();
 
     /// <summary>
-    /// The locals and arguments of a stopped managed frame.
+    /// The arguments and locals of the frame being looked at, as a tree flattened into rows.
     ///
     /// What replaces registers and stack words when the debuggee is .NET. They are not an addition
     /// to those — they are the same question answered by something that knows the answer. A native
-    /// stop can say <c>rcx = 0x1F2A40</c>; this can say the path being opened.
+    /// stop can say <c>rcx = 0x1F2A40</c>; this can say the path being opened, and open the object
+    /// holding it.
     /// </summary>
-    public ObservableCollection<SlotRow> Locals { get; } = new();
+    public ObservableCollection<VariableRow> Variables { get; } = new();
+
+    /// <summary>
+    /// Which rows were open, by path, so a step leaves them open.
+    ///
+    /// Without it every F10 folded the tree back to its roots, and a reader watching one field of one
+    /// object had to reopen it after every statement — which is the thing they were stepping to see.
+    /// </summary>
+    private readonly HashSet<string> _expanded = new(StringComparer.Ordinal);
+
+    /// <summary>The decompiler's names for each method's locals, by token, for the binary that is open.</summary>
+    private readonly Dictionary<uint, IReadOnlyDictionary<int, string>> _localNames = new();
+
+    /// <summary>The session's stop count when the tree and threads were last read, so a log line does not reread them.</summary>
+    private int _shownStops = -1;
+
+    /// <summary>
+    /// Every thread of a stopped .NET process, the one being looked at marked.
+    ///
+    /// The native panel has always had this; the managed one lost it when its registers pane was
+    /// swapped for Locals, and with it any way to see where the other threads were or to look at one.
+    /// </summary>
+    public ObservableCollection<ManagedThreadRow> ManagedThreads { get; } = new();
+
+    /// <summary>
+    /// The thread picked in the Threads pane. Picking one moves the values, the arrow and stepping to
+    /// it; the process stays stopped.
+    /// </summary>
+    [ObservableProperty]
+    private ManagedThreadRow? _selectedManagedThread;
+
+    /// <summary>True while the selection is being set from the session rather than by a person.</summary>
+    private bool _quietManagedThread;
 
     /// <summary>The top of the stack as of the last stop.</summary>
     public ObservableCollection<StackRow> Stack { get; } = new();
@@ -769,27 +797,179 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             Breakpoints.Add(breakpoint.ToString());
         }
 
-        Locals.Clear();
         if (State != DebugState.Stopped)
         {
             // Cleared rather than left, for the same reason the registers are: values belonging to a
             // frame that has run on read as current, and anything reasoning from them is reasoning
             // about somewhere the program no longer is.
+            Variables.Clear();
+            ManagedThreads.Clear();
+            _shownStops = -1;
             NotifyCommands();
             return;
         }
 
-        foreach (var argument in session.Values(arguments: true))
+        // Once per stop, not once per event. Every line the session logs while stopped arrives here —
+        // a breakpoint planted, a module noted — and rereading the tree for each would fold it and
+        // throw away the reader's place for nothing.
+        if (session.Stops != _shownStops)
         {
-            Locals.Add(new SlotRow($"arg {argument.Index}", argument.Kind, argument.Text));
-        }
-
-        foreach (var local in session.Values())
-        {
-            Locals.Add(new SlotRow($"local {local.Index}", local.Kind, local.Text));
+            _shownStops = session.Stops;
+            RefreshVariables(session);
+            RefreshManagedThreads(session);
         }
 
         NotifyCommands();
+    }
+
+    /// <summary>Reads the frame's values afresh, and reopens whatever was open before.</summary>
+    private void RefreshVariables(ManagedDebugSession session)
+    {
+        var names = LocalNames(session.StoppedAt);
+
+        Variables.Clear();
+        foreach (var variable in session.Variables())
+        {
+            // A local's slot gets the name the C# view gives it. Arguments already have theirs, from
+            // the metadata, and `this` is `this`.
+            bool isLocal = !variable.Path.Argument && variable.Path.Steps.IsEmpty;
+            var named = isLocal && names.TryGetValue((int)variable.Path.Slot, out string? name)
+                ? variable with { Name = name }
+                : variable;
+
+            Variables.Add(new VariableRow(named, 0, OnVariableToggled));
+        }
+
+        // Reopening walks forward over the rows it inserts, so an open row inside an open row opens
+        // too without anything recursive.
+        for (int i = 0; i < Variables.Count; i++)
+        {
+            var row = Variables[i];
+            if (row.Expandable && _expanded.Contains(row.Path.Key))
+            {
+                row.SetExpandedQuietly(true);
+                Expand(row);
+            }
+        }
+    }
+
+    private void OnVariableToggled(VariableRow row)
+    {
+        if (row.IsExpanded)
+        {
+            _expanded.Add(row.Path.Key);
+            Expand(row);
+        }
+        else
+        {
+            _expanded.Remove(row.Path.Key);
+            Collapse(row);
+        }
+    }
+
+    /// <summary>Inserts a row's children after it, read from the process now.</summary>
+    private void Expand(VariableRow row)
+    {
+        if (_managed is not { } session || !IsStopped)
+        {
+            return;
+        }
+
+        int at = Variables.IndexOf(row);
+        if (at < 0)
+        {
+            return;
+        }
+
+        int insert = at + 1;
+        foreach (var child in session.Children(row.Path))
+        {
+            Variables.Insert(insert++, new VariableRow(child, row.Depth + 1, OnVariableToggled));
+        }
+    }
+
+    /// <summary>Takes out every row below this one that is deeper than it.</summary>
+    private void Collapse(VariableRow row)
+    {
+        int at = Variables.IndexOf(row);
+        if (at < 0)
+        {
+            return;
+        }
+
+        while (at + 1 < Variables.Count && Variables[at + 1].Depth > row.Depth)
+        {
+            Variables.RemoveAt(at + 1);
+        }
+    }
+
+    /// <summary>
+    /// What the decompiler called a method's locals, when the stop is in the binary on screen. Empty
+    /// for any other module: there is no decompiled text of it beside the pane to agree with.
+    /// </summary>
+    private IReadOnlyDictionary<int, string> LocalNames(ManagedLocation? at)
+    {
+        if (at is null || _workspace.Current is not { } binary || binary.Managed is not { } managed
+            || !string.Equals(at.Module, binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
+        {
+            return NoNames;
+        }
+
+        if (_localNames.TryGetValue(at.MethodToken, out var known))
+        {
+            return known;
+        }
+
+        IReadOnlyDictionary<int, string> found;
+        try
+        {
+            found = managed.Decompiler.LocalNamesFor(
+                System.Reflection.Metadata.Ecma335.MetadataTokens.MethodDefinitionHandle((int)(at.MethodToken & 0x00FFFFFF)));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A method the decompiler will not take keeps its slot names. Nothing else depends on it.
+            found = NoNames;
+        }
+
+        _localNames[at.MethodToken] = found;
+        return found;
+    }
+
+    private static readonly IReadOnlyDictionary<int, string> NoNames = new Dictionary<int, string>();
+
+    private void RefreshManagedThreads(ManagedDebugSession session)
+    {
+        ManagedThreads.Clear();
+        foreach (var thread in session.Threads())
+        {
+            var row = ManagedThreadRow.From(thread);
+            ManagedThreads.Add(row);
+
+            if (row.IsSelected)
+            {
+                _quietManagedThread = true;
+                SelectedManagedThread = row;
+                _quietManagedThread = false;
+            }
+        }
+    }
+
+    partial void OnSelectedManagedThreadChanged(ManagedThreadRow? value)
+    {
+        if (_quietManagedThread || value is null || value.IsSelected || _managed is not { } session)
+        {
+            return;
+        }
+
+        if (session.SelectThread(value.Id) is { } problem)
+        {
+            Add(problem);
+            return;
+        }
+
+        // Now rather than when the session's note arrives, so the pane answers the click it was given.
+        SyncManaged();
     }
 
     private void OnReported(object? sender, DebugEvent e)
@@ -1209,7 +1389,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             _managed = null;
         }
 
-        Locals.Clear();
+        Variables.Clear();
+        ManagedThreads.Clear();
+        _shownStops = -1;
 
         LivePatches.Clear();
         OnPropertyChanged(nameof(HasLivePatches));

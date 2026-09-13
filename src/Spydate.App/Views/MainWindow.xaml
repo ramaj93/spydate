@@ -488,8 +488,13 @@
                                                          Style="{StaticResource StripTab}" Content="Locals"
                                                          IsChecked="{Binding IsManaged, Mode=OneWay}"
                                                          Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
-                                                         ToolTip="Arguments and locals of the frame it stopped in"
+                                                         ToolTip="Arguments and locals of the frame being looked at. Open a row to see inside it."
                                                          AutomationProperties.Name="Locals pane" />
+                                            <RadioButton x:Name="PaneManagedThreads" DockPanel.Dock="Left"
+                                                         Style="{StaticResource StripTab}" Content="Threads"
+                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         ToolTip="Every thread in the process. Pick one to read its values and step it."
+                                                         AutomationProperties.Name="Managed threads pane" />
                                             <RadioButton x:Name="PaneModules" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Modules"
                                                          AutomationProperties.Name="Modules pane" />
@@ -593,16 +598,139 @@
                                              native debugger cannot say. It can report rcx; this can
                                              report the path being opened, because the runtime knows
                                              what every slot is. -->
-                                        <DataGrid ItemsSource="{Binding Locals}" AutoGenerateColumns="False"
+                                        <!-- Name, Value, Type, as every Locals window lays them out. A flat
+                                             grid with indentation rather than a TreeView, so the three
+                                             columns line up however deep a row is. Opening a row
+                                             reads its children from the process at that moment. -->
+                                        <DataGrid ItemsSource="{Binding Variables}" AutoGenerateColumns="False"
                                                   IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  CanUserSortColumns="False" SelectionMode="Single" SelectionUnit="FullRow"
+                                                  EnableRowVirtualization="True"
                                                   Visibility="{Binding IsChecked, ElementName=PaneLocals, Converter={StaticResource BoolToVisibility}}"
                                                   AutomationProperties.Name="Locals and arguments">
                                             <DataGrid.Columns>
-                                                <DataGridTextColumn Header="slot" Binding="{Binding Slot}"
-                                                                    Foreground="{DynamicResource Text.Tertiary}" />
-                                                <DataGridTextColumn Header="type" Binding="{Binding Kind}" />
-                                                <DataGridTextColumn Header="value" Binding="{Binding Value}" Width="*"
+                                                <DataGridTemplateColumn Header="Name" Width="240">
+                                                    <DataGridTemplateColumn.CellTemplate>
+                                                        <DataTemplate>
+                                                            <StackPanel Orientation="Horizontal" Margin="{Binding Indent}">
+                                                                <ToggleButton Width="16" Height="16" Focusable="False" Cursor="Hand"
+                                                                              IsChecked="{Binding IsExpanded, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                              AutomationProperties.Name="Expand">
+                                                                    <ToggleButton.Style>
+                                                                        <Style TargetType="ToggleButton">
+                                                                            <Setter Property="Template">
+                                                                                <Setter.Value>
+                                                                                    <ControlTemplate TargetType="ToggleButton">
+                                                                                        <Border Background="Transparent">
+                                                                                            <TextBlock x:Name="Chevron" Text="&#x25B6;" FontSize="8"
+                                                                                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                                                       Foreground="{DynamicResource Text.Secondary}"
+                                                                                                       RenderTransformOrigin="0.5,0.5" />
+                                                                                        </Border>
+                                                                                        <ControlTemplate.Triggers>
+                                                                                            <Trigger Property="IsChecked" Value="True">
+                                                                                                <Setter TargetName="Chevron" Property="RenderTransform">
+                                                                                                    <Setter.Value>
+                                                                                                        <RotateTransform Angle="90" />
+                                                                                                    </Setter.Value>
+                                                                                                </Setter>
+                                                                                            </Trigger>
+                                                                                        </ControlTemplate.Triggers>
+                                                                                    </ControlTemplate>
+                                                                                </Setter.Value>
+                                                                            </Setter>
+                                                                            <Style.Triggers>
+                                                                                <!-- Hidden, not collapsed: the space stays, so a leaf's
+                                                                                     name lines up with its expandable siblings. -->
+                                                                                <DataTrigger Binding="{Binding Expandable}" Value="False">
+                                                                                    <Setter Property="Visibility" Value="Hidden" />
+                                                                                </DataTrigger>
+                                                                            </Style.Triggers>
+                                                                        </Style>
+                                                                    </ToggleButton.Style>
+                                                                </ToggleButton>
+                                                                <TextBlock Text="{Binding Name}" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                                           Foreground="{DynamicResource Text.Primary}" />
+                                                            </StackPanel>
+                                                        </DataTemplate>
+                                                    </DataGridTemplateColumn.CellTemplate>
+                                                </DataGridTemplateColumn>
+                                                <DataGridTemplateColumn Header="Value" Width="*">
+                                                    <DataGridTemplateColumn.CellTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Text="{Binding Value}" ToolTip="{Binding Value}"
+                                                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                                                       FontFamily="{DynamicResource Mono.FontFamily}">
+                                                                <TextBlock.Style>
+                                                                    <Style TargetType="TextBlock">
+                                                                        <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Text">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.String}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Character">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.String}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Keyword">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.Keyword}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Null">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.Keyword}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Number">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.Number}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Object">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.Type}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Enum">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Value.Enum}" />
+                                                                            </DataTrigger>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Unavailable">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </TextBlock.Style>
+                                                            </TextBlock>
+                                                        </DataTemplate>
+                                                    </DataGridTemplateColumn.CellTemplate>
+                                                </DataGridTemplateColumn>
+                                                <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="320"
+                                                                    Foreground="{DynamicResource Value.Type}" />
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+
+                                        <!-- Every thread, as a Threads window shows them. Picking one moves
+                                             the values, the arrow and stepping to it. -->
+                                        <DataGrid ItemsSource="{Binding ManagedThreads}" AutoGenerateColumns="False"
+                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  SelectedItem="{Binding SelectedManagedThread, Mode=TwoWay}"
+                                                  CanUserSortColumns="False" SelectionMode="Single" SelectionUnit="FullRow"
+                                                  Visibility="{Binding IsChecked, ElementName=PaneManagedThreads, Converter={StaticResource BoolToVisibility}}"
+                                                  ToolTip="Pick a thread to read its values and step it"
+                                                  AutomationProperties.Name="Managed threads">
+                                            <DataGrid.Columns>
+                                                <DataGridTemplateColumn Header="" Width="18">
+                                                    <DataGridTemplateColumn.CellTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Text="&#x25B6;" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                       Foreground="{DynamicResource Debug.Current}"
+                                                                       Visibility="{Binding IsSelected, Converter={StaticResource BoolToVisibility}}" />
+                                                        </DataTemplate>
+                                                    </DataGridTemplateColumn.CellTemplate>
+                                                </DataGridTemplateColumn>
+                                                <DataGridTextColumn Header="ID" Binding="{Binding IdText}"
                                                                     FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                <DataGridTextColumn Header="Managed ID" Binding="{Binding ManagedId}" />
+                                                <DataGridTextColumn Header="Category" Binding="{Binding Category}" />
+                                                <DataGridTextColumn Header="Name" Binding="{Binding Name}" />
+                                                <DataGridTextColumn Header="Location" Binding="{Binding Location}" Width="*"
+                                                                    Foreground="{DynamicResource Value.Type}" />
+                                                <DataGridTextColumn Header="Priority" Binding="{Binding Priority}" />
+                                                <DataGridTextColumn Header="AppDomain" Binding="{Binding AppDomain}" />
+                                                <DataGridTextColumn Header="State" Binding="{Binding State}"
+                                                                    Foreground="{DynamicResource Text.Secondary}" />
                                             </DataGrid.Columns>
                                         </DataGrid>
 

@@ -117,7 +117,7 @@ public sealed class PanelManagedDebugControl : IManagedDebugControl
     }
 
     private static IReadOnlyList<ManagedSlot> Slots(Debugger.Managed.ManagedDebugSession session, bool arguments)
-        => session.Values(arguments).Select(v => new ManagedSlot(v.Index, v.Kind, v.Text)).ToList();
+        => session.Values(arguments).Select(v => new ManagedSlot(v.Index, v.Kind, v.Text, v.Name)).ToList();
 
     /// <summary>
     /// Runs something on the UI thread and waits for it, so a caller gets the answer rather than a

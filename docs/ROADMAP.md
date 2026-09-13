@@ -276,8 +276,26 @@ native side already reads it, because native is what it is.
   Starting no longer happens on the window's thread. That wait is bounded by a timeout rather than by
   the debuggee, and on the UI thread it froze the whole application for its duration — which is what
   anyone starting a .NET Framework binary saw, on top of it not working.
-  Still to do: multiple threads and frames beyond the innermost, setting values, evaluation, and
-  expanding a value in place.
+  Locals is a tree now, laid out as every Locals window is — Name, Value, Type — with an expander on
+  anything that has an inside. `this` is `this`, parameters have their names from the metadata, and
+  locals have the names the decompiler gave them in the C# view beside the pane rather than `V_0`.
+  The Type column is the declared type, from the field, parameter or local signature, with the
+  runtime type after it in braces when they differ — so a null still says what it would have been,
+  and `object {int}` says what is in the box. An object opens to every field its whole class
+  hierarchy declares, read through the value's exact type; enums read as their member (`Angry`,
+  `Read | Write`), `int?` as what it holds, pointers padded to their width. A row is found again from
+  the frame by a path each time it is opened, never by a kept runtime object, so rows that were open
+  stay open across a step and show what they hold now.
+  The Threads tab is back for .NET, and says what a Threads window says: OS id, managed id, category,
+  name, where it is, priority, app domain and state. Picking a thread moves the values, the arrow and
+  stepping to it without letting the process run. A parameter the runtime will not read — the
+  framework's own code is optimised — is listed as unavailable rather than dropped.
+  Found on the way: `ICorDebugBoxValue`'s id had been `ICorDebugEval`'s since it was written, so no
+  boxed value was ever unboxed; a comment beside it claimed a test pinned it, and none did. One does
+  now, against a live box.
+  Still to do: a call stack and frames beyond the innermost; properties, which need function
+  evaluation; static members; setting values; and a location for a thread waiting inside the runtime,
+  which needs a stack walk rather than the innermost frame and today reads "not in managed code".
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable

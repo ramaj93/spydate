@@ -13,67 +13,27 @@ namespace Spydate.Tests;
 /// runtime never became debuggable, having watched the whole thing happen. No exception, no failing
 /// HRESULT, no breakpoint. That is what every .NET Framework binary did here.
 /// </summary>
+[Collection(Debugging.Name)]
 public class ManagedTargetTests
 {
-    /// <summary>
-    /// A .NET Framework program, compiled by the compiler that ships with the runtime itself.
-    ///
-    /// Built rather than found. The framework's own assemblies are poor examples — mscorlib
-    /// references nothing and carries no target-framework attribute — and picking some installed
-    /// application would make the test about whatever happened to be on the machine.
-    /// </summary>
-    private static string? FrameworkProgram
-    {
-        get
+    /// <summary>A .NET Framework program. See <see cref="FrameworkFixture"/> for why it is built.</summary>
+    private static string? FrameworkProgram => FrameworkFixture.Build("Legacy", """
+        using System;
+        class Legacy
         {
-            string compiler = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe");
-
-            if (!File.Exists(compiler))
+            static int Main(string[] argv)
             {
-                return null;
-            }
-
-            string folder = Path.Combine(Path.GetTempPath(), "spydate-framework-target");
-            Directory.CreateDirectory(folder);
-            string exe = Path.Combine(folder, "Legacy.exe");
-            if (File.Exists(exe))
-            {
-                return exe;
-            }
-
-            string source = Path.Combine(folder, "Legacy.cs");
-            File.WriteAllText(source, """
-                using System;
-                class Legacy
+                int total = 0;
+                for (int i = 0; i < 3; i++)
                 {
-                    static int Main(string[] argv)
-                    {
-                        int total = 0;
-                        for (int i = 0; i < 3; i++)
-                        {
-                            total += i;
-                        }
-
-                        Console.WriteLine(total);
-                        return total;
-                    }
+                    total += i;
                 }
-                """);
 
-            using var built = Process.Start(new ProcessStartInfo(compiler)
-            {
-                ArgumentList = { "-nologo", "-debug:full", "-platform:x64", "-out:" + exe, source },
-                WorkingDirectory = folder,
-                CreateNoWindow = true,
-                UseShellExecute = false,
-            });
-
-            built?.WaitForExit(60_000);
-            return File.Exists(exe) ? exe : null;
+                Console.WriteLine(total);
+                return total;
+            }
         }
-    }
+        """);
 
     /// <summary>The .NET program the rest of the debugger tests use.</summary>
     private static string? CoreProgram

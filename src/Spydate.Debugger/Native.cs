@@ -326,4 +326,10 @@ internal static partial class Native
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     internal static partial uint ResumeThread(IntPtr hThread);
+
+    /// <summary>A thread's scheduling priority. <c>THREAD_PRIORITY_ERROR_RETURN</c> when it cannot say.</summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    internal static partial int GetThreadPriority(IntPtr hThread);
+
+    internal const int THREAD_PRIORITY_ERROR_RETURN = 0x7FFFFFFF;
 }

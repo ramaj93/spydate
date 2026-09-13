@@ -79,6 +79,17 @@ public sealed class ManagedDecompiler
     public IReadOnlyList<SourceStatement> StatementsFor(MethodDefinitionHandle method, CancellationToken cancellationToken = default)
         => Decompiling(cancellationToken, d => SequencePoints.Statements(d, d.Decompile(method)));
 
+    /// <summary>
+    /// The names the decompiler gave a method's locals, by IL slot.
+    ///
+    /// Without symbols a local has no name anywhere in the binary — <c>V_0</c> is all the runtime can
+    /// say — but the C# view beside the Locals pane calls it <c>flag</c> or <c>currentProcess</c>, and
+    /// a pane that disagrees with the code makes the reader match the two up by type. The decompiler
+    /// chose the names on screen, so it is the one to ask. A slot it removed or merged has no entry.
+    /// </summary>
+    public IReadOnlyDictionary<int, string> LocalNamesFor(MethodDefinitionHandle method, CancellationToken cancellationToken = default)
+        => Decompiling(cancellationToken, d => SequencePoints.LocalNames(d, d.Decompile(method), method));
+
     /// <summary>C# for a whole type, with the IL offset behind each line — every method in it.</summary>
     public ManagedSource SourceForType(ManagedType type, CancellationToken cancellationToken = default)
     {

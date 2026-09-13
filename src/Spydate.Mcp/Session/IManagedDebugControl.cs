@@ -1,9 +1,9 @@
 namespace Spydate.Mcp.Session;
 
 /// <summary>One local or argument of a stopped managed frame.</summary>
-public readonly record struct ManagedSlot(int Index, string Kind, string Text)
+public readonly record struct ManagedSlot(int Index, string Kind, string Text, string? Name = null)
 {
-    public override string ToString() => $"[{Index}] {Kind} = {Text}";
+    public override string ToString() => Name is null ? $"[{Index}] {Kind} = {Text}" : $"[{Index}] {Name}: {Kind} = {Text}";
 }
 
 /// <summary>

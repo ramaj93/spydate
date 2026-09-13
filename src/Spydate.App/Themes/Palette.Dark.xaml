@@ -96,6 +96,14 @@
     <SolidColorBrush x:Key="Semantic.Ascii" Color="#4EC9B0" />
     <SolidColorBrush x:Key="Semantic.Address" Color="#858585" />
 
+    <!-- Values in the debugger's Locals pane, in the colours the C# view already uses for the same
+         things: a string in the pane and a string in the code beside it should look alike. -->
+    <SolidColorBrush x:Key="Value.String" Color="#CE9178" />
+    <SolidColorBrush x:Key="Value.Keyword" Color="#569CD6" />
+    <SolidColorBrush x:Key="Value.Number" Color="#B5CEA8" />
+    <SolidColorBrush x:Key="Value.Type" Color="#4EC9B0" />
+    <SolidColorBrush x:Key="Value.Enum" Color="#B8D7A3" />
+
     <!-- Control-flow graph. Edge colours say how control got there, not what it is. -->
     <SolidColorBrush x:Key="Graph.Background" Color="#1B1B1F" />
     <SolidColorBrush x:Key="Graph.Node" Color="#242429" />

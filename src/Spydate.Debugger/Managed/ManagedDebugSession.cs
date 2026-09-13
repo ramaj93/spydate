@@ -38,6 +38,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private uint _pid;
     private bool _holdAtStart;
     private ICorDebugThread? _stopped;
+
+    /// <summary>
+    /// The thread being looked at, when somebody picked one other than the thread that stopped. Null
+    /// means the stopped thread. Values, the arrow and stepping all follow it, so they cannot describe
+    /// one thread while acting on another.
+    /// </summary>
+    private ICorDebugThread? _selected;
     private ICorDebugStepper? _stepper;
     private bool _disposed;
 
@@ -53,6 +60,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
     /// <summary>The operating system id of the debuggee, once it exists.</summary>
     public uint ProcessId { get; private set; }
+
+    /// <summary>
+    /// How many times it has come to a stop, or been looked at from another thread. A view compares
+    /// this rather than the location to know it has something new to read: a loop stops at the same
+    /// offset every time round, with different values each time.
+    /// </summary>
+    public int Stops { get; private set; }
 
     /// <summary>Why the last stop happened.</summary>
     public ManagedStopKind StoppedBy { get; private set; }
@@ -800,7 +814,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                 return State == DebugState.Exited ? "it has exited" : "it is not stopped, so there is nothing to step";
             }
 
-            thread = _stopped;
+            thread = _selected ?? _stopped;
         }
 
         if (thread is null)
@@ -874,7 +888,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                 return "it is not stopped, so there is nothing to step out of";
             }
 
-            thread = _stopped;
+            thread = _selected ?? _stopped;
         }
 
         if (thread is null || thread.CreateStepper(out var stepper) < 0 || stepper is null)
@@ -958,7 +972,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         ICorDebugThread? thread;
         lock (_gate)
         {
-            thread = State == DebugState.Stopped ? _stopped : null;
+            thread = State == DebugState.Stopped ? _selected ?? _stopped : null;
         }
 
         if (thread is null || thread.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
@@ -1023,6 +1037,8 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             StoppedBy = ManagedStopKind.None;
             letting = _stopped;
             _stopped = null;
+            Com.Drop(_selected);
+            _selected = null;
             StoppedAt = null;
             _settled.Reset();
         }
@@ -1230,9 +1246,12 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         {
             Com.Drop(_stopped);
             _stopped = stopped;
+            Com.Drop(_selected);
+            _selected = null;
             State = DebugState.Stopped;
             StoppedBy = kind;
             StoppedAt = at;
+            Stops++;
             Status = at is null ? text : $"{text} at {at}";
         }
 
@@ -1262,7 +1281,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         ICorDebugThread? thread;
         lock (_gate)
         {
-            thread = State == DebugState.Stopped ? _stopped : null;
+            thread = State == DebugState.Stopped ? _selected ?? _stopped : null;
         }
 
         if (thread is null || thread.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
@@ -1272,8 +1291,530 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         return Com.Owned<ICorDebugILFrame, IReadOnlyList<ManagedValue>>(
             frame,
-            il => arguments ? ManagedValues.Arguments(il, _types) : ManagedValues.Locals(il, _types))
+            il =>
+            {
+                if (!arguments)
+                {
+                    return ManagedValues.Locals(il, _types);
+                }
+
+                var shape = Shape(il).Method;
+                return ManagedValues.Arguments(il, _types)
+                    .Select(value => value with { Name = ArgumentName(shape, (uint)value.Index) })
+                    .ToList();
+            })
             ?? Array.Empty<ManagedValue>();
+    }
+
+    /// <summary>
+    /// The frame's arguments and locals as the top of a value tree: <c>this</c> and the parameters by
+    /// name, locals by slot, each with its declared type. Open one with <see cref="Children"/>.
+    ///
+    /// Read from the thread being looked at, which is the one that stopped unless another has been
+    /// picked with <see cref="SelectThread"/>.
+    /// </summary>
+    public IReadOnlyList<ManagedVariable> Variables() => Interop(VariablesCore);
+
+    /// <summary>
+    /// What is inside a value the tree has shown: an object's fields, including every one its base
+    /// classes declare, or an array's elements. Walked again from the frame each time, so a path kept
+    /// across a step shows what is there now.
+    /// </summary>
+    public IReadOnlyList<ManagedVariable> Children(ManagedValuePath path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        return Interop(() => ChildrenCore(path));
+    }
+
+    /// <summary>How many argument or local slots to ask for before deciding a frame is not answering.</summary>
+    private const uint MaxSlots = 256;
+
+    private IReadOnlyList<ManagedVariable> VariablesCore()
+        => InFrame<IReadOnlyList<ManagedVariable>>(il =>
+        {
+            var (shape, locals) = Shape(il);
+            var rows = new List<ManagedVariable>();
+
+            // As many as the signature says there are, when it can be read. A refusal is then a slot the
+            // runtime will not read here — code the JIT optimised, which is most of the framework's own —
+            // and is shown as unavailable rather than taken for the end of the list. Taken for the end,
+            // Thread.Sleep(int millisecondsTimeout) listed no arguments at all, which reads as a method
+            // that has none.
+            uint arguments = shape is null ? MaxSlots : (uint)shape.ParameterNames.Count + (shape.IsStatic ? 0u : 1u);
+            for (uint i = 0; i < arguments; i++)
+            {
+                if (il.GetArgument(i, out IntPtr value) < 0)
+                {
+                    if (shape is null)
+                    {
+                        break;
+                    }
+
+                    value = IntPtr.Zero;
+                }
+
+                try
+                {
+                    rows.Add(ManagedVariables.Present(
+                        value, ArgumentName(shape, i), ArgumentType(shape, i), ManagedValuePath.OfArgument(i), _types));
+                }
+                finally
+                {
+                    if (value != IntPtr.Zero)
+                    {
+                        Marshal.Release(value);
+                    }
+                }
+            }
+
+            uint slots = shape is null ? MaxSlots : (uint)locals.Count;
+            for (uint i = 0; i < slots; i++)
+            {
+                if (il.GetLocalVariable(i, out IntPtr value) < 0)
+                {
+                    if (shape is null)
+                    {
+                        break;
+                    }
+
+                    value = IntPtr.Zero;
+                }
+
+                try
+                {
+                    // V_n until something better is known. Without symbols a local has no name in the
+                    // binary at all; the window swaps in the decompiler's, which is the name the C#
+                    // view is showing for the same slot.
+                    rows.Add(ManagedVariables.Present(
+                        value,
+                        "V_" + i.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        i < locals.Count ? locals[(int)i] : string.Empty,
+                        ManagedValuePath.OfLocal(i),
+                        _types));
+                }
+                finally
+                {
+                    if (value != IntPtr.Zero)
+                    {
+                        Marshal.Release(value);
+                    }
+                }
+            }
+
+            return rows;
+        }) ?? Array.Empty<ManagedVariable>();
+
+    private IReadOnlyList<ManagedVariable> ChildrenCore(ManagedValuePath path)
+        => InFrame<IReadOnlyList<ManagedVariable>>(il =>
+        {
+            IntPtr value;
+            int hr = path.Argument ? il.GetArgument(path.Slot, out value) : il.GetLocalVariable(path.Slot, out value);
+            if (hr < 0 || value == IntPtr.Zero)
+            {
+                return Array.Empty<ManagedVariable>();
+            }
+
+            foreach (var step in path.Steps)
+            {
+                IntPtr next = ManagedVariables.Follow(value, step);
+                Marshal.Release(value);
+                if (next == IntPtr.Zero)
+                {
+                    // The thing this path went through has changed under it since it was shown — a
+                    // field that was an object is null now. Nothing to list is the true answer.
+                    return Array.Empty<ManagedVariable>();
+                }
+
+                value = next;
+            }
+
+            try
+            {
+                return ManagedVariables.Children(value, path, _types);
+            }
+            finally
+            {
+                Marshal.Release(value);
+            }
+        }) ?? Array.Empty<ManagedVariable>();
+
+    /// <summary>Runs a read against the innermost frame of the thread being looked at, while stopped.</summary>
+    private T? InFrame<T>(Func<ICorDebugILFrame, T?> read)
+        where T : class
+    {
+        ICorDebugThread? thread;
+        lock (_gate)
+        {
+            thread = State == DebugState.Stopped ? _selected ?? _stopped : null;
+        }
+
+        if (thread is null || thread.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        return Com.Owned<ICorDebugILFrame, T>(frame, read);
+    }
+
+    /// <summary>The frame's method as its metadata declares it, and the declared types of its locals.</summary>
+    private (ManagedMethodShape? Method, IReadOnlyList<string> Locals) Shape(ICorDebugILFrame il)
+    {
+        if (il.GetFunction(out var function) < 0 || function is null)
+        {
+            return (null, Array.Empty<string>());
+        }
+
+        try
+        {
+            if (function.GetToken(out uint token) < 0)
+            {
+                return (null, Array.Empty<string>());
+            }
+
+            string? module = function.GetModule(out IntPtr owner) == 0
+                ? Com.Owned<ICorDebugModule, string>(owner, m => Com.NameOf(m))
+                : null;
+            uint signature = function.GetLocalVarSigToken(out uint sig) == 0 ? sig : 0;
+
+            return (_types.Method(module, token), _types.LocalTypes(module, token, signature));
+        }
+        finally
+        {
+            Com.Drop(function);
+        }
+    }
+
+    /// <summary>
+    /// What argument slot <paramref name="slot"/> is called. Slot zero of an instance method is
+    /// <c>this</c>, and has no row in the metadata's parameter table, so every name after it is one
+    /// slot further along than the table's numbering suggests.
+    /// </summary>
+    private static string ArgumentName(ManagedMethodShape? shape, uint slot)
+    {
+        string fallback = "A_" + slot.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (shape is null)
+        {
+            return fallback;
+        }
+
+        if (!shape.IsStatic)
+        {
+            if (slot == 0)
+            {
+                return "this";
+            }
+
+            slot--;
+        }
+
+        return slot < shape.ParameterNames.Count ? shape.ParameterNames[(int)slot] : fallback;
+    }
+
+    private static string ArgumentType(ManagedMethodShape? shape, uint slot)
+    {
+        if (shape is null)
+        {
+            return string.Empty;
+        }
+
+        if (!shape.IsStatic)
+        {
+            if (slot == 0)
+            {
+                return shape.DeclaringType;
+            }
+
+            slot--;
+        }
+
+        return slot < shape.ParameterTypes.Count ? shape.ParameterTypes[(int)slot] : string.Empty;
+    }
+
+    /// <summary>
+    /// Every thread the runtime knows about, while the process is stopped.
+    ///
+    /// Only while stopped, because the answers are about where each thread is, and a running thread
+    /// is somewhere else by the time the sentence is finished. A list taken at a stop is what a
+    /// Threads window shows, and it is cleared when the process runs again.
+    /// </summary>
+    public IReadOnlyList<ManagedThread> Threads() => Interop(ThreadsCore);
+
+    /// <summary>More threads than this is an enumeration that is not ending, not a process.</summary>
+    private const int MaxThreads = 1024;
+
+    private IReadOnlyList<ManagedThread> ThreadsCore()
+    {
+        ICorDebugProcess? process;
+        ICorDebugThread? stopped;
+        ICorDebugThread? selected;
+        lock (_gate)
+        {
+            if (State != DebugState.Stopped || _process is null)
+            {
+                return Array.Empty<ManagedThread>();
+            }
+
+            process = _process;
+            stopped = _stopped;
+            selected = _selected;
+        }
+
+        uint stoppedId = stopped is not null && stopped.GetID(out uint s) == 0 ? s : 0;
+        uint lookedId = selected is not null && selected.GetID(out uint l) == 0 ? l : stoppedId;
+
+        if (process.EnumerateThreads(out IntPtr all) < 0 || all == IntPtr.Zero)
+        {
+            return Array.Empty<ManagedThread>();
+        }
+
+        return Com.Owned<ICorDebugThreadEnum, IReadOnlyList<ManagedThread>>(all, threads =>
+        {
+            var found = new List<ManagedThread>();
+            for (int i = 0; i < MaxThreads; i++)
+            {
+                if (threads.Next(1, out IntPtr one, out uint fetched) < 0 || fetched == 0 || one == IntPtr.Zero)
+                {
+                    break;
+                }
+
+                if (Com.Owned<ICorDebugThread, ManagedThread>(one, thread => Describe(thread, stoppedId, lookedId)) is { } row)
+                {
+                    found.Add(row);
+                }
+            }
+
+            return found;
+        }) ?? Array.Empty<ManagedThread>();
+    }
+
+    private ManagedThread Describe(ICorDebugThread thread, uint stoppedId, uint lookedId)
+    {
+        uint id = thread.GetID(out uint osId) == 0 ? osId : 0;
+        var (managedId, name) = Identity(thread);
+
+        string location = Place(thread) is { } place ? Located(place) : "[not in managed code]";
+
+        // The handle is the runtime's, borrowed for the question: it is not ours to close.
+        string priority = thread.GetHandle(out IntPtr handle) == 0 && handle != IntPtr.Zero
+            ? PriorityName(Native.GetThreadPriority(handle))
+            : string.Empty;
+
+        string domain = thread.GetAppDomain(out IntPtr appDomain) == 0 && appDomain != IntPtr.Zero
+            ? Com.Owned<ICorDebugAppDomain, string>(appDomain, DomainName) ?? string.Empty
+            : string.Empty;
+
+        int user = thread.GetUserState(out int state) == 0 ? state : -1;
+
+        // ManagedThreadId 1 is the thread the runtime started the program on, in every version of it.
+        string category = managedId == 1 ? "Main Thread"
+            : user >= 0 && (user & UserThreadPool) != 0 ? "Thread Pool"
+            : managedId is null ? "Unknown"
+            : "Worker Thread";
+
+        return new ManagedThread(id, managedId, category, name, location, priority, domain, States(user), id == stoppedId, id == lookedId);
+    }
+
+    private string Located(Placed place)
+    {
+        string method = _types.Method(place.ModulePath, place.At.MethodToken)?.Display ?? $"0x{place.At.MethodToken:X8}";
+        return $"{place.At.Module}!{method} (IL=0x{place.At.Offset:X4})";
+    }
+
+    /// <summary>
+    /// A thread's managed id and name, read out of its <c>Thread</c> object's fields.
+    ///
+    /// The fields are called <c>_managedThreadId</c> and <c>_name</c> on .NET and
+    /// <c>m_ManagedThreadId</c> and <c>m_Name</c> on .NET Framework, so they are matched with the
+    /// prefix taken off rather than by either spelling.
+    /// </summary>
+    private (int? ManagedId, string Name) Identity(ICorDebugThread thread)
+    {
+        if (thread.GetObject(out IntPtr handle) < 0 || handle == IntPtr.Zero)
+        {
+            return (null, string.Empty);
+        }
+
+        try
+        {
+            int? managedId = null;
+            string name = string.Empty;
+
+            foreach (var field in ManagedVariables.Children(handle, ManagedValuePath.OfLocal(0), _types))
+            {
+                switch (Unprefixed(field.Name))
+                {
+                    case "managedthreadid" when int.TryParse(
+                        field.Value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int parsed):
+                        managedId = parsed;
+                        break;
+
+                    case "name" when field.Kind == ManagedValueKind.Text && field.Value.Length >= 2:
+                        name = field.Value[1..^1];
+                        break;
+                }
+            }
+
+            return (managedId, name);
+        }
+        finally
+        {
+            Marshal.Release(handle);
+        }
+    }
+
+    private static string Unprefixed(string field)
+        => (field.StartsWith("m_", StringComparison.Ordinal) ? field[2..] : field.TrimStart('_')).ToLowerInvariant();
+
+    /// <summary>An app domain as <c>[1] Capture.exe</c>, in the usual two-call shape for its name.</summary>
+    private static string? DomainName(ICorDebugAppDomain domain)
+    {
+        uint id = domain.GetID(out uint did) == 0 ? did : 0;
+        if (domain.GetName(0, out uint length, IntPtr.Zero) < 0 || length == 0 || length > 0x8000)
+        {
+            return $"[{id}]";
+        }
+
+        IntPtr buffer = Marshal.AllocCoTaskMem((int)length * sizeof(char));
+        try
+        {
+            string name = domain.GetName(length, out uint written, buffer) == 0
+                ? (Marshal.PtrToStringUni(buffer, (int)Math.Min(written, length)) ?? string.Empty).TrimEnd('\0')
+                : string.Empty;
+            return $"[{id}] {name}";
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(buffer);
+        }
+    }
+
+    private static string PriorityName(int priority) => priority switch
+    {
+        -15 => "Idle",
+        -2 => "Lowest",
+        -1 => "Below Normal",
+        0 => "Normal",
+        1 => "Above Normal",
+        2 => "Highest",
+        15 => "Time Critical",
+        Native.THREAD_PRIORITY_ERROR_RETURN => string.Empty,
+        _ => priority.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
+
+    // CorDebugUserState.
+    private const int UserStopRequested = 0x01;
+    private const int UserSuspendRequested = 0x02;
+    private const int UserBackground = 0x04;
+    private const int UserUnstarted = 0x08;
+    private const int UserStopped = 0x10;
+    private const int UserWaitSleepJoin = 0x20;
+    private const int UserSuspended = 0x40;
+    private const int UserThreadPool = 0x100;
+
+    private static string States(int user)
+    {
+        if (user < 0)
+        {
+            return string.Empty;
+        }
+
+        var said = new List<string>();
+        if ((user & UserBackground) != 0)
+        {
+            said.Add("Background");
+        }
+
+        if ((user & UserUnstarted) != 0)
+        {
+            said.Add("Unstarted");
+        }
+
+        if ((user & UserWaitSleepJoin) != 0)
+        {
+            said.Add("WaitSleepJoin");
+        }
+
+        if ((user & UserSuspended) != 0)
+        {
+            said.Add("Suspended");
+        }
+
+        if ((user & UserSuspendRequested) != 0)
+        {
+            said.Add("SuspendRequested");
+        }
+
+        if ((user & UserStopRequested) != 0)
+        {
+            said.Add("StopRequested");
+        }
+
+        if ((user & UserStopped) != 0)
+        {
+            said.Add("Stopped");
+        }
+
+        return string.Join(", ", said);
+    }
+
+    /// <summary>
+    /// Looks at a different thread: its values, its place in the code, and the thread a step will
+    /// step. The process stays stopped. Null when it worked.
+    /// </summary>
+    public string? SelectThread(uint threadId) => Interop(() => SelectThreadCore(threadId));
+
+    private string? SelectThreadCore(uint threadId)
+    {
+        ICorDebugProcess? process;
+        ICorDebugThread? stopped;
+        lock (_gate)
+        {
+            if (State != DebugState.Stopped || _process is null)
+            {
+                return "it is not stopped, so there is no thread to look at";
+            }
+
+            process = _process;
+            stopped = _stopped;
+        }
+
+        if (process.GetThread(threadId, out IntPtr pointer) < 0 || pointer == IntPtr.Zero)
+        {
+            return $"there is no managed thread {threadId}";
+        }
+
+        var chosen = Com.Keep<ICorDebugThread>(pointer);
+        Marshal.Release(pointer);
+        if (chosen is null)
+        {
+            return $"thread {threadId} could not be held on to";
+        }
+
+        bool isStopped = stopped is not null && stopped.GetID(out uint stoppedId) == 0 && stoppedId == threadId;
+        var at = WhereOf(chosen);
+
+        ICorDebugThread? previous;
+        lock (_gate)
+        {
+            previous = _selected;
+            _selected = isStopped ? null : chosen;
+            StoppedAt = at;
+            Stops++;
+        }
+
+        Com.Drop(previous);
+        if (isStopped)
+        {
+            Com.Drop(chosen);
+        }
+
+        // A stepper made on the thread looked at before would complete there, not here.
+        Retire();
+
+        Note(at is null
+            ? $"looking at thread {threadId}, which is not in managed code"
+            : $"looking at thread {threadId}, at {at}");
+        return null;
     }
 
     /// <summary>
@@ -1284,48 +1825,59 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     /// answer would be about a program that has moved on.
     /// </summary>
     private static ManagedLocation? Where(IntPtr thread)
-        => Com.Borrow<ICorDebugThread, ManagedLocation>(thread, running =>
+        => Com.Borrow<ICorDebugThread, ManagedLocation>(thread, WhereOf);
+
+    /// <summary>Where a thread is, as a method and an IL offset. Null when it is not in managed code.</summary>
+    private static ManagedLocation? WhereOf(ICorDebugThread running) => Place(running)?.At;
+
+    /// <summary>A place in the code, and the path of the module it is in.</summary>
+    private sealed record Placed(ManagedLocation At, string? ModulePath);
+
+    /// <summary>Where a thread is, with the path of its module, which names are read out of.</summary>
+    private static Placed? Place(ICorDebugThread running)
+    {
+        if (running.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
         {
-            if (running.GetActiveFrame(out IntPtr frame) < 0 || frame == IntPtr.Zero)
+            return null;   // a thread in native code has no managed frame, which is not a fault
+        }
+
+        return Com.Owned<ICorDebugILFrame, Placed>(frame, il =>
+        {
+            if (il.GetIP(out uint offset, out int mapping) < 0)
             {
-                return null;   // a thread in native code has no managed frame, which is not a fault
+                return null;
             }
 
-            return Com.Owned<ICorDebugILFrame, ManagedLocation>(frame, il =>
+            if (il.GetFunction(out var function) < 0 || function is null)
             {
-                if (il.GetIP(out uint offset, out int mapping) < 0)
+                return null;
+            }
+
+            try
+            {
+                if (function.GetToken(out uint token) < 0)
                 {
                     return null;
                 }
 
-                if (il.GetFunction(out var function) < 0 || function is null)
-                {
-                    return null;
-                }
+                string? module = function.GetModule(out IntPtr owner) == 0
+                    ? Com.Owned<ICorDebugModule, string>(owner, m => Com.NameOf(m))
+                    : null;
 
-                try
-                {
-                    if (function.GetToken(out uint token) < 0)
-                    {
-                        return null;
-                    }
-
-                    string? module = function.GetModule(out IntPtr owner) == 0
-                        ? Com.Owned<ICorDebugModule, string>(owner, m => Com.NameOf(m))
-                        : null;
-
-                    return new ManagedLocation(
+                return new Placed(
+                    new ManagedLocation(
                         module is null ? "(unknown)" : System.IO.Path.GetFileName(module),
-                        token,
-                        offset,
-                        Mapped(mapping));
-                }
-                finally
-                {
-                    Com.Drop(function);
-                }
-            });
+                    token,
+                    offset,
+                    Mapped(mapping)),
+                    module);
+            }
+            finally
+            {
+                Com.Drop(function);
+            }
         });
+    }
 
     /// <summary>
     /// Whether the IL offset is exact.
@@ -1430,6 +1982,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
             Com.Drop(_stopped);
             _stopped = null;
+
+            Com.Drop(_selected);
+            _selected = null;
 
             Com.Drop(_stepper);
             _stepper = null;

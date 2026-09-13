@@ -6,7 +6,10 @@ namespace Spydate.Debugger.Managed;
 /// <summary>One local or argument, as it reads.</summary>
 public sealed record ManagedValue(int Index, string Kind, string Text)
 {
-    public override string ToString() => $"[{Index}] {Kind} = {Text}";
+    /// <summary><c>this</c>, or the parameter's name. Null for a local, which has none without symbols.</summary>
+    public string? Name { get; init; }
+
+    public override string ToString() => Name is null ? $"[{Index}] {Kind} = {Text}" : $"[{Index}] {Name}: {Kind} = {Text}";
 }
 
 /// <summary>
@@ -255,6 +258,24 @@ internal static class ManagedValues
                         : null;
 
                     string name = types.Name(module, token) ?? "object";
+
+                    // An enum reads as its member, the way the source wrote it — Angry, not
+                    // { value__ = 2 }, which is what an enum is underneath and nobody wrote.
+                    if (types.IsEnum(module, token)
+                        && types.Fields(module, token, int.MaxValue).FirstOrDefault(f => f.Name == "value__") is { Token: not 0 } underlying
+                        && obj.GetFieldValue(held, underlying.Token, out IntPtr raw) == 0
+                        && raw != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            ulong bits = ManagedVariables.Raw(raw, out _) ?? 0;
+                            return new Described(name, types.EnumText(module, token, bits));
+                        }
+                        finally
+                        {
+                            Marshal.Release(raw);
+                        }
+                    }
                     var fields = depth > 0 ? types.Fields(module, token, MaxInside) : System.Array.Empty<ManagedField>();
                     if (fields.Count == 0)
                     {
@@ -295,7 +316,7 @@ internal static class ManagedValues
     }
 
     /// <summary>A number or a character, copied out of the debuggee and formatted by its own type.</summary>
-    private static string? Primitive(IntPtr value, int kind)
+    internal static string? Primitive(IntPtr value, int kind)
     {
         int size = Com.Borrow<ICorDebugValue, int?>(value, v => v.GetSize(out uint s) == 0 ? (int)s : null) ?? 0;
         if (size is <= 0 or > 8)
@@ -348,7 +369,7 @@ internal static class ManagedValues
     };
 
     /// <summary>The text of a string on the debuggee's heap, clipped and escaped.</summary>
-    private static string? Text(IntPtr pointed)
+    internal static string? Text(IntPtr pointed, int limit = MaxString)
     {
         return Com.Borrow<ICorDebugStringValue, string>(pointed, text =>
             {
@@ -357,7 +378,7 @@ internal static class ManagedValues
                     return null;
                 }
 
-                uint wanted = Math.Min(length, MaxString) + 1;
+                uint wanted = (uint)Math.Min(length, (uint)limit) + 1;
                 IntPtr buffer = Marshal.AllocCoTaskMem((int)wanted * sizeof(char));
                 try
                 {
@@ -368,7 +389,7 @@ internal static class ManagedValues
 
                     string read = Marshal.PtrToStringUni(buffer, (int)Math.Min(written, wanted)) ?? string.Empty;
                     read = read.TrimEnd('\0');
-                    string clipped = length > MaxString ? read + "..." : read;
+                    string clipped = length > limit ? read + "..." : read;
                     return $"\"{clipped.Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
                 }
                 finally
@@ -378,7 +399,7 @@ internal static class ManagedValues
             });
     }
 
-    private static string Name(int kind) => kind switch
+    internal static string Name(int kind) => kind switch
     {
         ElementBoolean => "bool",
         ElementChar => "char",
@@ -403,26 +424,26 @@ internal static class ManagedValues
     };
 
     // CorElementType, from the metadata specification. Only the ones that can be a slot's type.
-    private const int ElementBoolean = 0x02;
-    private const int ElementChar = 0x03;
-    private const int ElementI1 = 0x04;
-    private const int ElementU1 = 0x05;
-    private const int ElementI2 = 0x06;
-    private const int ElementU2 = 0x07;
-    private const int ElementI4 = 0x08;
-    private const int ElementU4 = 0x09;
-    private const int ElementI8 = 0x0A;
-    private const int ElementU8 = 0x0B;
-    private const int ElementR4 = 0x0C;
-    private const int ElementR8 = 0x0D;
-    private const int ElementString = 0x0E;
-    private const int ElementPtr = 0x0F;
-    private const int ElementValueType = 0x11;
-    private const int ElementClass = 0x12;
-    private const int ElementArray = 0x14;
-    private const int ElementI = 0x18;
-    private const int ElementU = 0x19;
-    private const int ElementFnPtr = 0x1B;
-    private const int ElementObject = 0x1C;
-    private const int ElementSzArray = 0x1D;
+    internal const int ElementBoolean = 0x02;
+    internal const int ElementChar = 0x03;
+    internal const int ElementI1 = 0x04;
+    internal const int ElementU1 = 0x05;
+    internal const int ElementI2 = 0x06;
+    internal const int ElementU2 = 0x07;
+    internal const int ElementI4 = 0x08;
+    internal const int ElementU4 = 0x09;
+    internal const int ElementI8 = 0x0A;
+    internal const int ElementU8 = 0x0B;
+    internal const int ElementR4 = 0x0C;
+    internal const int ElementR8 = 0x0D;
+    internal const int ElementString = 0x0E;
+    internal const int ElementPtr = 0x0F;
+    internal const int ElementValueType = 0x11;
+    internal const int ElementClass = 0x12;
+    internal const int ElementArray = 0x14;
+    internal const int ElementI = 0x18;
+    internal const int ElementU = 0x19;
+    internal const int ElementFnPtr = 0x1B;
+    internal const int ElementObject = 0x1C;
+    internal const int ElementSzArray = 0x1D;
 }

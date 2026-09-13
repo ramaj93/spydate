@@ -131,6 +131,44 @@ internal static class SequencePoints
         return found;
     }
 
+    /// <summary>
+    /// The name each IL local slot has in the decompiled method, first name wins.
+    ///
+    /// Only variables that are real IL locals: stack slots and parameters also carry an index, but it
+    /// numbers something else. A slot the decompiler split in two keeps the first name, which is the
+    /// one declared first in the text.
+    /// </summary>
+    internal static IReadOnlyDictionary<int, string> LocalNames(CSharpDecompiler decompiler, SyntaxTree tree, System.Reflection.Metadata.MethodDefinitionHandle method)
+    {
+        var names = new Dictionary<int, string>();
+        var wanted = (System.Reflection.Metadata.EntityHandle)method;
+
+        foreach (var function in decompiler.CreateSequencePoints(tree).Keys)
+        {
+            if ((function.MoveNextMethod ?? function.Method) is not { } owner || !owner.MetadataToken.Equals(wanted))
+            {
+                continue;
+            }
+
+            foreach (var variable in function.Variables)
+            {
+                if (variable.Kind is ICSharpCode.Decompiler.IL.VariableKind.Local
+                        or ICSharpCode.Decompiler.IL.VariableKind.PinnedLocal
+                        or ICSharpCode.Decompiler.IL.VariableKind.PinnedRegionLocal
+                        or ICSharpCode.Decompiler.IL.VariableKind.UsingLocal
+                        or ICSharpCode.Decompiler.IL.VariableKind.ForeachLocal
+                        or ICSharpCode.Decompiler.IL.VariableKind.ExceptionLocal
+                    && variable.Index is int index
+                    && !string.IsNullOrEmpty(variable.Name))
+                {
+                    names.TryAdd(index, variable.Name);
+                }
+            }
+        }
+
+        return names;
+    }
+
     /// <summary>The statement an offset is inside, or null when it is in none of them.</summary>
     internal static SourceStatement? Containing(IReadOnlyList<SourceStatement> statements, uint token, int offset)
     {

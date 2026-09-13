@@ -422,3 +422,39 @@ decompiler each, because building one means building a type system for the whole
 real application most of a second and tens of megabytes, against a wait for the tab next door that
 happens off the window's thread. A big type's tab can now keep a member's tab waiting, and the
 member's tab says "decompiling…" while it does.
+
+**A value in the Locals tree is found by a path, never kept as the runtime's object.** An
+`ICorDebugValue` is good for as long as the process stays stopped, so a tree holding them is a tree
+of dangling pointers after the first step — and a tree that refolded itself after every step instead
+would be one the reader has to reopen to see the thing they are stepping to watch. Each row carries
+the argument or local slot it started from and the fields and elements it went through; opening it
+walks that path again from the current frame. Open rows stay open across a step, keyed by path, and
+show what they hold now. A step through a field that has since become null finds nothing, which is
+the true answer.
+
+**Fields, not properties.** A property is a method, and showing one means running code in the stopped
+process — function evaluation, with its own hazards (a getter that blocks, one that has side effects,
+one that throws). A field is memory the runtime reads. Auto-properties still appear under their own
+names, because their backing field carries it.
+
+**The Type column says the declared type, and the runtime type after it when they differ.** Both are
+facts. The declared type comes from a signature — a field's, a parameter's, a local's — and is the
+only thing a null has; the runtime type comes from the value and is usually the more useful one:
+`System.Collections.IDictionary {System.Collections.Specialized.HybridDictionary}`. Names are
+namespace-qualified, with C# keywords for the built-in types.
+
+**Local names come from the decompiler.** Without symbols a local has no name anywhere in the binary.
+The C# view beside the pane calls it `flag`; a pane calling it `V_0` makes the reader match them by
+type. So the window asks the decompiler which name it gave each IL slot, for the binary on screen.
+The agent's text snapshot keeps slot numbers for locals: it has no C# view to agree with.
+
+**Picking a thread moves everything to it.** Values, the execution arrow, statement ranges and the
+thread a step steps are all the selected thread's, and the process stays stopped. A selection that
+moved only the values would describe one thread while the buttons acted on another, which is the same
+mistake the native panel was corrected for.
+
+**An interface id is asked of a live object before anything is built on it.** `ICorDebugBoxValue` was
+`ICorDebugEval`'s id from the day it was written, beside a comment saying a test pinned it; no test
+did, and no boxed value was ever unboxed. It surfaced only because a purpose-built fixture put a boxed
+`42` in front of the tree. The two ids added for this work were probed on a live value first, and the
+box id is now pinned by a test that asks a real box.

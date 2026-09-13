@@ -7,7 +7,19 @@ using System.Reflection.PortableExecutable;
 namespace Spydate.Debugger.Managed;
 
 /// <summary>One field of a type, as the runtime will be asked for it.</summary>
-internal readonly record struct ManagedField(string Name, uint Token);
+internal readonly record struct ManagedField(string Name, uint Token, string Type = "");
+
+/// <summary>A method as its metadata declares it: whether it has a <c>this</c>, and what its parameters are called.</summary>
+internal sealed record ManagedMethodShape(
+    bool IsStatic,
+    string DeclaringType,
+    string Name,
+    IReadOnlyList<string> ParameterNames,
+    IReadOnlyList<string> ParameterTypes)
+{
+    /// <summary><c>CSProApp.Main.App.OnStartup(System.Windows.StartupEventArgs)</c>.</summary>
+    internal string Display => $"{DeclaringType}.{Name}({string.Join(", ", ParameterTypes)})";
+}
 
 /// <summary>
 /// Names for the types the debuggee is holding.
@@ -75,7 +87,10 @@ internal sealed class ManagedTypes : IDisposable
                     continue;
                 }
 
-                found.Add(new ManagedField(Readable(reader.GetString(field.Name)), (uint)MetadataTokens.GetToken(handle)));
+                found.Add(new ManagedField(
+                    Readable(reader.GetString(field.Name)),
+                    (uint)MetadataTokens.GetToken(handle),
+                    Declared(() => field.DecodeSignature(new ManagedTypeNames(reader), new GenericScope(Handle(typeDefToken), default)))));
                 if (found.Count == limit)
                 {
                     break;
@@ -87,6 +102,230 @@ internal sealed class ManagedTypes : IDisposable
         catch (Exception ex) when (ex is BadImageFormatException or ArgumentOutOfRangeException or InvalidOperationException)
         {
             return Array.Empty<ManagedField>();
+        }
+    }
+
+    /// <summary>
+    /// A type's full name — namespace, declaring types, generic parameters — or null when the
+    /// module's metadata is not readable. What a Type column shows for a runtime class.
+    /// </summary>
+    internal string? FullName(string? module, uint typeDefToken)
+        => Reading(module, reader => ManagedTypeNames.WithParameters(reader, Handle(typeDefToken)));
+
+    /// <summary>
+    /// A method's shape: static or not, its declaring type, and its parameters' names and declared
+    /// types. The names are what turn "arg 1" into <c>why</c>; whether it is static is what says
+    /// argument zero is <c>this</c> — an instance method's <c>this</c> has no row in the Param table
+    /// at all, so counting from the table puts every name one slot out.
+    /// </summary>
+    internal ManagedMethodShape? Method(string? module, uint methodToken)
+        => Reading(module, reader =>
+        {
+            var handle = MetadataTokens.MethodDefinitionHandle((int)(methodToken & 0x00FFFFFF));
+            var method = reader.GetMethodDefinition(handle);
+            var owner = method.GetDeclaringType();
+            var signature = method.DecodeSignature(new ManagedTypeNames(reader), new GenericScope(owner, handle));
+
+            var names = new string[signature.ParameterTypes.Length];
+            foreach (var parameterHandle in method.GetParameters())
+            {
+                var parameter = reader.GetParameter(parameterHandle);
+                if (parameter.SequenceNumber >= 1 && parameter.SequenceNumber <= names.Length)
+                {
+                    names[parameter.SequenceNumber - 1] = reader.GetString(parameter.Name);
+                }
+            }
+
+            for (int i = 0; i < names.Length; i++)
+            {
+                // Unnamed — obfuscators do this — gets the name ILSpy gives it, so this pane and the
+                // C# view agree on what to call it.
+                if (string.IsNullOrEmpty(names[i]))
+                {
+                    names[i] = "A_" + (i + (signature.Header.IsInstance ? 1 : 0)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+            }
+
+            string name = reader.GetString(method.Name);
+            if (name == ".ctor")
+            {
+                name = ManagedTypeNames.Plain(reader.GetString(reader.GetTypeDefinition(owner).Name));
+            }
+
+            return new ManagedMethodShape(
+                !signature.Header.IsInstance,
+                ManagedTypeNames.Definition(reader, owner),
+                name,
+                names,
+                signature.ParameterTypes);
+        });
+
+    /// <summary>
+    /// The declared types of a method's locals, from its local signature — which the runtime hands
+    /// over as a token, and which is the only place a null local's type is written down.
+    /// </summary>
+    internal IReadOnlyList<string> LocalTypes(string? module, uint methodToken, uint localSignatureToken)
+    {
+        if ((localSignatureToken & 0x00FFFFFF) == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        return Reading<IReadOnlyList<string>>(module, reader =>
+        {
+            var method = MetadataTokens.MethodDefinitionHandle((int)(methodToken & 0x00FFFFFF));
+            var signature = MetadataTokens.StandaloneSignatureHandle((int)(localSignatureToken & 0x00FFFFFF));
+            var scope = new GenericScope(reader.GetMethodDefinition(method).GetDeclaringType(), method);
+            return reader.GetStandaloneSignature(signature).DecodeLocalSignature(new ManagedTypeNames(reader), scope);
+        }) ?? Array.Empty<string>();
+    }
+
+    /// <summary>Whether a type is an enum, which reads as a member name rather than as a struct.</summary>
+    internal bool IsEnum(string? module, uint typeDefToken)
+        => Reading<object>(module, reader => IsEnum(reader, reader.GetTypeDefinition(Handle(typeDefToken))) ? true : null) is not null;
+
+    /// <summary>
+    /// An enum value as its member name — <c>OnLastWindowClose</c>, not <c>1</c> — or several joined
+    /// with <c>|</c> for a [Flags] enum, or the number when no member fits. Null when it is not an enum.
+    /// </summary>
+    internal string? EnumText(string? module, uint typeDefToken, ulong value)
+        => Reading(module, reader =>
+        {
+            var definition = reader.GetTypeDefinition(Handle(typeDefToken));
+            if (!IsEnum(reader, definition))
+            {
+                return null;
+            }
+
+            var members = new List<(string Name, ulong Value)>();
+            foreach (var handle in definition.GetFields())
+            {
+                var field = reader.GetFieldDefinition(handle);
+                if ((field.Attributes & FieldAttributes.Literal) == 0 || field.GetDefaultValue().IsNil)
+                {
+                    continue;
+                }
+
+                if (Constant(reader, field.GetDefaultValue()) is { } constant)
+                {
+                    members.Add((reader.GetString(field.Name), constant));
+                }
+            }
+
+            foreach (var member in members)
+            {
+                if (member.Value == value)
+                {
+                    return member.Name;
+                }
+            }
+
+            if (IsFlags(reader, definition) && value != 0)
+            {
+                var parts = new List<string>();
+                ulong left = value;
+                foreach (var member in members.Where(m => m.Value != 0).OrderByDescending(m => m.Value))
+                {
+                    if ((left & member.Value) == member.Value)
+                    {
+                        parts.Add(member.Name);
+                        left ^= member.Value;
+                    }
+                }
+
+                if (left == 0 && parts.Count > 0)
+                {
+                    parts.Reverse();
+                    return string.Join(" | ", parts);
+                }
+            }
+
+            return value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        });
+
+    private static bool IsEnum(MetadataReader reader, TypeDefinition definition)
+    {
+        var baseType = definition.BaseType;
+        switch (baseType.Kind)
+        {
+            case HandleKind.TypeReference:
+                var reference = reader.GetTypeReference((TypeReferenceHandle)baseType);
+                return reader.GetString(reference.Name) == "Enum" && reader.GetString(reference.Namespace) == "System";
+
+            case HandleKind.TypeDefinition:
+                var local = reader.GetTypeDefinition((TypeDefinitionHandle)baseType);
+                return reader.GetString(local.Name) == "Enum" && reader.GetString(local.Namespace) == "System";
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool IsFlags(MetadataReader reader, TypeDefinition definition)
+    {
+        foreach (var handle in definition.GetCustomAttributes())
+        {
+            var constructor = reader.GetCustomAttribute(handle).Constructor;
+            if (constructor.Kind != HandleKind.MemberReference)
+            {
+                continue;
+            }
+
+            var parent = reader.GetMemberReference((MemberReferenceHandle)constructor).Parent;
+            if (parent.Kind == HandleKind.TypeReference
+                && reader.GetString(reader.GetTypeReference((TypeReferenceHandle)parent).Name) == "FlagsAttribute")
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>An enum member's constant, zero-extended from its own width so it compares with a value read the same way.</summary>
+    private static ulong? Constant(MetadataReader reader, ConstantHandle handle)
+    {
+        var constant = reader.GetConstant(handle);
+        var blob = reader.GetBlobReader(constant.Value);
+        return constant.TypeCode switch
+        {
+            ConstantTypeCode.Boolean or ConstantTypeCode.Byte or ConstantTypeCode.SByte => blob.ReadByte(),
+            ConstantTypeCode.Char or ConstantTypeCode.Int16 or ConstantTypeCode.UInt16 => blob.ReadUInt16(),
+            ConstantTypeCode.Int32 or ConstantTypeCode.UInt32 => blob.ReadUInt32(),
+            ConstantTypeCode.Int64 or ConstantTypeCode.UInt64 => blob.ReadUInt64(),
+            _ => null,
+        };
+    }
+
+    /// <summary>A declared type, or empty when its signature will not decode.</summary>
+    private static string Declared(Func<string> decode)
+    {
+        try
+        {
+            return decode();
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or ArgumentOutOfRangeException or InvalidOperationException)
+        {
+            return string.Empty;
+        }
+    }
+
+    /// <summary>Runs a read against a module's metadata, turning a malformed image into "no answer".</summary>
+    private T? Reading<T>(string? module, Func<MetadataReader, T?> read)
+        where T : class
+    {
+        if (Reader(module) is not { } reader)
+        {
+            return null;
+        }
+
+        try
+        {
+            return read(reader);
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or ArgumentOutOfRangeException or InvalidOperationException or ArgumentException)
+        {
+            return null;
         }
     }
 

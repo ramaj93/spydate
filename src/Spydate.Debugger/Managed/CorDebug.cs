@@ -45,13 +45,21 @@ internal static class CorDebugGuids
     internal const string ReferenceValue = "CC7BCAF9-8A68-11d2-983C-0000F808342D";
     internal const string StringValue = "CC7BCAFD-8A68-11d2-983C-0000F808342D";
 
-    // The four below are pinned by CorDebugIidTests the same way as the rest: a live array and a
-    // live object are asked what they support, because an id written from memory fails as
-    // "not available" rather than as a mistake.
+    // An id written from memory fails as "not available" rather than as a mistake, so these are
+    // asked of live values. BoxValue was CC7BCAF6 — ICorDebugEval's id — from the day it was written
+    // until a boxed 42 read "not available" and a live box was asked what it answers to: F7, F8, FA
+    // and FC, never F6. A comment here said a test pinned it; none did. ManagedVariablesTests now does.
     internal const string Class = "CC7BCAF5-8A68-11d2-983C-0000F808342D";
-    internal const string BoxValue = "CC7BCAF6-8A68-11d2-983C-0000F808342D";
+    internal const string BoxValue = "CC7BCAFC-8A68-11d2-983C-0000F808342D";
     internal const string ObjectValue = "18AD3D6E-B7D2-11d2-BD04-0000F80849BD";
     internal const string ArrayValue = "0405B0DF-A660-11d2-BD02-0000F80849BD";
+
+    // The three below make a value tree possible: the exact runtime type of a value and its base
+    // chain, which is where inherited fields are read through, and a way to walk every thread.
+    // Pinned by CorDebugIidTests against a live process, like the rest.
+    internal const string Value2 = "5E0B54E7-D88A-4626-9420-A691E0A78B49";
+    internal const string Type = "D613F0BB-ACE1-4C19-BD72-E4C08D5DA7F5";
+    internal const string ThreadEnum = "CC7BCB06-8A68-11D2-983C-0000F808342D";
 }
 
 [ComImport]
@@ -790,4 +798,63 @@ internal interface ICorDebugBoxValue
     [PreserveSig] int CreateRelocBreakpoint(out IntPtr ppBreakpoint);
 
     [PreserveSig] int GetObject(out IntPtr ppObject);
+}
+
+/// <summary>
+/// The exact type of a value, rather than the class of it.
+///
+/// A separate interface from <see cref="ICorDebugValue"/> — the runtime added it later — and the
+/// only road to a value's base types. <see cref="ICorDebugObjectValue.GetClass"/> answers with the
+/// most derived class and nothing more, so every field a base class declared was unreachable: an
+/// <c>App</c> showed the fields <c>App</c> added and none of the <c>Application</c> ones underneath.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Value2)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugValue2
+{
+    [PreserveSig] int GetExactType(out IntPtr ppType);
+}
+
+/// <summary>A runtime type: its class, its base, and — for an array or pointer — what it is of.</summary>
+[ComImport]
+[Guid(CorDebugGuids.Type)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugType
+{
+    [PreserveSig] int GetType(out int ty);
+
+    [PreserveSig] int GetClass(out IntPtr ppClass);
+
+    [PreserveSig] int EnumerateTypeParameters(out IntPtr ppTyParEnum);
+
+    [PreserveSig] int GetFirstTypeParameter(out IntPtr value);
+
+    [PreserveSig] int GetBase(out IntPtr pBase);
+
+    [PreserveSig] int GetStaticFieldValue(uint fieldDef, IntPtr pFrame, out IntPtr ppValue);
+
+    [PreserveSig] int GetRank(out uint pnRank);
+}
+
+/// <summary>
+/// Every thread the runtime knows about, one at a time.
+///
+/// <c>ICorDebugEnum</c>'s four methods come first, repeated for the usual reason. <c>Next</c> takes an
+/// array; asked for one element at a time, a single out pointer is that array.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.ThreadEnum)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugThreadEnum
+{
+    [PreserveSig] int Skip(uint celt);
+
+    [PreserveSig] int Reset();
+
+    [PreserveSig] int Clone(out IntPtr ppEnum);
+
+    [PreserveSig] int GetCount(out uint pcelt);
+
+    [PreserveSig] int Next(uint celt, out IntPtr thread, out uint pceltFetched);
 }
