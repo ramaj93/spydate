@@ -16,24 +16,36 @@ public enum ManagedValueKind
     Object,
     Enum,
     Property,
+    Group,
     Unavailable,
 }
 
-/// <summary>One step from a value to something inside it: a field, or an element.</summary>
+/// <summary>One step from a value to something inside it: a field, an element, or a static member.</summary>
 /// <param name="Module">File name of the module declaring the field's class.</param>
 /// <param name="Class">TypeDef token of that class — which may be a base of the value's own type.</param>
-/// <param name="Field">FieldDef token.</param>
+/// <param name="Field">FieldDef token, or 0 for the static-members group itself.</param>
 /// <param name="Element">Element position, or -1 for a field step.</param>
-public readonly record struct ManagedStep(string Module, uint Class, uint Field, int Element = -1)
+/// <param name="Static">
+/// The step is into the type's statics rather than into the value: with a field, that static field;
+/// with none, the group that holds them. A static lives on the type, not in the object, so it is read
+/// through the class and a frame rather than through the value.
+/// </param>
+public readonly record struct ManagedStep(string Module, uint Class, uint Field, int Element = -1, bool Static = false)
 {
     public static ManagedStep ElementAt(int index) => new(string.Empty, 0, 0, index);
 
+    /// <summary>The group row's step: the statics of this class and of every base under it.</summary>
+    public static ManagedStep StaticsOf(string module, uint type) => new(module, type, 0, -1, true);
+
     public bool IsElement => Element >= 0;
+
+    /// <summary>The group of statics, rather than one of them.</summary>
+    public bool IsStaticGroup => Static && Field == 0;
 
     public override string ToString()
         => IsElement
             ? $"[{Element}]"
-            : string.Create(CultureInfo.InvariantCulture, $"{Module}:{Class:X8}:{Field:X8}");
+            : string.Create(CultureInfo.InvariantCulture, $"{(Static ? "s:" : string.Empty)}{Module}:{Class:X8}:{Field:X8}");
 }
 
 /// <summary>
@@ -45,18 +57,39 @@ public readonly record struct ManagedStep(string Module, uint Class, uint Field,
 /// walked again from the frame each time a node is opened, which is cheap, always current, and
 /// survives a step — so a node that was open stays open and shows what it holds now.
 /// </summary>
-public sealed record ManagedValuePath(bool Argument, uint Slot, ImmutableArray<ManagedStep> Steps)
+public sealed record ManagedValuePath(ManagedValueRoot Root, uint Slot, ImmutableArray<ManagedStep> Steps)
 {
-    public static ManagedValuePath OfArgument(uint slot) => new(true, slot, ImmutableArray<ManagedStep>.Empty);
+    public static ManagedValuePath OfArgument(uint slot) => new(ManagedValueRoot.Argument, slot, ImmutableArray<ManagedStep>.Empty);
 
-    public static ManagedValuePath OfLocal(uint slot) => new(false, slot, ImmutableArray<ManagedStep>.Empty);
+    public static ManagedValuePath OfLocal(uint slot) => new(ManagedValueRoot.Local, slot, ImmutableArray<ManagedStep>.Empty);
+
+    /// <summary>
+    /// A path starting from a value a getter produced, kept alive by a handle the session holds.
+    ///
+    /// An evaluated value is reachable from no frame — it is what a method returned, not something
+    /// stored anywhere a path could name — so opening one needs the value itself kept. The handle is
+    /// the keeping, and this is how a row refers to it.
+    /// </summary>
+    public static ManagedValuePath OfEvaluated(uint handle) => new(ManagedValueRoot.Evaluated, handle, ImmutableArray<ManagedStep>.Empty);
+
+    /// <summary>Whether the path starts at an argument slot. Locals and evaluated values do not.</summary>
+    public bool Argument => Root == ManagedValueRoot.Argument;
 
     public ManagedValuePath Then(ManagedStep step) => this with { Steps = Steps.Add(step) };
 
     /// <summary>A stable spelling of the path, for remembering which nodes were open across a step.</summary>
     public string Key
-        => (Argument ? "a" : "l") + Slot.ToString(CultureInfo.InvariantCulture)
+        => Root switch { ManagedValueRoot.Argument => "a", ManagedValueRoot.Local => "l", _ => "e" }
+           + Slot.ToString(CultureInfo.InvariantCulture)
            + string.Concat(Steps.Select(step => "/" + step));
+}
+
+/// <summary>Where a path starts: a frame's argument or local, or a value an evaluation produced.</summary>
+public enum ManagedValueRoot
+{
+    Argument,
+    Local,
+    Evaluated,
 }
 
 /// <summary>
@@ -73,7 +106,8 @@ public sealed record ManagedVariable(
     ManagedValueKind Kind,
     bool Expandable,
     ManagedValuePath Path,
-    ManagedPropertyGetter? Getter = null);
+    ManagedPropertyGetter? Getter = null,
+    bool CanSet = false);
 
 /// <summary>
 /// What it takes to read a property: the module and token of its getter, and whether it is static.
@@ -82,7 +116,7 @@ public sealed record ManagedVariable(
 /// that method returns. The row carries this so the caller can run the getter when a person opens the
 /// object, rather than the tree running code the moment it is drawn.
 /// </summary>
-public sealed record ManagedPropertyGetter(string Module, uint Token, bool IsStatic);
+public sealed record ManagedPropertyGetter(string Module, uint Class, uint Token, bool IsStatic);
 
 /// <summary>
 /// A value as a tree, one level at a time.
@@ -124,7 +158,7 @@ internal static class ManagedVariables
             bool? isNull = Com.Borrow<ICorDebugReferenceValue, bool?>(value, r => r.IsNull(out int n) == 0 ? n != 0 : null);
             if (isNull == true)
             {
-                return new ManagedVariable(name, "null", TypeText(declared, null), ManagedValueKind.Null, false, path);
+                return new ManagedVariable(name, "null", TypeText(declared, null), ManagedValueKind.Null, false, path, null, true);
             }
         }
 
@@ -136,7 +170,17 @@ internal static class ManagedVariables
 
         try
         {
-            return Describe(held, name, declared, path, types);
+            var described = Describe(held, name, declared, path, types);
+
+            // What can be written back: a reference (to null, or to a new string) and anything the
+            // runtime will copy bytes into — numbers, characters, bools, enums. A struct read in
+            // place is not offered, because writing one means writing every field of it.
+            bool settable = described.Kind is not (ManagedValueKind.Unavailable or ManagedValueKind.Property or ManagedValueKind.Group)
+                && (IsReference(kind)
+                    || described.Kind == ManagedValueKind.Enum
+                    || kind is not (ManagedValues.ElementValueType or ManagedValues.ElementClass or ManagedValues.ElementObject));
+
+            return settable ? described with { CanSet = true } : described;
         }
         finally
         {
@@ -426,6 +470,7 @@ internal static class ManagedVariables
         try
         {
             var rows = new List<(ManagedVariable Row, string Owner)>();
+            bool anyStatics = false;
 
             foreach (var link in chain)
             {
@@ -438,6 +483,10 @@ internal static class ManagedVariables
                 }
 
                 var properties = types.Properties(link.Module, link.Token);
+
+                // Statics belong to the type, not to this object, so they are gathered under one row
+                // of their own rather than mixed in with what the object itself holds.
+                anyStatics |= properties.Any(p => p.IsStatic) || types.StaticFields(link.Module, link.Token).Count > 0;
 
                 // An auto-property's backing field carries the same value under the same name, so the
                 // property row stands for it and the field is not listed a second time. Only in the
@@ -478,7 +527,7 @@ internal static class ManagedVariables
                 // method, and running it means running code in the process, which cannot be done
                 // while a frame is borrowed. Each row carries what it takes to run the getter later;
                 // the caller evaluates them one at a time. Its value stays "…" until it does.
-                foreach (var property in properties)
+                foreach (var property in properties.Where(p => !p.IsStatic))
                 {
                     rows.Add((
                         new ManagedVariable(
@@ -488,9 +537,22 @@ internal static class ManagedVariables
                             ManagedValueKind.Property,
                             false,
                             path,
-                            new ManagedPropertyGetter(FileName(link.Module), property.GetterToken, property.IsStatic)),
+                            new ManagedPropertyGetter(FileName(link.Module), link.Token, property.GetterToken, property.IsStatic)),
                         owner));
                 }
+            }
+
+            if (anyStatics && chain.Count > 0)
+            {
+                rows.Add((
+                    new ManagedVariable(
+                        "Static members",
+                        string.Empty,
+                        string.Empty,
+                        ManagedValueKind.Group,
+                        true,
+                        path.Then(ManagedStep.StaticsOf(FileName(chain[0].Module), chain[0].Token))),
+                    string.Empty));
             }
 
             // Alphabetical, as every debugger lists members, with a field a base class also declares
@@ -514,7 +576,12 @@ internal static class ManagedVariables
         }
     }
 
-    private readonly record struct Link(IntPtr Class, string? Module, uint Token);
+    /// <summary>
+    /// One class in a value's hierarchy. <paramref name="Type"/> is the instantiated type it came
+    /// from — <c>List&lt;int&gt;</c> where <paramref name="Class"/> is only <c>List&lt;T&gt;</c> — and
+    /// is what a method on a generic type has to be called with. Zero when the runtime gave no type.
+    /// </summary>
+    internal readonly record struct Link(IntPtr Class, string? Module, uint Token, IntPtr Type);
 
     /// <summary>
     /// The class of a value and of every base under it, most derived first. Each class pointer is
@@ -535,7 +602,7 @@ internal static class ManagedVariables
             if (only != IntPtr.Zero)
             {
                 var (module, token) = Identity(only);
-                chain.Add(new Link(only, module, token));
+                chain.Add(new Link(only, module, token, IntPtr.Zero));
             }
 
             return chain;
@@ -550,12 +617,17 @@ internal static class ManagedVariables
                 return (c, b);
             }) ?? (IntPtr.Zero, IntPtr.Zero);
 
-            Marshal.Release(type);
-
             if (cls != IntPtr.Zero)
             {
                 var (module, token) = Identity(cls);
-                chain.Add(new Link(cls, module, token));
+
+                // The type is kept rather than released: it is the instantiated one, and a method on
+                // a generic type cannot be called without its arguments.
+                chain.Add(new Link(cls, module, token, type));
+            }
+            else
+            {
+                Marshal.Release(type);
             }
 
             type = next;
@@ -569,12 +641,67 @@ internal static class ManagedVariables
         return chain;
     }
 
-    private static void Release(List<Link> chain)
+    internal static void Release(List<Link> chain)
     {
         foreach (var link in chain)
         {
             Marshal.Release(link.Class);
+            if (link.Type != IntPtr.Zero)
+            {
+                Marshal.Release(link.Type);
+            }
         }
+    }
+
+    /// <summary>The classes of a value, most derived first. The caller gives them back with Release.</summary>
+    internal static List<Link> ChainOf(IntPtr held) => Chain(held);
+
+    /// <summary>
+    /// The type arguments of a link's type — what <c>CallParameterizedFunction</c> needs to call a
+    /// method on a generic type. Owned pointers; empty for a type that is not generic.
+    /// </summary>
+    internal static List<IntPtr> TypeArguments(Link link)
+    {
+        var found = new List<IntPtr>();
+        if (link.Type == IntPtr.Zero)
+        {
+            return found;
+        }
+
+        IntPtr enumerator = Com.Borrow<ICorDebugType, IntPtr?>(link.Type, t =>
+            t.EnumerateTypeParameters(out IntPtr e) == 0 ? e : null) ?? IntPtr.Zero;
+        if (enumerator == IntPtr.Zero)
+        {
+            return found;
+        }
+
+        try
+        {
+            var types = Com.Keep<ICorDebugTypeEnum>(enumerator);
+            if (types is null)
+            {
+                return found;
+            }
+
+            try
+            {
+                while (found.Count < MaxChain
+                       && types.Next(1, out IntPtr one, out uint got) == 0 && got == 1 && one != IntPtr.Zero)
+                {
+                    found.Add(one);
+                }
+            }
+            finally
+            {
+                Com.Drop(types);
+            }
+        }
+        finally
+        {
+            Marshal.Release(enumerator);
+        }
+
+        return found;
     }
 
     /// <summary>A class's module path and TypeDef token.</summary>
@@ -792,4 +919,246 @@ internal static class ManagedVariables
     }
 
     private static string FileName(string? module) => string.IsNullOrEmpty(module) ? string.Empty : Path.GetFileName(module);
+
+    /// <summary>
+    /// The statics of a value's whole hierarchy: fields read through the class, and properties left
+    /// for the caller to run. A static needs a frame as well as a class — which app domain and which
+    /// thread it belongs to is decided by where execution is, and thread statics differ per thread.
+    /// </summary>
+    internal static IReadOnlyList<ManagedVariable> StaticMembers(IntPtr held, ManagedValuePath path, ManagedTypes types, IntPtr frame)
+    {
+        var chain = Chain(held);
+        try
+        {
+            var rows = new List<ManagedVariable>();
+
+            foreach (var link in chain)
+            {
+                string owner = types.FullName(link.Module, link.Token) ?? string.Empty;
+                if (owner is "object" or "System.ValueType" or "System.Enum")
+                {
+                    break;
+                }
+
+                var properties = types.Properties(link.Module, link.Token).Where(p => p.IsStatic).ToList();
+                var covered = properties.Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+
+                foreach (var field in types.StaticFields(link.Module, link.Token))
+                {
+                    if (covered.Contains(field.Name))
+                    {
+                        continue;
+                    }
+
+                    var at = path.Then(new ManagedStep(FileName(link.Module), link.Token, field.Token, -1, true));
+                    rows.Add(StaticField(link, field, at, types, frame));
+                }
+
+                foreach (var property in properties)
+                {
+                    rows.Add(new ManagedVariable(
+                        property.Name,
+                        "…",
+                        property.Type,
+                        ManagedValueKind.Property,
+                        false,
+                        path,
+                        new ManagedPropertyGetter(FileName(link.Module), link.Token, property.GetterToken, true)));
+                }
+            }
+
+            return rows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        finally
+        {
+            Release(chain);
+        }
+    }
+
+    private static ManagedVariable StaticField(Link link, ManagedField field, ManagedValuePath at, ManagedTypes types, IntPtr frame)
+        => Com.Borrow<ICorDebugClass, ManagedVariable>(link.Class, cls =>
+        {
+            if (cls.GetStaticFieldValue(field.Token, frame, out IntPtr value) < 0 || value == IntPtr.Zero)
+            {
+                // A static of a class the runtime has not initialised yet has no storage to read.
+                return Unavailable(field.Name, field.Type, at);
+            }
+
+            try
+            {
+                return Present(value, field.Name, field.Type, at, types);
+            }
+            finally
+            {
+                Marshal.Release(value);
+            }
+        }) ?? Unavailable(field.Name, field.Type, at);
+
+    /// <summary>
+    /// Takes a static step: the named static field of the class in the step. Owned, or zero.
+    /// </summary>
+    internal static IntPtr FollowStatic(IntPtr value, ManagedStep step, IntPtr frame)
+    {
+        IntPtr held = Held(value);
+        if (held == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        try
+        {
+            var chain = Chain(held);
+            try
+            {
+                foreach (var link in chain)
+                {
+                    if (link.Token == step.Class
+                        && string.Equals(FileName(link.Module), step.Module, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Com.Borrow<ICorDebugClass, IntPtr?>(link.Class, cls =>
+                            cls.GetStaticFieldValue(step.Field, frame, out IntPtr found) == 0 ? found : null) ?? IntPtr.Zero;
+                    }
+                }
+
+                return IntPtr.Zero;
+            }
+            finally
+            {
+                Release(chain);
+            }
+        }
+        finally
+        {
+            Marshal.Release(held);
+        }
+    }
+
+    /// <summary>
+    /// Writes a value back into the debuggee. Null when it was written, a sentence when it was not.
+    ///
+    /// Numbers, characters, bools and enums are written as bytes into the slot the runtime points at.
+    /// A reference can be set to null here; setting one to a new string means making the string in
+    /// the debuggee first, which is an evaluation and so is the session's to do.
+    /// </summary>
+    internal static string? Set(IntPtr value, string text, ManagedTypes types)
+    {
+        string wanted = text.Trim();
+        int kind = KindOf(value);
+
+        if (IsReference(kind))
+        {
+            if (!string.Equals(wanted, "null", StringComparison.OrdinalIgnoreCase))
+            {
+                return "only null can be written into a reference here";
+            }
+
+            int hr = Com.Borrow<ICorDebugReferenceValue, int?>(value, r => r.SetValue(0)) ?? -1;
+            return hr < 0 ? $"the runtime refused it: 0x{hr:X8}" : null;
+        }
+
+        int size = Com.Borrow<ICorDebugValue, int?>(value, v => v.GetSize(out uint s) == 0 ? (int)s : null) ?? 0;
+        if (size is <= 0 or > 8)
+        {
+            return "that is not a value this can write";
+        }
+
+        ulong bits;
+        if (kind == ManagedValues.ElementValueType)
+        {
+            // An enum, written by member name or by number. Anything else of this shape is a struct,
+            // and writing one means writing every field of it.
+            var chain = Chain(value);
+            try
+            {
+                if (chain.Count == 0 || types.EnumValue(chain[0].Module, chain[0].Token, wanted) is not { } member)
+                {
+                    return "that is not a member of this enum";
+                }
+
+                bits = member;
+            }
+            finally
+            {
+                Release(chain);
+            }
+        }
+        else if (!Bits(kind, wanted, out bits))
+        {
+            return $"that is not a {ManagedValues.Name(kind)}";
+        }
+
+        IntPtr buffer = Marshal.AllocCoTaskMem(8);
+        try
+        {
+            Marshal.WriteInt64(buffer, unchecked((long)bits));
+            int hr = Com.Borrow<ICorDebugGenericValue, int?>(value, g => g.SetValue(buffer)) ?? -1;
+            return hr < 0 ? $"the runtime refused it: 0x{hr:X8}" : null;
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(buffer);
+        }
+    }
+
+    /// <summary>Text as the bytes of its type, little-endian in the low end of a ulong.</summary>
+    private static bool Bits(int kind, string text, out ulong bits)
+    {
+        bits = 0;
+        bool hex = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+        string digits = hex ? text[2..] : text;
+        var culture = CultureInfo.InvariantCulture;
+        var style = hex ? NumberStyles.HexNumber : NumberStyles.Integer;
+
+        switch (kind)
+        {
+            case ManagedValues.ElementBoolean:
+                if (bool.TryParse(text, out bool flag))
+                {
+                    bits = flag ? 1UL : 0UL;
+                    return true;
+                }
+
+                return ulong.TryParse(digits, style, culture, out bits);
+
+            case ManagedValues.ElementChar:
+                string bare = text.Length >= 2 && text[0] == '\'' && text[^1] == '\'' ? text[1..^1] : text;
+                if (bare.Length == 1)
+                {
+                    bits = bare[0];
+                    return true;
+                }
+
+                return ulong.TryParse(digits, style, culture, out bits);
+
+            case ManagedValues.ElementR4:
+                if (float.TryParse(text, NumberStyles.Float, culture, out float single))
+                {
+                    bits = BitConverter.SingleToUInt32Bits(single);
+                    return true;
+                }
+
+                return false;
+
+            case ManagedValues.ElementR8:
+                if (double.TryParse(text, NumberStyles.Float, culture, out double real))
+                {
+                    bits = BitConverter.DoubleToUInt64Bits(real);
+                    return true;
+                }
+
+                return false;
+
+            case ManagedValues.ElementI1 or ManagedValues.ElementI2 or ManagedValues.ElementI4 or ManagedValues.ElementI8:
+                if (long.TryParse(digits, style, culture, out long signed))
+                {
+                    bits = unchecked((ulong)signed);
+                    return true;
+                }
+
+                return false;
+
+            default:
+                return ulong.TryParse(digits, style, culture, out bits);
+        }
+    }
 }

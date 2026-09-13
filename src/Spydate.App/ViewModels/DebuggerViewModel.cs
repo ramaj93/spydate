@@ -951,6 +951,48 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Writes a new value into what a row names.
+    ///
+    /// Asked for rather than typed into the grid: a value written by accident into a running program
+    /// is not something to make easy, and the prompt says in one line what the row will take.
+    /// </summary>
+    [RelayCommand]
+    private void SetVariable(VariableRow? row)
+    {
+        if (row is null || _managed is not { } session || !IsStopped)
+        {
+            return;
+        }
+
+        if (!row.CanSet)
+        {
+            Add($"{row.Name} cannot be written into: numbers, characters, bools, enums, null and strings can");
+            return;
+        }
+
+        if (_dialogs?.AskForText(
+                "Set value",
+                $"New value for {row.Name}",
+                "a number, true or false, an enum member, null, or text in quotes",
+                row.Value) is not { } typed)
+        {
+            return;
+        }
+
+        if (session.SetValue(row.Path, typed) is { } problem)
+        {
+            Add($"could not write {row.Name}: {problem}");
+            return;
+        }
+
+        Add($"{row.Name} = {typed}");
+
+        // Read back rather than assumed: what the runtime stored is what the pane should show, and a
+        // value written into one field can be the same object another row is showing.
+        RefreshVariables(session);
+    }
+
     /// <summary>Takes out every row below this one that is deeper than it.</summary>
     private void Collapse(VariableRow row)
     {

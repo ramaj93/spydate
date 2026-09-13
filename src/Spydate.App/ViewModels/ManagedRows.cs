@@ -30,9 +30,13 @@ public sealed partial class VariableRow : ObservableObject
         Expandable = variable.Expandable;
         Path = variable.Path;
         Getter = variable.Getter;
+        CanSet = variable.CanSet;
         Depth = depth;
         _toggled = toggled;
     }
+
+    /// <summary>Whether a new value can be written into it — a number, a bool, an enum, null, a string.</summary>
+    public bool CanSet { get; }
 
     public string Name { get; }
 

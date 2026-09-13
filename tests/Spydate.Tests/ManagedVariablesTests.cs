@@ -33,6 +33,12 @@ public class ManagedVariablesTests
 
         class Base { protected string baseName = "base"; }
 
+        class Box<T>
+        {
+            public T Item;
+            public T Current { get { return Item; } }
+        }
+
         class Holder : Base
         {
             public int Count = 7;
@@ -45,9 +51,11 @@ public class ManagedVariablesTests
             public int? Maybe = 5;
             public Holder Next;
             public IntPtr Handle = IntPtr.Zero;
+            public bool Ready = false;
+            public Box<int> Wrapped = new Box<int>();
             public string Name { get; set; }
 
-            public Holder() { Name = "auto"; Next = null; }
+            public Holder() { Name = "auto"; Next = null; Wrapped.Item = 9; }
 
             // A plain getter, an expression getter, an enum getter, a static getter, and one that
             // throws — the range the property evaluator has to handle.
@@ -56,6 +64,11 @@ public class ManagedVariablesTests
             public Mood CurrentMood { get { return Mood; } }
             public static int Answer { get { return 42; } }
             public int Bang { get { throw new InvalidOperationException("no"); } }
+            public Point Corner { get { return Origin; } }
+
+            // Statics belong to the type rather than to any object.
+            public static int Total = 99;
+            public static string Where { get { return "static"; } }
 
             public void Look(int factor, string why)
             {
@@ -429,17 +442,12 @@ public class ManagedVariablesTests
     }
 
     [SkippableFact]
-    public void AStaticGetterAndAnAutoPropertyBothRun()
+    public void AnAutoPropertyRunsLikeAnyOther()
     {
         Skip.If(Program is null, NoCompiler);
         using var session = StopIn("Holder", "Look");
-        var fields = Fields(session);
 
-        var answer = Assert.Single(fields, f => f.Name == "Answer");
-        Assert.True(answer.Getter!.IsStatic);
-        Assert.Equal("42", session.EvaluateProperty(answer.Path, answer.Getter!, answer.Name, answer.Type)?.Value);
-
-        var name = Assert.Single(fields, f => f.Name == "Name");
+        var name = Assert.Single(Fields(session), f => f.Name == "Name");
         Assert.Equal("\"auto\"", session.EvaluateProperty(name.Path, name.Getter!, name.Name, name.Type)?.Value);
     }
 
@@ -475,6 +483,112 @@ public class ManagedVariablesTests
     }
 
     // ------------------------------------------------------------------
+    // Opening what a getter returned, generic types, statics, writing
+    // ------------------------------------------------------------------
+
+    [SkippableFact]
+    public void AnObjectAGetterReturnedCanBeOpened()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var corner = Assert.Single(Fields(session), f => f.Name == "Corner");
+        var value = session.EvaluateProperty(corner.Path, corner.Getter!, corner.Name, corner.Type);
+
+        // An evaluated value is reachable from no frame, so opening it at all means the session kept
+        // a handle on it — and the path now names that handle rather than a slot.
+        Assert.NotNull(value);
+        Assert.True(value!.Expandable, "an object a getter returned could not be opened");
+        Assert.Equal(ManagedValueRoot.Evaluated, value.Path.Root);
+        Assert.Contains(session.Children(value.Path), f => f.Name == "X" && f.Value == "3");
+    }
+
+    [SkippableFact]
+    public void AGetterOnAGenericTypeRuns()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var wrapped = Assert.Single(Fields(session), f => f.Name == "Wrapped");
+        var current = Assert.Single(session.Children(wrapped.Path), f => f.Name == "Current");
+
+        // Box<int>.Current cannot be called without int: a method on a generic type takes its type
+        // arguments alongside, which is what the parameterized call is for. It read "(cannot
+        // evaluate)" until it did.
+        Assert.Equal("9", session.EvaluateProperty(current.Path, current.Getter!, current.Name, current.Type)?.Value);
+    }
+
+    [SkippableFact]
+    public void StaticsAreUnderOneRowOfTheirOwn()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var group = Assert.Single(Fields(session), f => f.Name == "Static members");
+        Assert.True(group.Expandable);
+
+        var statics = session.Children(group.Path);
+
+        // A static is read through the class and a frame, not out of the object.
+        Assert.Contains(statics, f => f.Name == "Total" && f.Value == "99");
+
+        var where = Assert.Single(statics, f => f.Name == "Where");
+        Assert.Equal("\"static\"", session.EvaluateProperty(where.Path, where.Getter!, where.Name, where.Type)?.Value);
+
+        var answer = Assert.Single(statics, f => f.Name == "Answer");
+        Assert.Equal("42", session.EvaluateProperty(answer.Path, answer.Getter!, answer.Name, answer.Type)?.Value);
+
+        // And they are not mixed in with what the object itself holds.
+        Assert.DoesNotContain(Fields(session), f => f.Name == "Total");
+        Assert.DoesNotContain(Fields(session), f => f.Name == "Answer");
+    }
+
+    [SkippableFact]
+    public void AValueCanBeWrittenBackIntoTheProgram()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var count = Find(session, "Count");
+        Assert.True(count.CanSet);
+        Assert.Null(session.SetValue(count.Path, "11"));
+        Assert.Equal("11", Find(session, "Count").Value);
+
+        Assert.Null(session.SetValue(Find(session, "Ready").Path, "true"));
+        Assert.Equal("true", Find(session, "Ready").Value);
+
+        // An enum by the name of one of its members.
+        Assert.Null(session.SetValue(Find(session, "Mood").Path, "Calm"));
+        Assert.Equal("Calm", Find(session, "Mood").Value);
+
+        // A string has to be made in the debuggee before a reference can point at it.
+        Assert.Null(session.SetValue(Find(session, "Label").Path, "\"changed\""));
+        Assert.Equal("\"changed\"", Find(session, "Label").Value);
+
+        // And a reference can be emptied.
+        Assert.Null(session.SetValue(Find(session, "Origin").Path, "null"));
+        Assert.Equal("null", Find(session, "Origin").Value);
+    }
+
+    [SkippableFact]
+    public void WhatCannotBeWrittenIsRefusedRatherThanGuessedAt()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        // A property is a method; writing one means calling a setter, which is not built.
+        Assert.False(Find(session, "Doubled").CanSet);
+
+        // And nonsense is refused with the value left as it was, rather than written as zero.
+        Assert.NotNull(session.SetValue(Find(session, "Count").Path, "not a number"));
+        Assert.Equal("7", Find(session, "Count").Value);
+    }
+
+    // ------------------------------------------------------------------
+
+    /// <summary>One row of what <c>this</c> holds, by name.</summary>
+    private static ManagedVariable Find(ManagedDebugSession session, string name)
+        => Assert.Single(Fields(session), f => f.Name == name);
 
     /// <summary>A session stopped at the first instruction of a method in the fixture.</summary>
     private static ManagedDebugSession StopIn(string type, string method)

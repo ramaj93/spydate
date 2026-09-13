@@ -58,6 +58,20 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private readonly ManualResetEventSlim _evalDone = new(false);
     private bool _evaluating;
     private bool _evalFailed;
+
+    /// <summary>
+    /// Handles on values a getter produced, by the number a path names them with.
+    ///
+    /// A handle is the only thing here that survives the process running: everything else describes a
+    /// frame, and a frame is gone the moment it steps. Without one an evaluated property could be
+    /// shown and never opened. They are dropped the moment the process runs on, because a handle held
+    /// past its usefulness is an object the collector may not take.
+    /// </summary>
+    private readonly Dictionary<uint, IntPtr> _handles = new();
+    private uint _handled;
+
+    /// <summary>CorDebugHandleType.HANDLE_STRONG — keeps the object alive until it is disposed.</summary>
+    private const int HandleStrong = 1;
     private ICorDebugStepper? _stepper;
     private bool _disposed;
 
@@ -1093,8 +1107,9 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         // The stopped thread is only worth holding while it is stopped. Once it runs, the frames it
         // had are gone and anything asked of it afterwards is a question about a program that has
-        // moved on.
+        // moved on. The handles on evaluated values go with them.
         Com.Drop(letting);
+        DisposeHandles();
 
         int hr = _process!.Continue(0);
         if (hr < 0)
@@ -1470,38 +1485,297 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         }) ?? Array.Empty<ManagedVariable>();
 
     private IReadOnlyList<ManagedVariable> ChildrenCore(ManagedValuePath path)
-        => InFrame<IReadOnlyList<ManagedVariable>>(il =>
+    {
+        bool statics = path.Steps.Length > 0 && path.Steps[^1].IsStaticGroup;
+
+        return Resolved<IReadOnlyList<ManagedVariable>>(path, (value, frame) => statics
+            ? ManagedVariables.StaticMembers(value, path, _types, frame)
+            : ManagedVariables.Children(value, path, _types))
+            ?? Array.Empty<ManagedVariable>();
+    }
+
+    /// <summary>
+    /// Finds the value a path names and hands it to <paramref name="use"/>, along with the frame it
+    /// was found through — which a static needs, since which app domain and thread it belongs to is
+    /// decided by where execution is. The value is borrowed: it is released when this returns.
+    ///
+    /// Three kinds of start. An argument or a local is read from the frame being looked at. A value a
+    /// getter produced is read from the handle keeping it alive, and needs no frame at all.
+    /// </summary>
+    private T? Resolved<T>(ManagedValuePath path, Func<IntPtr, IntPtr, T?> use)
+        where T : class
+    {
+        if (path.Root == ManagedValueRoot.Evaluated)
         {
-            IntPtr value;
-            int hr = path.Argument ? il.GetArgument(path.Slot, out value) : il.GetLocalVariable(path.Slot, out value);
-            if (hr < 0 || value == IntPtr.Zero)
+            IntPtr handle;
+            lock (_gate)
             {
-                return Array.Empty<ManagedVariable>();
+                if (!_handles.TryGetValue(path.Slot, out handle))
+                {
+                    // The handle went when the process ran on. The row it belonged to is about to be
+                    // rebuilt anyway; nothing to show is the true answer until it is.
+                    return null;
+                }
             }
 
-            foreach (var step in path.Steps)
+            return Walk(handle, path, IntPtr.Zero, use);
+        }
+
+        return InFrame<T>(il =>
+        {
+            IntPtr frame = FramePointer(il);
+            try
             {
-                IntPtr next = ManagedVariables.Follow(value, step);
-                Marshal.Release(value);
+                IntPtr value;
+                int hr = path.Root == ManagedValueRoot.Argument
+                    ? il.GetArgument(path.Slot, out value)
+                    : il.GetLocalVariable(path.Slot, out value);
+                if (hr < 0 || value == IntPtr.Zero)
+                {
+                    return null;
+                }
+
+                try
+                {
+                    return Walk(value, path, frame, use);
+                }
+                finally
+                {
+                    Marshal.Release(value);
+                }
+            }
+            finally
+            {
+                if (frame != IntPtr.Zero)
+                {
+                    Marshal.Release(frame);
+                }
+            }
+        });
+    }
+
+    /// <summary>Follows the steps of a path from a value already in hand. Borrows the value it starts from.</summary>
+    private T? Walk<T>(IntPtr root, ManagedValuePath path, IntPtr frame, Func<IntPtr, IntPtr, T?> use)
+        where T : class
+    {
+        IntPtr value = root;
+        bool owned = false;
+
+        // A path ending at the static-members group stops one step short: the statics belong to the
+        // type of the value the last real step reached, not to anything inside it.
+        int steps = path.Steps.Length;
+        int walk = steps > 0 && path.Steps[steps - 1].IsStaticGroup ? steps - 1 : steps;
+
+        try
+        {
+            for (int i = 0; i < walk; i++)
+            {
+                var step = path.Steps[i];
+                IntPtr next = step.Static && step.Field != 0
+                    ? ManagedVariables.FollowStatic(value, step, frame)
+                    : ManagedVariables.Follow(value, step);
+
+                if (owned)
+                {
+                    Marshal.Release(value);
+                }
+
                 if (next == IntPtr.Zero)
                 {
                     // The thing this path went through has changed under it since it was shown — a
-                    // field that was an object is null now. Nothing to list is the true answer.
-                    return Array.Empty<ManagedVariable>();
+                    // field that was an object is null now.
+                    return null;
                 }
 
                 value = next;
+                owned = true;
+            }
+
+            return use(value, frame);
+        }
+        finally
+        {
+            if (owned)
+            {
+                Marshal.Release(value);
+            }
+        }
+    }
+
+    /// <summary>The frame as an <c>ICorDebugFrame</c> pointer, which is what reading a static wants.</summary>
+    private static IntPtr FramePointer(ICorDebugILFrame il)
+    {
+        IntPtr unknown = Marshal.GetIUnknownForObject(il);
+        try
+        {
+            return Com.QueryInterface(unknown, CorDebugGuids.Frame);
+        }
+        finally
+        {
+            Marshal.Release(unknown);
+        }
+    }
+
+    /// <summary>
+    /// Keeps an evaluated object alive behind a handle, and answers with the number a path names it
+    /// by. Zero when it is not something that can be held — a number, or a null.
+    /// </summary>
+    private uint Keep(IntPtr value)
+    {
+        IntPtr held = Com.Borrow<ICorDebugReferenceValue, IntPtr?>(value, r =>
+            r.IsNull(out int isNull) == 0 && isNull == 0 && r.Dereference(out IntPtr pointed) == 0 ? pointed : null) ?? IntPtr.Zero;
+        if (held == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        try
+        {
+            IntPtr handle = Com.Borrow<ICorDebugHeapValue2, IntPtr?>(held, heap =>
+                heap.CreateHandle(HandleStrong, out IntPtr made) == 0 ? made : null) ?? IntPtr.Zero;
+            if (handle == IntPtr.Zero)
+            {
+                return 0;
+            }
+
+            lock (_gate)
+            {
+                uint id = ++_handled;
+                _handles[id] = handle;
+                return id;
+            }
+        }
+        finally
+        {
+            Marshal.Release(held);
+        }
+    }
+
+    /// <summary>
+    /// Lets go of every handle. Called when the process runs on: the values they name are about to be
+    /// described by rows that no longer exist, and a strong handle nobody drops is a leak in the
+    /// debuggee rather than in the debugger.
+    /// </summary>
+    private void DisposeHandles()
+    {
+        List<IntPtr> holding;
+        lock (_gate)
+        {
+            holding = _handles.Values.ToList();
+            _handles.Clear();
+        }
+
+        foreach (IntPtr handle in holding)
+        {
+            _ = Com.Borrow<ICorDebugHandleValue, int?>(handle, h => h.Dispose());
+            Marshal.Release(handle);
+        }
+    }
+
+    /// <summary>
+    /// Writes a value into the debuggee: a number, a character, a bool, an enum member, null, or a
+    /// string in quotes. Null when it was written; a sentence when it was not.
+    ///
+    /// A string is made in the debuggee first, which is an evaluation — it runs the runtime's own
+    /// allocator — and then the reference is pointed at it. Nothing else here runs any code.
+    /// </summary>
+    public string? SetValue(ManagedValuePath path, string text)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(text);
+
+        return Interop(() => SetValueCore(path, text));
+    }
+
+    private string? SetValueCore(ManagedValuePath path, string text)
+    {
+        lock (_gate)
+        {
+            if (State != DebugState.Stopped)
+            {
+                return "it is not stopped, so there is nothing to write into";
+            }
+        }
+
+        string wanted = text.Trim();
+        if (wanted.Length >= 2 && wanted[0] == '"' && wanted[^1] == '"')
+        {
+            // The string has to exist in the debuggee before a reference can point at it, and making
+            // it is an evaluation. It is made first, outside any frame, then written.
+            var made = NewString(wanted[1..^1]);
+            if (made.Problem is { } why)
+            {
+                return why;
+            }
+
+            ulong address = made.Address;
+            return Answer(Resolved<string>(path, (value, _) =>
+                Com.Borrow<ICorDebugReferenceValue, string>(value, r => r.SetValue(address) < 0 ? "the runtime refused it" : string.Empty)
+                ?? "that is not a reference, so a string cannot be written into it"));
+        }
+
+        return Answer(Resolved<string>(path, (value, _) => ManagedVariables.Set(value, wanted, _types) ?? string.Empty));
+    }
+
+    /// <summary>Empty from the walk means it was written; null means the value was not found.</summary>
+    private static string? Answer(string? outcome)
+        => outcome is null ? "that value is no longer there to write into" : outcome.Length == 0 ? null : outcome;
+
+    /// <summary>Makes a string in the debuggee and answers with where it is.</summary>
+    private (ulong Address, string? Problem) NewString(string text)
+    {
+        ICorDebugThread? thread;
+        ICorDebugProcess? process;
+        lock (_gate)
+        {
+            thread = _selected ?? _stopped;
+            process = _process;
+        }
+
+        if (thread is null || process is null || thread.CreateEval(out IntPtr evalPtr) < 0 || evalPtr == IntPtr.Zero)
+        {
+            return (0, "a string could not be made here");
+        }
+
+        var eval = Com.Keep<ICorDebugEval>(evalPtr);
+        Marshal.Release(evalPtr);
+        if (eval is null)
+        {
+            return (0, "a string could not be made here");
+        }
+
+        try
+        {
+            if (eval.NewString(text) < 0)
+            {
+                return (0, "a string could not be made here");
+            }
+
+            if (RunEval(process, thread, eval) is { } problem)
+            {
+                return (0, problem);
+            }
+
+            if (_evalFailed || eval.GetResult(out IntPtr result) < 0 || result == IntPtr.Zero)
+            {
+                return (0, "a string could not be made here");
             }
 
             try
             {
-                return ManagedVariables.Children(value, path, _types);
+                ulong address = Com.Borrow<ICorDebugReferenceValue, ulong?>(result, r => r.GetValue(out ulong at) == 0 ? at : null) ?? 0;
+                return address == 0 ? (0, "a string could not be made here") : (address, null);
             }
             finally
             {
-                Marshal.Release(value);
+                Marshal.Release(result);
             }
-        }) ?? Array.Empty<ManagedVariable>();
+        }
+        finally
+        {
+            Com.Drop(eval);
+        }
+    }
 
     /// <summary>Runs a read against the innermost frame of the thread being looked at, while stopped.</summary>
     private T? InFrame<T>(Func<ICorDebugILFrame, T?> read)
@@ -1967,46 +2241,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
             try
             {
-                // The getter is armed while a frame is in hand, because the target has to be read
-                // from that frame; then the frame is let go and the process is run, which is the one
-                // place a frame pointer must not still be held.
-                // Boxed because InFrame reads reference types; the HRESULT of arming the call, or
-                // int.MinValue when the target could not be resolved.
-                int armed = InFrame<object>(il =>
-                {
-                    IntPtr target = getter.IsStatic ? IntPtr.Zero : Resolve(il, objectPath);
-                    if (!getter.IsStatic && target == IntPtr.Zero)
-                    {
-                        return int.MinValue;
-                    }
-
-                    IntPtr args = IntPtr.Zero;
-                    try
-                    {
-                        uint count = getter.IsStatic ? 0u : 1u;
-                        if (count == 1)
-                        {
-                            args = Marshal.AllocCoTaskMem(IntPtr.Size);
-                            Marshal.WriteIntPtr(args, target);
-                        }
-
-                        return eval.CallFunction(function, count, args);
-                    }
-                    finally
-                    {
-                        if (args != IntPtr.Zero)
-                        {
-                            Marshal.FreeCoTaskMem(args);
-                        }
-
-                        // Read for the call and no longer needed. Releasing it before the process
-                        // runs keeps a frame-derived pointer from being touched after it goes stale.
-                        if (target != IntPtr.Zero)
-                        {
-                            Marshal.Release(target);
-                        }
-                    }
-                }) is int hr ? hr : int.MinValue;
+                // The getter is armed while the target is in hand — which for an instance getter
+                // means walking the path to it first — and the frame is let go before the process
+                // runs, which is the one place a frame pointer must not still be held.
+                object? outcome = getter.IsStatic
+                    ? Arm(eval, function, IntPtr.Zero, getter)
+                    : Resolved<object>(objectPath, (target, _) => Arm(eval, function, target, getter));
+                int armed = outcome is int hr ? hr : int.MinValue;
 
                 if (armed == int.MinValue)
                 {
@@ -2048,6 +2289,57 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     {
         ManagedVariable Note(string why) => new(name, why, declaredType, ManagedValueKind.Property, false, objectPath, getter);
 
+        if (RunEval(process, thread, eval) is { } stopped)
+        {
+            return Note(stopped);
+        }
+
+        if (_evalFailed)
+        {
+            return eval.GetResult(out IntPtr thrown) == 0 && thrown != IntPtr.Zero
+                ? Present(thrown, name, declaredType, objectPath, "threw ")
+                : Note("(threw)");
+        }
+
+        return eval.GetResult(out IntPtr result) == 0 && result != IntPtr.Zero
+            ? Present(result, name, declaredType, objectPath, string.Empty)
+            : Note("(no value)");
+
+        ManagedVariable Present(IntPtr value, string rowName, string declared, ManagedValuePath path, string prefix)
+        {
+            try
+            {
+                var read = ManagedVariables.Present(value, rowName, declared, path, _types);
+
+                // An object a getter returned can be opened like any other — but only if it is kept.
+                // It is reachable from no frame, so a handle on it is the only way back to it once
+                // this returns, and the path it is given names that handle.
+                if (prefix.Length == 0 && read.Expandable && Keep(value) is var id && id != 0)
+                {
+                    return read with { Path = ManagedValuePath.OfEvaluated(id), Getter = getter, CanSet = false };
+                }
+
+                return read with
+                {
+                    Value = prefix + read.Value,
+                    Expandable = false,
+                    Getter = getter,
+                    Kind = prefix.Length > 0 ? ManagedValueKind.Property : read.Kind,
+                };
+            }
+            finally
+            {
+                Marshal.Release(value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs an armed evaluation and waits for it: every other thread suspended, the process
+    /// continued, and a getter that overstays aborted — politely, then not. Null when it came back.
+    /// </summary>
+    private string? RunEval(ICorDebugProcess process, ICorDebugThread thread, ICorDebugEval eval)
+    {
         lock (_gate)
         {
             _evaluating = true;
@@ -2073,39 +2365,46 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         {
             if (process.Continue(0) < 0)
             {
-                return Note("(could not run the getter)");
+                return "(could not run it)";
             }
 
-            if (!_evalDone.Wait(EvalPatience))
+            if (_evalDone.Wait(EvalPatience))
             {
-                // Still running. Ask it to stop, then wait once more for the abort to land — the
-                // process is running and the state cannot be read until it comes back to rest.
+                return null;
+            }
+
+            // Still running. Ask it to stop and wait again — the process is running, and nothing can
+            // be read until it comes back to rest.
+            try
+            {
+                _ = eval.Abort();
+            }
+            catch (COMException)
+            {
+            }
+
+            if (_evalDone.Wait(EvalPatience))
+            {
+                return "(timed out)";
+            }
+
+            if (eval is ICorDebugEval2 rude)
+            {
                 try
                 {
-                    _ = eval.Abort();
+                    _ = rude.RudeAbort();
                 }
                 catch (COMException)
                 {
                 }
 
-                if (!_evalDone.Wait(EvalPatience))
+                if (_evalDone.Wait(EvalPatience))
                 {
-                    return Note("(timed out)");
+                    return "(timed out)";
                 }
-
-                return Note("(timed out)");
             }
 
-            if (_evalFailed)
-            {
-                return eval.GetResult(out IntPtr thrown) == 0 && thrown != IntPtr.Zero
-                    ? Present(thrown, name, declaredType, objectPath, "threw ")
-                    : Note("(threw)");
-            }
-
-            return eval.GetResult(out IntPtr result) == 0 && result != IntPtr.Zero
-                ? Present(result, name, declaredType, objectPath, string.Empty)
-                : Note("(no value)");
+            return "(timed out, and would not stop)";
         }
         finally
         {
@@ -2116,27 +2415,93 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
             _ = process.SetAllThreadsDebugState(ThreadRun, IntPtr.Zero);
         }
+    }
 
-        ManagedVariable Present(IntPtr value, string rowName, string declared, ManagedValuePath path, string prefix)
+    /// <summary>
+    /// Arms a getter: the target as its one argument, and the type arguments its declaring type was
+    /// instantiated with. Boxed, because it is used through <see cref="Resolved{T}"/>.
+    ///
+    /// Always the parameterized call when the runtime offers it. A method on a generic type cannot be
+    /// called without the type arguments, and for a type that has none it is the same call.
+    /// </summary>
+    private object Arm(ICorDebugEval eval, ICorDebugFunction function, IntPtr target, ManagedPropertyGetter getter)
+    {
+        var arguments = target == IntPtr.Zero ? new List<IntPtr>() : TypeArgumentsFor(target, getter);
+        IntPtr types = IntPtr.Zero;
+        IntPtr args = IntPtr.Zero;
+
+        try
         {
-            try
+            uint count = target == IntPtr.Zero ? 0u : 1u;
+            if (count == 1)
             {
-                var read = ManagedVariables.Present(value, rowName, declared, path, _types);
+                args = Marshal.AllocCoTaskMem(IntPtr.Size);
+                Marshal.WriteIntPtr(args, target);
+            }
 
-                // A property is never expandable in place: its value is an eval result, not something
-                // reachable from the frame by a path, so there is nothing to walk to open it.
-                return read with
-                {
-                    Value = prefix + read.Value,
-                    Expandable = false,
-                    Getter = getter,
-                    Kind = prefix.Length > 0 ? ManagedValueKind.Property : read.Kind,
-                };
-            }
-            finally
+            if (arguments.Count > 0)
             {
-                Marshal.Release(value);
+                types = Marshal.AllocCoTaskMem(IntPtr.Size * arguments.Count);
+                for (int i = 0; i < arguments.Count; i++)
+                {
+                    Marshal.WriteIntPtr(types, i * IntPtr.Size, arguments[i]);
+                }
             }
+
+            return eval is ICorDebugEval2 parameterized
+                ? parameterized.CallParameterizedFunction(function, (uint)arguments.Count, types, count, args)
+                : eval.CallFunction(function, count, args);
+        }
+        finally
+        {
+            if (args != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(args);
+            }
+
+            if (types != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(types);
+            }
+
+            foreach (IntPtr argument in arguments)
+            {
+                Marshal.Release(argument);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The type arguments of the class that declares the getter — <c>int</c> for a property of a
+    /// <c>List&lt;int&gt;</c>. Empty for a type that is not generic, which is the ordinary case.
+    /// </summary>
+    private static List<IntPtr> TypeArgumentsFor(IntPtr target, ManagedPropertyGetter getter)
+    {
+        IntPtr held = Com.Borrow<ICorDebugReferenceValue, IntPtr?>(target, r =>
+            r.IsNull(out int isNull) == 0 && isNull == 0 && r.Dereference(out IntPtr pointed) == 0 ? pointed : null) ?? IntPtr.Zero;
+        if (held == IntPtr.Zero)
+        {
+            return new List<IntPtr>();
+        }
+
+        var chain = ManagedVariables.ChainOf(held);
+        try
+        {
+            foreach (var link in chain)
+            {
+                if (link.Token == getter.Class
+                    && string.Equals(System.IO.Path.GetFileName(link.Module ?? string.Empty), getter.Module, StringComparison.OrdinalIgnoreCase))
+                {
+                    return ManagedVariables.TypeArguments(link);
+                }
+            }
+
+            return new List<IntPtr>();
+        }
+        finally
+        {
+            ManagedVariables.Release(chain);
+            Marshal.Release(held);
         }
     }
 
@@ -2144,30 +2509,6 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private const int ThreadRun = 0;
     private const int ThreadSuspend = 1;
 
-    /// <summary>Walks an object path from a frame to an owned value pointer, or zero. As <see cref="ChildrenCore"/> does.</summary>
-    private static IntPtr Resolve(ICorDebugILFrame il, ManagedValuePath path)
-    {
-        IntPtr value;
-        int hr = path.Argument ? il.GetArgument(path.Slot, out value) : il.GetLocalVariable(path.Slot, out value);
-        if (hr < 0 || value == IntPtr.Zero)
-        {
-            return IntPtr.Zero;
-        }
-
-        foreach (var step in path.Steps)
-        {
-            IntPtr next = ManagedVariables.Follow(value, step);
-            Marshal.Release(value);
-            if (next == IntPtr.Zero)
-            {
-                return IntPtr.Zero;
-            }
-
-            value = next;
-        }
-
-        return value;
-    }
 
     /// <summary>
     /// The call stack of the thread being looked at, innermost first. Empty unless stopped.
@@ -2453,6 +2794,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
             }
 
             _loaded.Clear();
+            DisposeHandles();
 
             Com.Drop(_stopped);
             _stopped = null;

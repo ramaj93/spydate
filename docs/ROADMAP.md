@@ -306,9 +306,21 @@ native side already reads it, because native is what it is.
   evaluate)". The value is a display, not an expandable subtree — an eval result is not reachable
   from a frame by a path, so there is nothing to walk to open it. `ICorDebugEval`'s id, which the box
   bug had wrongly borrowed, and every chain, frame and enum id were asked of a live process first.
-  Still to do: expanding an evaluated property in place (it needs a handle to keep the result alive
-  across a step); a getter on a generic type; static members of a type with no instance in a frame;
-  and setting values.
+  An object a getter returns opens like any other. It is reachable from no frame, so the session keeps
+  a strong handle on it and the row's path names that handle instead of a slot; the handles go the
+  moment the process runs on, because one held past its usefulness is an object the collector may not
+  take. A getter on a generic type runs too — a method on one cannot be called without the type
+  arguments its type was instantiated with, so they are read off the value's exact type and passed
+  alongside. Statics have a row of their own rather than being mixed into what the object holds: a
+  static belongs to the type, and is read through the class and a frame, since which app domain and
+  which thread it belongs to is decided by where execution is.
+  A value can be written back: a number, a character, a bool, an enum member by name, null, or text
+  in quotes — a string is made in the debuggee first, which is an evaluation, and then the reference
+  is pointed at it. It is behind a prompt rather than typed into the grid, because a value written by
+  accident into a running program is not something to make easy, and nonsense is refused with the
+  value left as it was rather than written as zero.
+  Still to do: writing through a property's setter, which is a second evaluation; and evaluating an
+  expression somebody types, which is a watch window and a language of its own.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable

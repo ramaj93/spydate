@@ -709,6 +709,13 @@
                                                 <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="320"
                                                                     Foreground="{DynamicResource Value.Type}" />
                                             </DataGrid.Columns>
+                                            <DataGrid.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Set value…"
+                                                              Command="{Binding PlacementTarget.DataContext.SetVariableCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                </ContextMenu>
+                                            </DataGrid.ContextMenu>
                                         </DataGrid>
 
                                         <!-- Every thread, as a Threads window shows them. Picking one moves

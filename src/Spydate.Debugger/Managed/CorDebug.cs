@@ -68,6 +68,11 @@ internal static class CorDebugGuids
     internal const string FrameEnum = "CC7BCB07-8A68-11d2-983C-0000F808342D";
     internal const string Eval = "CC7BCAF6-8A68-11d2-983C-0000F808342D";
     internal const string Eval2 = "FB0D9CE7-BE66-4683-9D32-A42A04E2FD91";
+
+    // Keeping an evaluated value alive across a step, and the type arguments a generic method needs.
+    internal const string HandleValue = "029596E8-276B-46a1-9821-732E96BBB00B";
+    internal const string HeapValue2 = "E3AC4D6C-9CB7-43E6-96CC-B21540E5083C";
+    internal const string TypeEnum = "10F27499-9DF2-43CE-8333-A321D7C99CB4";
 }
 
 [ComImport]
@@ -1027,4 +1032,67 @@ internal interface ICorDebugEval2
     [PreserveSig] int NewStringWithLength([MarshalAs(UnmanagedType.LPWStr)] string @string, uint uiLength);
 
     [PreserveSig] int RudeAbort();
+}
+
+/// <summary>
+/// A handle on an object, which is what lets a value outlive the frame it came from.
+///
+/// Everything else here is neutered the moment the process runs: a frame's values describe a frame
+/// that has gone. A strong handle is the exception — it holds the object against the collector and
+/// stays readable across a step, which is the only way an evaluated property can be opened later.
+/// It must be disposed, or the object it names is kept alive for as long as the session is.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.HandleValue)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugHandleValue
+{
+    // ICorDebugValue, then ICorDebugReferenceValue, repeated: slots come from this interface alone.
+    [PreserveSig] int GetKind(out int pType);
+
+    [PreserveSig] int GetSize(out uint pSize);
+
+    [PreserveSig] int GetAddress(out ulong pAddress);
+
+    [PreserveSig] int CreateBreakpoint(out IntPtr ppBreakpoint);
+
+    [PreserveSig] int IsNull(out int pbNull);
+
+    [PreserveSig] int GetValue(out ulong pValue);
+
+    [PreserveSig] int SetValue(ulong value);
+
+    [PreserveSig] int Dereference(out IntPtr ppValue);
+
+    [PreserveSig] int DereferenceStrong(out IntPtr ppValue);
+
+    [PreserveSig] int GetHandleType(out int pType);
+
+    [PreserveSig] int Dispose();
+}
+
+/// <summary>Makes a handle out of a value on the heap. Its one method is the reason it is here.</summary>
+[ComImport]
+[Guid(CorDebugGuids.HeapValue2)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugHeapValue2
+{
+    [PreserveSig] int CreateHandle(int type, out IntPtr ppHandle);
+}
+
+/// <summary>The type arguments of a generic type, which a method on one has to be called with.</summary>
+[ComImport]
+[Guid(CorDebugGuids.TypeEnum)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugTypeEnum
+{
+    [PreserveSig] int Skip(uint celt);
+
+    [PreserveSig] int Reset();
+
+    [PreserveSig] int Clone(out IntPtr ppEnum);
+
+    [PreserveSig] int GetCount(out uint pcelt);
+
+    [PreserveSig] int Next(uint celt, out IntPtr types, out uint pceltFetched);
 }

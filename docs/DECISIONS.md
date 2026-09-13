@@ -490,3 +490,35 @@ would be the one thing twice. The agent's one-line preview has no property rows 
 so there the backing field is what carries the value and it stays. The hiding is therefore in the
 tree's field listing, keyed on a field whose name matches a property of the same class, not in the
 shared metadata reader both use.
+
+**An evaluated value is kept by a handle, and only while it is worth keeping.** A getter's result is
+reachable from no frame — it is what a method returned, not something stored where a path could name
+it — so opening one needs the value itself held. A strong handle (`ICorDebugHeapValue2::CreateHandle`)
+is the one thing here that survives the process running, and the row's path names the handle rather
+than a slot. They are disposed the moment the process is continued: a strong handle nobody drops is an
+object the collector may not take, so the leak would be in the program under study rather than in the
+debugger. A row whose handle has gone lists nothing, which is true until the tree is rebuilt at the
+next stop.
+
+**A method on a generic type is called with its type arguments.** `CallFunction` cannot express
+`Box<int>.Current` — the runtime needs to be told what `T` was — so the arguments are read off the
+value's exact type (`ICorDebugType::EnumerateTypeParameters` on the link in the base chain that
+declares the getter) and passed through `ICorDebugEval2::CallParameterizedFunction`. That call is used
+for every getter, generic or not: with no type arguments it is the same call, and having one path
+means the generic case is not a branch that only runs on someone else's code.
+
+**Statics are a row of their own, and need a frame.** A static belongs to the type, not to the object
+being looked at, so mixing them into an object's fields would say something false about where they
+live. They are read with `ICorDebugClass::GetStaticFieldValue`, which takes a frame as well as a
+field: which app domain the static belongs to — and, for a thread-static, which thread — is decided by
+where execution is, so there is no answer without one. A class the runtime has not initialised yet has
+no storage to read, and its statics say so rather than reading as zero.
+
+**Writing a value is behind a prompt, and refuses what it cannot do.** Numbers, characters, bools and
+enum members are written as bytes into the slot the runtime points at; a reference can be set to null;
+a string is made in the debuggee first with `ICorDebugEval::NewString` — an evaluation, because
+allocating is the runtime's job — and the reference is then pointed at the address it came back with,
+which is safe because nothing runs in between. A property is not writable here: that would mean
+calling a setter, a second evaluation, and is not built. The prompt is deliberate rather than
+in-place editing: a value written by accident into a running program is not something to make easy,
+and what a row will accept fits in one line of the prompt.

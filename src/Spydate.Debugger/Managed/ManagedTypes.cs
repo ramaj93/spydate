@@ -64,6 +64,84 @@ internal sealed class ManagedTypes : IDisposable
     }
 
     /// <summary>
+    /// The static fields a type declares, which live on the type rather than in any object.
+    ///
+    /// Constants are left out: a literal has no storage to read — its value is written into the code
+    /// that uses it — so the runtime has nothing to give back for one.
+    /// </summary>
+    internal IReadOnlyList<ManagedField> StaticFields(string? module, uint typeDefToken)
+        => Reading<IReadOnlyList<ManagedField>>(module, reader =>
+        {
+            var definition = reader.GetTypeDefinition(Handle(typeDefToken));
+            var found = new List<ManagedField>();
+
+            foreach (var handle in definition.GetFields())
+            {
+                var field = reader.GetFieldDefinition(handle);
+                if ((field.Attributes & FieldAttributes.Static) == 0
+                    || (field.Attributes & FieldAttributes.Literal) != 0)
+                {
+                    continue;
+                }
+
+                found.Add(new ManagedField(
+                    Readable(reader.GetString(field.Name)),
+                    (uint)MetadataTokens.GetToken(handle),
+                    Declared(() => field.DecodeSignature(new ManagedTypeNames(reader), new GenericScope(Handle(typeDefToken), default)))));
+            }
+
+            return found;
+        }) ?? Array.Empty<ManagedField>();
+
+    /// <summary>
+    /// An enum member's value by name, for writing one back: <c>Angry</c>, or <c>Read | Write</c>, or
+    /// a plain number. Null when the text names nothing in the enum.
+    /// </summary>
+    internal ulong? EnumValue(string? module, uint typeDefToken, string text)
+        => Reading<object>(module, reader =>
+        {
+            var definition = reader.GetTypeDefinition(Handle(typeDefToken));
+            if (!IsEnum(reader, definition))
+            {
+                return null;
+            }
+
+            ulong total = 0;
+            foreach (string part in text.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                ulong? one = null;
+                foreach (var handle in definition.GetFields())
+                {
+                    var field = reader.GetFieldDefinition(handle);
+                    if ((field.Attributes & FieldAttributes.Literal) == 0 || field.GetDefaultValue().IsNil)
+                    {
+                        continue;
+                    }
+
+                    if (reader.GetString(field.Name) == part)
+                    {
+                        one = Constant(reader, field.GetDefaultValue());
+                        break;
+                    }
+                }
+
+                if (one is null && ulong.TryParse(part, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out ulong number))
+                {
+                    one = number;
+                }
+
+                if (one is null)
+                {
+                    return null;
+                }
+
+                total |= one.Value;
+            }
+
+            return total;
+        }) is ulong value ? value : (ulong?)null;
+
+    /// <summary>
     /// The instance fields a type declares, in metadata order.
     ///
     /// Its own only: a field inherited from a base class has to be read through the class that
