@@ -271,4 +271,105 @@ public class ProjectTests : IDisposable
         Assert.Contains("Spydate", candidates[0], StringComparison.Ordinal);
         Assert.EndsWith(SpydateProject.Extension, candidates[0], StringComparison.Ordinal);
     }
+
+    // ------------------------------------------------------------------
+    // Breakpoints
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void BreakpointsSurviveASaveAndLoad()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0 });
+        string path = TempFile("breakpoints.spydate");
+
+        var written = new BreakpointStore();
+        written.Add(0x1004);
+        written.Add(0x1000);
+
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: written);
+
+        var read = new BreakpointStore();
+        var result = SpydateProject.Load(path, image, new AnnotationStore(), breakpoints: read);
+
+        Assert.True(result.Loaded, result.Reason);
+        Assert.Equal(2, result.BreakpointsApplied);
+        Assert.Equal([0x1000u, 0x1004u], read.Snapshot());   // stored in address order
+        Assert.False(read.IsDirty);   // just loaded, nothing to write back
+    }
+
+    [Fact]
+    public void BreakpointsAreStoredAsReadableRvas()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0 });
+        string path = TempFile("breakpoints-json.spydate");
+
+        var store = new BreakpointStore();
+        store.Add(0x1004);
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: store);
+
+        string json = File.ReadAllText(path);
+        Assert.Contains("\"breakpoints\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"0x1004\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnotherWritersBreakpointsSurviveAMerge()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0 });
+        string path = TempFile("breakpoints-merge.spydate");
+
+        // One writer records a breakpoint and saves.
+        var first = new BreakpointStore();
+        first.Add(0x1000);
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: first);
+
+        // A second, which never saw the first, records a different one and saves over the top.
+        var second = new BreakpointStore();
+        second.Add(0x2000);
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: second);
+
+        var read = new BreakpointStore();
+        SpydateProject.Load(path, image, new AnnotationStore(), breakpoints: read);
+
+        // Both are there: a save overlays only what it touched rather than replacing the set.
+        Assert.Equal([0x1000u, 0x2000u], read.Snapshot());
+    }
+
+    [Fact]
+    public void ClearingABreakpointRemovesItFromTheFile()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0 });
+        string path = TempFile("breakpoints-clear.spydate");
+
+        var store = new BreakpointStore();
+        store.Add(0x1000);
+        store.Add(0x2000);
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: store);
+
+        store.Remove(0x1000);
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: store);
+
+        var read = new BreakpointStore();
+        SpydateProject.Load(path, image, new AnnotationStore(), breakpoints: read);
+        Assert.Equal([0x2000u], read.Snapshot());
+    }
+
+    [Fact]
+    public void APatchOnlyCallerDoesNotDropBreakpointsItNeverSawWhenSaving()
+    {
+        var image = SyntheticPe.WithSectionData(new byte[] { 0 });
+        string path = TempFile("breakpoints-untouched.spydate");
+
+        var store = new BreakpointStore();
+        store.Add(0x1000);
+        SpydateProject.SaveTo(path, image, new AnnotationStore(), breakpoints: store);
+
+        // A later save that knows nothing of breakpoints (null store) must keep the ones on disk,
+        // the same as the patch member does — the format version did not change for either.
+        SpydateProject.SaveTo(path, image, new AnnotationStore());
+
+        var read = new BreakpointStore();
+        SpydateProject.Load(path, image, new AnnotationStore(), breakpoints: read);
+        Assert.Equal([0x1000u], read.Snapshot());
+    }
 }

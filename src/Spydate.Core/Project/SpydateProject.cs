@@ -49,6 +49,9 @@ public sealed record ProjectLoadResult
     /// <summary>Patches in the file that could not be used — bad hex, or a length that does not match.</summary>
     public int PatchesSkipped { get; init; }
 
+    /// <summary>Breakpoints read back from the file.</summary>
+    public int BreakpointsApplied { get; init; }
+
     public override string ToString() => Loaded
         ? $"{Applied} annotation(s) from {Path}"
         : Reason ?? "no project file";
@@ -102,7 +105,7 @@ public static class SpydateProject
     /// Writes the annotations to the first path that accepts them. Returns where they went, or null when
     /// there was nothing to write and no file to update.
     /// </summary>
-    public static string? Save(PeImage image, AnnotationStore annotations, PatchStore? patches = null)
+    public static string? Save(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(annotations);
@@ -110,7 +113,7 @@ public static class SpydateProject
         var candidates = CandidatePaths(image);
         // Keep updating a file that already exists rather than starting a second one elsewhere.
         string? existing = candidates.FirstOrDefault(File.Exists);
-        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0)
+        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0 && (breakpoints?.Count ?? 0) == 0)
         {
             return null;
         }
@@ -121,7 +124,7 @@ public static class SpydateProject
         {
             try
             {
-                SaveTo(path, image, annotations, patches);
+                SaveTo(path, image, annotations, patches, breakpoints);
                 annotations.MarkSaved();
                 return path;
             }
@@ -145,7 +148,7 @@ public static class SpydateProject
     /// (a cleared one being removed). Entries collide only when both sides edited the same address,
     /// which is rare and resolves in favour of the writer, since that is the more recent decision.
     /// </summary>
-    public static void SaveTo(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null)
+    public static void SaveTo(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -208,6 +211,7 @@ public static class SpydateProject
             },
             Annotations = entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList(),
             Patches = MergePatches(path, identity, patches),
+            Breakpoints = MergeBreakpoints(path, identity, breakpoints),
         };
 
         // Write beside the target and move into place, so a failure cannot truncate the previous
@@ -222,6 +226,7 @@ public static class SpydateProject
         // it in between.
         annotations.MarkSaved();
         patches?.MarkSaved();
+        breakpoints?.MarkSaved();
     }
 
     /// <summary>
@@ -267,6 +272,65 @@ public static class SpydateProject
         }
 
         return entries.Count == 0 ? null : entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList();
+    }
+
+    /// <summary>
+    /// Breakpoints for the file being written, merged the way patches are: only the addresses this
+    /// session touched are overlaid, so a second window's breakpoints survive. Null when there is
+    /// nothing to say, which keeps the member out of the file for a project that never had one.
+    /// </summary>
+    private static List<BreakpointDto>? MergeBreakpoints(string path, ProjectIdentity identity, BreakpointStore? breakpoints)
+    {
+        var existing = ExistingBreakpoints(path, identity);
+
+        if (breakpoints is null)
+        {
+            return existing?.Values.OrderBy(e => ParseHex32(e.Rva)).ToList();
+        }
+
+        var mine = breakpoints.Snapshot().ToHashSet();
+        var entries = existing ?? new Dictionary<string, BreakpointDto>(StringComparer.OrdinalIgnoreCase);
+        IEnumerable<uint> overlay = existing is null ? mine : breakpoints.ChangedAddresses;
+
+        foreach (uint rva in overlay)
+        {
+            string key = Hex(rva);
+            if (mine.Contains(rva))
+            {
+                entries[key] = new BreakpointDto { Rva = key };
+            }
+            else
+            {
+                entries.Remove(key);   // cleared here, so it goes from the file too
+            }
+        }
+
+        return entries.Count == 0 ? null : entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList();
+    }
+
+    private static Dictionary<string, BreakpointDto>? ExistingBreakpoints(string path, ProjectIdentity identity)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var file = JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Options);
+            if (file is null || file.Format > FormatVersion || !IdentityOf(file).Matches(identity))
+            {
+                return null;
+            }
+
+            return (file.Breakpoints ?? [])
+                .Where(b => b.Rva is { Length: > 0 })
+                .ToDictionary(b => b.Rva!, b => b, StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static Dictionary<string, PatchDto>? ExistingPatches(string path, ProjectIdentity identity)
@@ -333,7 +397,7 @@ public static class SpydateProject
     }
 
     /// <summary>Finds the project belonging to <paramref name="image"/> and applies it.</summary>
-    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations, PatchStore? patches = null)
+    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
     {
         ArgumentNullException.ThrowIfNull(image);
 
@@ -345,7 +409,7 @@ public static class SpydateProject
                 continue;
             }
 
-            var result = Load(path, image, annotations, patches);
+            var result = Load(path, image, annotations, patches, breakpoints);
             if (result.Loaded)
             {
                 return result;
@@ -358,7 +422,7 @@ public static class SpydateProject
     }
 
     /// <summary>Applies one project file, rejecting it if it was made for a different build.</summary>
-    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null)
+    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -446,6 +510,31 @@ public static class SpydateProject
             patches.MarkSaved();
         }
 
+        int breakpointsApplied = 0;
+        if (breakpoints is not null)
+        {
+            foreach (var entry in file.Breakpoints ?? [])
+            {
+                if (entry.Rva is not { Length: > 0 } text)
+                {
+                    continue;
+                }
+
+                uint rva = ParseHex32(text);
+                if (rva == 0 && !string.Equals(text, "0x0", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (breakpoints.Add(rva))
+                {
+                    breakpointsApplied++;
+                }
+            }
+
+            breakpoints.MarkSaved();
+        }
+
         annotations.MarkSaved();
         return new ProjectLoadResult
         {
@@ -455,6 +544,7 @@ public static class SpydateProject
             Skipped = skipped,
             PatchesApplied = patchesApplied,
             PatchesSkipped = patchesSkipped,
+            BreakpointsApplied = breakpointsApplied,
         };
     }
 
@@ -546,6 +636,13 @@ public static class SpydateProject
         /// outright, over a member that costs nothing to skip.
         /// </summary>
         [JsonPropertyName("patches")] public List<PatchDto>? Patches { get; set; }
+
+        /// <summary>
+        /// Still format 1, on the same reasoning as patches: a reader that predates breakpoints skips
+        /// a member it does not know, and an absent list means none, so a project written by either
+        /// version opens in the other losing only what it never understood.
+        /// </summary>
+        [JsonPropertyName("breakpoints")] public List<BreakpointDto>? Breakpoints { get; set; }
     }
 
     private sealed class ImageDto
@@ -568,6 +665,12 @@ public static class SpydateProject
         [JsonPropertyName("source")] public AnnotationSource? Source { get; set; }
 
         [JsonPropertyName("modified")] public DateTimeOffset? Modified { get; set; }
+    }
+
+    private sealed class BreakpointDto
+    {
+        /// <summary>Where, as an RVA. A breakpoint is only a place, so this is all it needs.</summary>
+        [JsonPropertyName("rva")] public string? Rva { get; set; }
     }
 
     private sealed class PatchDto

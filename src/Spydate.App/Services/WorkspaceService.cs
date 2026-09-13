@@ -10,7 +10,7 @@ namespace Spydate.App.Services;
 /// <summary>Everything loaded for one file: the PE image plus the native and/or managed analysis objects.</summary>
 public sealed class OpenedBinary : IDisposable
 {
-    public OpenedBinary(PeImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null)
+    public OpenedBinary(PeImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null)
     {
         Image = image;
         Analysis = analysis;
@@ -19,6 +19,7 @@ public sealed class OpenedBinary : IDisposable
         Project = project;
         NativeDecompiler = analysis is null ? null : new NativeDecompiler(analysis);
         Patches = patches ?? new PatchStore();
+        Breakpoints = breakpoints ?? new BreakpointStore();
     }
 
     public PeImage Image { get; }
@@ -52,14 +53,17 @@ public sealed class OpenedBinary : IDisposable
     /// <summary>Byte changes recorded against this image, written only to a copy.</summary>
     public PatchStore Patches { get; }
 
+    /// <summary>Breakpoints recorded against this image, so the gutter marks survive reopening.</summary>
+    public BreakpointStore Breakpoints { get; }
+
     /// <summary>Names and comments the user has added; empty when the image cannot be analysed.</summary>
     public AnnotationStore? Annotations => Analysis?.Annotations;
 
-    /// <summary>True when there are annotations that have not been written to disk.</summary>
-    public bool HasUnsavedAnnotations => Annotations is { IsDirty: true } || Patches.IsDirty;
+    /// <summary>True when there are annotations, patches or breakpoints that have not been written to disk.</summary>
+    public bool HasUnsavedAnnotations => Annotations is { IsDirty: true } || Patches.IsDirty || Breakpoints.IsDirty;
 
     /// <summary>Writes the annotations out, returning where they went (null when there was nothing to write).</summary>
-    public string? SaveProject() => Annotations is null ? null : SpydateProject.Save(Image, Annotations, Patches);
+    public string? SaveProject() => Annotations is null ? null : SpydateProject.Save(Image, Annotations, Patches, Breakpoints);
 
     public string DisplayName => Image.FileName;
 
@@ -156,7 +160,8 @@ public sealed class WorkspaceService : IDisposable
 
         // Before discovery, so a renamed function is discovered under the name the user gave it.
         var patches = new PatchStore();
-        var project = analysis is null ? null : SpydateProject.LoadFor(pe, analysis.Annotations, patches);
+        var breakpoints = new BreakpointStore();
+        var project = analysis is null ? null : SpydateProject.LoadFor(pe, analysis.Annotations, patches, breakpoints);
 
         ManagedAssembly? managed = null;
         string? managedError = null;
@@ -173,6 +178,6 @@ public sealed class WorkspaceService : IDisposable
             }
         }
 
-        return new OpenedBinary(pe, analysis, managed, managedError, project, patches);
+        return new OpenedBinary(pe, analysis, managed, managedError, project, patches, breakpoints);
     }
 }

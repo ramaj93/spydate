@@ -98,6 +98,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _expanded.Clear();
         _statements.Clear();   // a different binary has different methods under the same tokens
         _localNames.Clear();
+        RestoreBreakpoints();
         OnPropertyChanged(nameof(NeedsHost));
 
         // Which debugger applies is a fact about the file, so the panel rearranges itself when a
@@ -678,13 +679,69 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         if (BreakpointAddresses.Remove(staticVa))
         {
             _session?.RemoveBreakpoint(staticVa);
+            RememberBreakpoint(staticVa, on: false);
             Add($"cleared the breakpoint at 0x{staticVa:X}");
         }
         else
         {
             BreakpointAddresses.Add(staticVa);
             _session?.AddBreakpoint(staticVa);
+            RememberBreakpoint(staticVa, on: true);
             Add($"breakpoint at 0x{staticVa:X}");
+        }
+
+        BreakpointsVersion++;
+        RefreshBreakpoints();
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Records a breakpoint in the project so it survives reopening — an RVA, whichever debugger it
+    /// belongs to, since a managed one's method and offset are re-derived from it on the way back.
+    /// Nothing is written to disk here; the store is dirtied and saved with the rest of the project.
+    /// </summary>
+    private void RememberBreakpoint(ulong staticVa, bool on)
+    {
+        if (_workspace.Current is not { } binary || binary.Image.VaToRva(staticVa) is not { } rva)
+        {
+            return;
+        }
+
+        if (on)
+        {
+            binary.Breakpoints.Add(rva);
+        }
+        else
+        {
+            binary.Breakpoints.Remove(rva);
+        }
+    }
+
+    /// <summary>
+    /// Puts the marks recorded for the binary now open back in the gutter. Called when a binary is
+    /// opened, so the breakpoints last set are there again — planted for real when a run next starts,
+    /// the same as one set by hand. A managed one's method and IL offset come back off the body map,
+    /// exactly as they were worked out when it was set.
+    /// </summary>
+    private void RestoreBreakpoints()
+    {
+        BreakpointAddresses.Clear();
+        _pendingManaged.Clear();
+
+        if (_workspace.Current is { } binary)
+        {
+            bool managed = binary.Image.ClrHeader?.IsILOnly == true;
+            foreach (uint rva in binary.Breakpoints.Snapshot())
+            {
+                ulong va = binary.Image.RvaToVa(rva);
+                BreakpointAddresses.Add(va);
+
+                if (managed && binary.Bodies is { } bodies && bodies.At(rva) is { } body)
+                {
+                    uint token = (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(body.Method);
+                    _pendingManaged[va] = (binary.Image.FileName, token, (uint)body.OffsetOf(rva));
+                }
+            }
         }
 
         BreakpointsVersion++;
@@ -715,6 +772,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             }
 
             BreakpointAddresses.Remove(address);
+            RememberBreakpoint(address, on: false);
         }
 
         BreakpointsVersion++;
@@ -1727,6 +1785,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                 BreakpointAddresses.Add(staticVa);
                 _pendingManaged[staticVa] = (module, token, offset);
             }
+            else
+            {
+                binary.Breakpoints.Remove(rva);
+            }
 
             Add(refused ?? $"cleared the breakpoint at IL_{offset:X4}");
         }
@@ -1737,6 +1799,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             // Recorded whether or not anything is running. A breakpoint set before the run is the
             // useful kind, and the session plants everything it has been given when its module loads.
             _pendingManaged[staticVa] = (module, token, offset);
+            binary.Breakpoints.Add(rva);
             string? problem = _managed?.SetBreakpoint(module, token, offset);
             Add(problem ?? $"breakpoint in {module} at method 0x{token:X8}+IL_{offset:X4}");
         }
