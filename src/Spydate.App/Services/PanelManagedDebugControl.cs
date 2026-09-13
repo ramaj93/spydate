@@ -85,6 +85,13 @@ public sealed class PanelManagedDebugControl : IManagedDebugControl
         return problem;
     }
 
+    public string SetBreakpointByName(string type, string method, uint ilOffset, bool on)
+    {
+        string result = "nothing is running under the .NET debugger; start it first";
+        OnUi(() => result = _debugger.SetManagedBreakpointByName(type, method, ilOffset, on));
+        return result;
+    }
+
     public bool WaitUntilStopped(TimeSpan timeout)
         => _debugger.ManagedSession?.WaitUntilStopped(timeout) ?? false;
 
@@ -111,13 +118,48 @@ public sealed class PanelManagedDebugControl : IManagedDebugControl
             Arguments = Slots(session, arguments: true),
             Locals = Slots(session, arguments: false),
             Modules = session.Modules,
-            Breakpoints = session.Breakpoints.Select(b => b.ToString()).ToList(),
+            Threads = session.State == Debugger.DebugState.Stopped
+                ? session.Threads().Select(Thread).ToList()
+                : [],
+            Breakpoints = session.Breakpoints.Select(b => b.ToString())
+                .Concat(session.PendingNamedBreakpoints)
+                .ToList(),
             Recent = session.Recent,
         };
     }
 
+    public string? SelectThread(uint threadId)
+    {
+        // Through the view model, so the window's Threads tab, arrow and locals follow the same switch
+        // the agent asked for — the whole reason the two drive one debugger.
+        string? problem = "nothing is running";
+        OnUi(() => problem = _debugger.SelectManagedThread(threadId));
+        return problem;
+    }
+
     private static IReadOnlyList<ManagedSlot> Slots(Debugger.Managed.ManagedDebugSession session, bool arguments)
         => session.Values(arguments).Select(v => new ManagedSlot(v.Index, v.Kind, v.Text, v.Name)).ToList();
+
+    /// <summary>One thread as a line: id, what it is, where it is, and how it is marked.</summary>
+    private static string Thread(Debugger.Managed.ManagedThread t)
+    {
+        var tags = new List<string>(2);
+        if (t.IsStopped)
+        {
+            tags.Add("stopped it");
+        }
+
+        if (t.IsSelected)
+        {
+            tags.Add("shown");
+        }
+
+        string mid = t.ManagedId is { } m ? $" #{m}" : string.Empty;
+        string name = t.Name.Length > 0 ? $" \"{t.Name}\"" : string.Empty;
+        string state = t.State.Length > 0 ? $" [{t.State}]" : string.Empty;
+        string mark = tags.Count > 0 ? " (" + string.Join(", ", tags) + ")" : string.Empty;
+        return $"{t.Id}{mid} {t.Category}{name} — {t.Location}{state}{mark}";
+    }
 
     /// <summary>
     /// Runs something on the UI thread and waits for it, so a caller gets the answer rather than a

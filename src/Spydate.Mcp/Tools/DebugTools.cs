@@ -59,7 +59,7 @@ public sealed class DebugTools
 
         if (_store.ManagedDebug is { } managed)
         {
-            return ManagedDebugging.Run(managed, action);
+            return ManagedDebugging.Run(managed, action, thread);
         }
 
         var debug = _store.Debug!;
@@ -238,6 +238,11 @@ public sealed class DebugTools
 
         if (_store.ManagedDebug is { } managed)
         {
+            if (thread is { } wanted && managed.SelectThread(wanted) is { } noThread)
+            {
+                return noThread;
+            }
+
             return ManagedDebugging.Describe(managed.Snapshot());
         }
 
@@ -266,7 +271,7 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_memory")]
-    [Description("Read the running process's memory at a listing address. Hex and ASCII, up to 4096 bytes.")]
+    [Description("Read native process memory at a listing address, up to 4096 bytes. Not for .NET: the address is file IL — use debug_state.")]
     public string Memory(
         [Description("Address, sub_XXXX, or an existing name.")] string target,
         [Description("How many bytes, up to 4096.")] int length = 128)

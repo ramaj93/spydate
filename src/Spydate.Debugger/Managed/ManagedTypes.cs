@@ -433,6 +433,58 @@ internal sealed class ManagedTypes : IDisposable
     }
 
     /// <summary>Runs a read against a module's metadata, turning a malformed image into "no answer".</summary>
+    /// <summary>
+    /// The method-definition tokens of every method named <paramref name="methodName"/> on the type
+    /// <paramref name="typeName"/>, read from one module's metadata. Empty when the module has no such
+    /// type or method. Used to resolve a <c>Type::Method</c> breakpoint against an assembly other than
+    /// the one opened — a framework method, say — by looking in each module as it loads.
+    ///
+    /// A full name (<c>System.Environment</c>) is matched first; only if no type has that full name is
+    /// the bare name tried, so a common short name does not match a type in the wrong namespace while a
+    /// full one is available. Every overload of the method is returned: naming <c>Shutdown</c> means
+    /// stopping when it is called, whichever overload that is.
+    /// </summary>
+    internal IReadOnlyList<uint> MethodsNamed(string? module, string typeName, string methodName)
+        => Reading(module, reader => (IReadOnlyList<uint>)FindMethods(reader, typeName, methodName))
+           ?? Array.Empty<uint>();
+
+    private static List<uint> FindMethods(MetadataReader reader, string typeName, string methodName)
+    {
+        var byFull = new List<TypeDefinition>();
+        var byBare = new List<TypeDefinition>();
+        foreach (var handle in reader.TypeDefinitions)
+        {
+            var type = reader.GetTypeDefinition(handle);
+            string space = reader.GetString(type.Namespace);
+            string name = reader.GetString(type.Name);
+            string full = space.Length == 0 ? name : $"{space}.{name}";
+
+            if (full.Equals(typeName, StringComparison.OrdinalIgnoreCase))
+            {
+                byFull.Add(type);
+            }
+            else if (name.Equals(typeName, StringComparison.OrdinalIgnoreCase))
+            {
+                byBare.Add(type);
+            }
+        }
+
+        var tokens = new List<uint>();
+        foreach (var type in byFull.Count > 0 ? byFull : byBare)
+        {
+            foreach (var methodHandle in type.GetMethods())
+            {
+                var method = reader.GetMethodDefinition(methodHandle);
+                if (reader.GetString(method.Name).Equals(methodName, StringComparison.Ordinal))
+                {
+                    tokens.Add((uint)MetadataTokens.GetToken(methodHandle));
+                }
+            }
+        }
+
+        return tokens;
+    }
+
     private T? Reading<T>(string? module, Func<MetadataReader, T?> read)
         where T : class
     {

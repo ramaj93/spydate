@@ -570,7 +570,16 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             // The window's own store, so a patch the assistant records appears in the Patches tab
             // rather than in a copy nobody is looking at — the same reason it works on the window's
             // analysis rather than re-reading the file.
-            patches: binary.Patches));
+            patches: binary.Patches,
+
+            // And the window's own managed assembly. Without it the session's ManagedIndex and Bodies
+            // are null, so every managed target — a method to read, a method to break on — resolves as
+            // "not in this assembly", which reads exactly like the metadata being unreadable when it is
+            // not. ownsManaged is false because the window opened it and its views are still using it;
+            // disposing the assistant's session must not dispose it.
+            managed: binary.Managed,
+            managedLoadError: binary.ManagedLoadError,
+            ownsManaged: false));
 
         var provider = Settings.ToProviderSettings();
         // The window's own debugger, not one of its own. Two processes of the same untrusted binary,

@@ -33,6 +33,12 @@ public sealed record ManagedSnapshot
 
     public IReadOnlyList<string> Modules { get; init; } = [];
 
+    /// <summary>
+    /// The threads of the stopped process, each a line naming its id, what it is and where it is, and
+    /// marked when it is the one that stopped or the one being looked at. Empty while it runs.
+    /// </summary>
+    public IReadOnlyList<string> Threads { get; init; } = [];
+
     /// <summary>Breakpoints asked for, each saying whether it is in the process yet.</summary>
     public IReadOnlyList<string> Breakpoints { get; init; } = [];
 
@@ -77,8 +83,22 @@ public interface IManagedDebugControl
     /// </summary>
     string? SetBreakpoint(string module, uint methodToken, uint ilOffset, bool on);
 
+    /// <summary>
+    /// Sets or clears a breakpoint named by a <c>Type::Method</c> that may live in an assembly other
+    /// than the one opened — a framework method. It is resolved against each module as it loads, so
+    /// one in an assembly that has not loaded yet is held rather than refused. Returns a line saying
+    /// what happened, since "recorded, waiting" is as much an outcome as "planted".
+    /// </summary>
+    string SetBreakpointByName(string type, string method, uint ilOffset, bool on);
+
     /// <summary>Everything readable right now.</summary>
     ManagedSnapshot Snapshot();
+
+    /// <summary>
+    /// Makes a thread the one being looked at, so values, the call stack and stepping follow it. Null
+    /// when it worked, or why it did not. Only while stopped — a running thread has no frame to read.
+    /// </summary>
+    string? SelectThread(uint threadId);
 
     /// <summary>Waits for it to come to a stop, or gives up.</summary>
     bool WaitUntilStopped(TimeSpan timeout);

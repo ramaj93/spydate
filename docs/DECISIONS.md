@@ -522,3 +522,92 @@ which is safe because nothing runs in between. A property is not writable here: 
 calling a setter, a second evaluation, and is not built. The prompt is deliberate rather than
 in-place editing: a value written by accident into a running program is not something to make easy,
 and what a row will accept fits in one line of the prompt.
+
+## A managed patch is written into the running image at module load, not into the file
+
+The native debugger already folds every switched-on patch into a run, written into the process as the
+module lands, so a debug session behaves like the patched copy without one being saved. The managed
+launch did none of this — it applied no patches at all — so a recorded IL patch never reached a .NET
+process, and a run that was meant to prove a patch out ran the original code and reported success. The
+managed launch now applies patches too, but almost nothing about how carries over from the native
+side, because managed code is not native code.
+
+A managed method is not run from its IL; it is run from the native code the JIT produces the first
+time the method is called. So the one moment a patch can take is **before that first call**, which is
+module load: the IL is in memory, and none of the module's methods has been compiled. Patches
+therefore wait for their module exactly as breakpoints do, and are written on the load callback,
+before the debuggee is let go. Applied any later they would change bytes nothing reads — the same way
+a ReadyToRun method's patched IL is inert, now true of every method once it has run.
+
+Reaching the IL is not `base + RVA`. A managed image is not mapped section-for-section into the
+process, so that address reads as zeroes; the IL lives wherever the loader put it and only the
+runtime's IL-code object for the method knows where (`GetFunctionFromToken` → `GetILCode` →
+`GetAddress`), which is the same route a breakpoint takes. The IL page is read-only, so the write goes
+through `VirtualProtectEx` + `WriteProcessMemory` — the runtime's own `WriteMemory` refuses it — and
+the protection is put straight back. A patch that carries the bytes it expected to replace is checked
+against what is actually there first, so one cut against a method that has been recompiled, or against
+IL a native image is running instead of, is refused rather than written blind.
+
+The addresses stay out of it. A managed patch is named by a method token and an IL offset — what the
+project's RVA converts to through the body map — because that is what survives the method being
+recompiled and the file being rebuilt, the same reason a managed breakpoint is. Toggling a patch on
+mid-run does not reach an already-compiled method, so managed patches are applied at launch and a
+change waits for a relaunch; the window says as much rather than implying a live edit took.
+
+## The assistant sees the same .NET metadata the window does, and breaks on an address
+
+The assistant panel builds its own `BinarySession` around what the window already has open, rather than
+re-reading the file — same analysis, same annotations, same patch store. It was handed all of those
+and not the managed assembly, so `session.Managed` was null and with it `ManagedIndex` and `Bodies`.
+Every managed tool resolves a target through those, so on a .NET file the assistant answered "not a
+method in this assembly" to names that were right there — which reads, to an agent, exactly like the
+metadata being unreadable, though the engine reads it fine. The window's assembly is now passed in.
+It is passed with `ownsManaged: false`: the window opened it and its views are still on it, so the
+assistant's session disposing must not take it with them — only the session that loaded an assembly
+disposes it.
+
+And `debug_break` on a .NET process now takes a listing address, not only a `Type::Method` name. The
+managed IL view prints an address against every instruction, so an agent reading a call site writes
+down an address; refusing it there, when the same address is what the listing offered, was a wall with
+no reason the agent could see. An address is turned into the method it falls in and the offset within
+it through the body map — the same map the IL view used to print it — because a managed breakpoint is
+a method and an IL offset and never an address. A name still works, an address now works, and an
+address that lands in no method's IL is refused as an address rather than mistaken for a name.
+
+## The assistant sees a .NET process's threads, and debug_memory says what it will not do
+
+Two smaller gaps from the same session. A managed stop reported no threads to the assistant —
+`ManagedSnapshot` carried none and `IManagedDebugControl` had no way to switch — though the window's
+Threads tab had shown and switched them since it was built. The snapshot now lists them and the
+existing `thread` parameter of `debug_state` and `debug_run` selects one, so `debug_run(step,
+thread=N)` steps thread N. No new tool: a thread was already a parameter these tools took, and the
+list rides in the snapshot, so nothing new is added to the manifest every session pays for. The switch
+goes through the view model, so the arrow, the locals and the tab's own highlight follow the agent.
+
+And `debug_memory` now says in its description that it is for native processes, and that a .NET
+listing address is file IL — read `debug_state` instead. It refused a managed read correctly before,
+but silently as far as the schema went, so an agent spent a turn discovering a limit the description
+could have told it. The description had to be trimmed to fit: the whole tool surface is capped at a
+fixed size because every session is charged for it up front, and widening one description alone put it
+over — a reminder that a sentence in a tool description is not free.
+
+## A breakpoint can name a method in another assembly, resolved as its module loads
+
+`debug_break` took a `Type::Method` only in the opened assembly, because that is the only metadata the
+resolver indexed. But the methods worth breaking on are often in someone else's assembly — a guard
+that ends in `System.Environment::Exit`, a WPF app that leaves through `System.Windows.Application::
+Shutdown`. Those resolve now, and the mechanism is the one breakpoints already had, one level up.
+
+A managed breakpoint is a module and a method token, and a method's token is only knowable from its
+module's metadata — so a name in an assembly not loaded yet cannot become a breakpoint now. It is held
+as an unresolved name and tried against each module as it loads: the module reports its own path, its
+metadata is read from there, and if it defines the type and method, the breakpoint plants and leaves
+the waiting list. mscorlib is loaded before the program's own code, so `Environment::Exit` goes in at
+the first hold; `PresentationFramework` arrives long after the run starts, and `Application::Shutdown`
+plants when it does. Every overload of the named method is planted — naming `Shutdown` means stopping
+whichever `Shutdown` is called. Clearing re-resolves the same way and clears what it planted.
+
+The catch is telling a framework name from a typo of an opened one. `PeImagg::Load` should be answered
+with "did you mean PeImage", not sent off to wait for an assembly that never comes. So a name is only
+deferred when the opened assembly does not recognise it at all: if the resolver would suggest a fix, or
+found the type and only missed the method, the name was aimed at the opened assembly and stays there.

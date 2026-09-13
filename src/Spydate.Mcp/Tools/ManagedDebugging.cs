@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
 using System.Text;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
@@ -25,9 +27,18 @@ internal static class ManagedDebugging
     /// <summary>How long "wait" waits, for the case the settle cannot cover.</summary>
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
 
-    internal static string Run(IManagedDebugControl debug, string action)
+    internal static string Run(IManagedDebugControl debug, string action, uint? thread = null)
     {
         string what = action.Trim().ToLowerInvariant().Replace('-', '_');
+
+        // A thread to act on is chosen before acting, because stepping follows the selected thread:
+        // "step thread 5" means make 5 the one being looked at, then step it. Only meaningful while
+        // stopped, which is also the only time a step is.
+        if (thread is { } wanted && what is "step" or "step_over" or "step_out"
+            && debug.SelectThread(wanted) is { } refused)
+        {
+            return refused;
+        }
 
         // Asked before acting, because the answer decides whether acting means anything. Moving a
         // process that is not stopped does nothing and reports success, which is a loop.
@@ -131,10 +142,11 @@ internal static class ManagedDebugging
     }
 
     /// <summary>
-    /// Sets a breakpoint on a method, with an optional IL offset written the way a listing writes it.
-    ///
-    /// The method is resolved through the same names <c>read_function</c> takes, so an agent that has
-    /// just read a method can break on it without translating anything.
+    /// Sets a breakpoint on a method, named either the way <c>read_function</c> names it —
+    /// <c>Type::Method</c>, with an optional <c>+IL_7</c> offset — or by a listing address, which the
+    /// managed IL view prints against every instruction. An address is turned into the method it falls
+    /// in and the offset within it, because a managed breakpoint is a method and an IL offset, never an
+    /// address: that is what survives the method being recompiled, and it is all the runtime will take.
     /// </summary>
     internal static string Break(BinarySession session, IManagedDebugControl debug, string target, bool on)
     {
@@ -159,28 +171,131 @@ internal static class ManagedDebugging
             }
         }
 
+        uint token;
+        string what;
+
         var found = ManagedTargets.Resolve(session, text);
-        if (!found.Found)
+        if (found.Found)
         {
-            return found.Problem ?? $"'{text}' is not a method in this assembly";
+            if (found.Member is not { } member || member.Handle.Kind != HandleKind.MethodDefinition)
+            {
+                return $"{found.Describe()} is not a method. A breakpoint goes in code, so name one of its methods.";
+            }
+
+            token = (uint)MetadataTokens.GetToken(member.Handle);
+            what = $"{found.Describe()} at IL_{offset:X4}";
+        }
+        else if (ElsewhereByName(found, text) is var (typeName, methodName))
+        {
+            // Not in the opened assembly, shaped like a method, and not a near-miss of an opened type —
+            // so a Type::Method in another assembly, a framework one most often, resolved as the modules
+            // load. A typo of an opened name (which the resolver would offer a fix for) is left to that
+            // fix rather than turned into a breakpoint that waits for an assembly that never comes.
+            return debug.SetBreakpointByName(typeName, methodName, offset, on);
+        }
+        else if (AsAddress(session, target) is { } located)
+        {
+            // A listing address rather than a name — the whole target, since an address carries its
+            // own offset and never a +IL_ suffix.
+            token = located.Token;
+            offset = located.Offset;
+            what = $"{located.Method} at IL_{offset:X4} (0x{located.Va:X})";
+        }
+        else if (Targets.Resolve(session, target) is { Found: true } address)
+        {
+            // A real address, but not one inside any method's IL — a data address, a native stub in a
+            // mixed image, or simply a mistake. Said as an address, since that is what it is.
+            return $"0x{address.Va:X} is not inside any method's IL, so there is no managed method to break in there";
+        }
+        else
+        {
+            // Neither a name nor an address. The name failure is the more useful to report, since an
+            // agent that meant an address rarely mistypes one into a method name.
+            return found.Problem
+                   ?? $"'{text}' is not a method in this assembly, nor an address inside one's IL";
         }
 
-        if (found.Member is not { } member || member.Handle.Kind != System.Reflection.Metadata.HandleKind.MethodDefinition)
-        {
-            return $"{found.Describe()} is not a method. A breakpoint goes in code, so name one of its methods.";
-        }
-
-        uint token = (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(member.Handle);
         string module = System.IO.Path.GetFileName(session.Path);
-
         if (debug.SetBreakpoint(module, token, offset, on) is { } problem)
         {
             return problem;
         }
 
-        return on
-            ? $"breakpoint in {found.Describe()} at IL_{offset:X4}"
-            : $"cleared the breakpoint in {found.Describe()} at IL_{offset:X4}";
+        return on ? $"breakpoint in {what}" : $"cleared the breakpoint in {what}";
+    }
+
+    /// <summary>
+    /// The type and method of a <c>Type::Method</c> that belongs to another assembly, or null when the
+    /// text is not that: not shaped like a method, or a name the opened assembly nearly has — a typo it
+    /// would rather suggest a fix for than defer forever. The signal is the resolver's own message: a
+    /// suggestion ("Did you mean") or a real opened type missing the method ("has no member") both mean
+    /// the name was aimed at the opened assembly, so it is not sent off to wait for another one.
+    /// </summary>
+    private static (string Type, string Method)? ElsewhereByName(ManagedTarget found, string text)
+    {
+        int mark = text.IndexOf("::", StringComparison.Ordinal);
+        if (mark <= 0 || text[(mark + 2)..].Trim() is not { Length: > 0 } method)
+        {
+            return null;
+        }
+
+        if (found.Problem is { } problem
+            && (problem.Contains("Did you mean", StringComparison.Ordinal)
+                || problem.Contains("has no member", StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        return (text[..mark].Trim(), method);
+    }
+
+    /// <summary>Where a breakpoint lands, when a target was a listing address inside a method's IL.</summary>
+    private readonly record struct AddressBreak(ulong Va, uint Token, uint Offset, string Method);
+
+    /// <summary>
+    /// A listing address turned into the method it falls in and the offset within it, or null when it
+    /// is not an address or does not land inside any method's IL. The body map is the only thing that
+    /// can do this — the same map the IL view uses to print addresses in the first place.
+    /// </summary>
+    private static AddressBreak? AsAddress(BinarySession session, string target)
+    {
+        var resolved = Targets.Resolve(session, target);
+        if (!resolved.Found)
+        {
+            return null;
+        }
+
+        if (session.Image.VaToRva(resolved.Va) is not { } rva
+            || session.Bodies?.At(rva) is not { } body)
+        {
+            return null;
+        }
+
+        uint token = (uint)MetadataTokens.GetToken(body.Method);
+        return new AddressBreak(resolved.Va, token, (uint)body.OffsetOf(rva), MethodName(session, body.Method));
+    }
+
+    /// <summary>A method's name as <c>Namespace.Type::Method</c>, for a message about an address.</summary>
+    private static string MethodName(BinarySession session, MethodDefinitionHandle handle)
+    {
+        if (session.Managed is not { } assembly)
+        {
+            return $"method 0x{MetadataTokens.GetToken(handle):X8}";
+        }
+
+        try
+        {
+            var metadata = assembly.Metadata;
+            var method = metadata.GetMethodDefinition(handle);
+            var type = metadata.GetTypeDefinition(method.GetDeclaringType());
+            string space = metadata.GetString(type.Namespace);
+            string name = metadata.GetString(type.Name);
+            return $"{(space.Length == 0 ? name : $"{space}.{name}")}::{metadata.GetString(method.Name)}";
+        }
+        catch (BadImageFormatException)
+        {
+            return $"method 0x{MetadataTokens.GetToken(handle):X8}";
+        }
     }
 
     /// <summary>
@@ -207,6 +322,15 @@ internal static class ManagedDebugging
         }
 
         sb.Append(" — ").Append(snapshot.Status).Append('\n');
+
+        if (snapshot.Threads.Count > 0)
+        {
+            sb.Append("\nthreads:\n");
+            foreach (string thread in snapshot.Threads)
+            {
+                sb.Append("  ").Append(thread).Append('\n');
+            }
+        }
 
         Slots(sb, "arguments", snapshot.Arguments);
         Slots(sb, "locals", snapshot.Locals);

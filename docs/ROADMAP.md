@@ -319,6 +319,17 @@ native side already reads it, because native is what it is.
   is pointed at it. It is behind a prompt rather than typed into the grid, because a value written by
   accident into a running program is not something to make easy, and nonsense is refused with the
   value left as it was rather than written as zero.
+  A recorded patch now goes into a managed run, the way it always did into a native one — but written
+  into the method's IL as its module loads, which for managed code is the only moment it takes: after
+  the JIT has turned that IL into native code, changing the IL changes nothing. It is nothing like the
+  native write. The IL is not at `base + RVA` (a managed image is not mapped section-for-section, and
+  that address reads as zeroes); it is reached through the runtime's IL-code object for the method
+  (`GetFunctionFromToken` → `GetILCode` → `GetAddress`), the same route a breakpoint takes. The IL
+  page is read-only, so the write is `VirtualProtectEx` + `WriteProcessMemory` with the protection put
+  straight back — the runtime's own `WriteMemory` refuses it — and a patch is checked against the bytes
+  it expected first, so one cut against a recompiled or precompiled method is refused rather than
+  written blind. Patches are named by token and IL offset, so toggling one on mid-run reaches nothing
+  already compiled; a managed patch is applied at launch and a change waits for a relaunch.
   Still to do: writing through a property's setter, which is a second evaluation; and evaluating an
   expression somebody types, which is a watch window and a language of its own.
   Four things cost real time and are worth knowing before touching this again. Registering for

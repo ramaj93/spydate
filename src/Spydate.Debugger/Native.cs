@@ -290,6 +290,14 @@ internal static partial class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool FlushInstructionCache(IntPtr hProcess, ulong lpBaseAddress, nuint dwSize);
 
+    /// <summary>Page protection constants for <see cref="VirtualProtectEx"/>.</summary>
+    internal const uint PageReadWrite = 0x04;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool VirtualProtectEx(
+        IntPtr hProcess, ulong lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     internal static partial IntPtr OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);
 

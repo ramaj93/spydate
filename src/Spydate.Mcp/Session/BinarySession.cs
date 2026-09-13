@@ -37,10 +37,17 @@ public sealed class BinarySession : IDisposable
     private ManagedIndex? _index;
     private ManagedReferences? _references;
     private ManagedBodies? _bodies;
+    private readonly bool _ownsManaged;
 
     /// <param name="save">
     /// How annotations reach disk. Injectable so tests can watch a write without one landing in the
     /// per-user store of whoever is running them.
+    /// </param>
+    /// <param name="ownsManaged">
+    /// Whether disposing this session disposes <paramref name="managed"/>. False when the assembly
+    /// belongs to something with a longer life — the window's own open binary, which the assistant
+    /// wraps rather than re-reads — so that closing the assistant's session does not pull the metadata
+    /// out from under the views still showing it.
     /// </param>
     public BinarySession(
         string path,
@@ -51,7 +58,8 @@ public sealed class BinarySession : IDisposable
         Func<PeImage, AnnotationStore, string?>? save = null,
         PatchStore? patches = null,
         ManagedAssembly? managed = null,
-        string? managedLoadError = null)
+        string? managedLoadError = null,
+        bool ownsManaged = true)
     {
         // A lambda rather than the method group: SpydateProject.Save takes an optional patch store
         // now, and a group with a defaulted parameter no longer converts on its own.
@@ -65,6 +73,7 @@ public sealed class BinarySession : IDisposable
         Discovery = discovery;
         Managed = managed;
         ManagedLoadError = managedLoadError;
+        _ownsManaged = ownsManaged;
 
         if (analysis is not null)
         {
@@ -232,7 +241,11 @@ public sealed class BinarySession : IDisposable
 
     public void Dispose()
     {
-        Managed?.Dispose();
+        if (_ownsManaged)
+        {
+            Managed?.Dispose();
+        }
+
         _gate.Dispose();
     }
 }

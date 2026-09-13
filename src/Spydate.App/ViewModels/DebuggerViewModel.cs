@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.Versioning;
 using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -480,6 +481,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         var session = new ManagedDebugSession();
         session.Reported += OnManagedReported;
         _managed = session;
+
+        // Every patch that is switched on goes into the run, the way it does for a native one — but
+        // written into the module's IL as it loads, which for managed code is the only moment it can
+        // take: after the JIT has turned that IL into the native code the process actually runs,
+        // changing the IL changes nothing. A patch toggled on mid-run therefore waits for a relaunch.
+        ApplyManagedPatches(binary, session);
 
         Status = $"Starting {Path.GetFileName(run)}…";
         Add($"starting {run} under the .NET debugger");
@@ -1043,6 +1050,35 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private static readonly IReadOnlyDictionary<int, string> NoNames = new Dictionary<int, string>();
 
+    /// <summary>
+    /// Picks a managed thread by its id, for the assistant, which works from ids rather than rows. It
+    /// sets the same selection a click on the Threads tab would, so the arrow, the locals and the call
+    /// stack follow it in the window as well. Null when it worked, or why it did not.
+    /// </summary>
+    public string? SelectManagedThread(uint threadId)
+    {
+        if (_managed is null)
+        {
+            return "nothing is running";
+        }
+
+        var row = ManagedThreads.FirstOrDefault(t => t.Id == threadId);
+        if (row is null)
+        {
+            return $"there is no managed thread {threadId}";
+        }
+
+        // Already the one being looked at — nothing to do, and setting it would not fire the change.
+        if (row.IsSelected)
+        {
+            return null;
+        }
+
+        // Setting this runs OnSelectedManagedThreadChanged, which calls the session and re-syncs.
+        SelectedManagedThread = row;
+        return null;
+    }
+
     private void RefreshManagedThreads(ManagedDebugSession session)
     {
         ManagedThreads.Clear();
@@ -1365,6 +1401,34 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             }
 
             session.SetPatch(new LivePatch(patch.Rva, patch.Bytes, patch.Original));
+        }
+    }
+
+    /// <summary>
+    /// Hands every switched-on patch to the managed session, to be written into its method's IL as
+    /// the module loads. Nothing is written now: the session holds each one until its module is in,
+    /// which is the only point at which a managed patch has any effect. Each is named by the method it
+    /// falls in and the offset within it — a managed patch has no address of its own until the runtime
+    /// gives the IL one — so a patch that is not inside a method's IL has nowhere managed to go and is
+    /// said to be skipped. What went in, and why one did not, arrives on the log as the run starts.
+    /// </summary>
+    private void ApplyManagedPatches(OpenedBinary binary, ManagedDebugSession session)
+    {
+        string module = binary.Image.FileName;
+        var bodies = binary.Bodies;
+
+        foreach (var patch in binary.Patches.Snapshot().Where(p => p.Enabled))
+        {
+            if (bodies?.At(patch.Rva) is not { } body)
+            {
+                Add($"patch at 0x{binary.Image.RvaToVa(patch.Rva):X} not applied: it is not inside a method's IL, "
+                    + "so save a patched copy to change bytes that are not managed code");
+                continue;
+            }
+
+            uint token = (uint)MetadataTokens.GetToken(body.Method);
+            uint offset = (uint)body.OffsetOf(patch.Rva);
+            session.ApplyOnLoad(new ManagedPatch(module, token, offset, [.. patch.Bytes], [.. patch.Original]));
         }
     }
 
@@ -1772,6 +1836,23 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         SyncManaged();
         return problem;
+    }
+
+    /// <summary>
+    /// Sets or clears a breakpoint named by a <c>Type::Method</c> in some assembly — the opened one or
+    /// another — resolved as modules load. No gutter marker follows it: the method is in a file that is
+    /// not the one on screen, so there is no line here to mark. Returns a line describing the outcome.
+    /// </summary>
+    internal string SetManagedBreakpointByName(string type, string method, uint ilOffset, bool on)
+    {
+        if (_managed is not { } session)
+        {
+            return "nothing is running under the .NET debugger; start it first";
+        }
+
+        string result = session.SetBreakpointByName(type, method, ilOffset, on);
+        SyncManaged();
+        return result;
     }
 
     /// <summary>

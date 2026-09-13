@@ -585,10 +585,139 @@ public class ManagedVariablesTests
     }
 
     // ------------------------------------------------------------------
+    // A patch reaching the running image
+    // ------------------------------------------------------------------
+
+    [SkippableFact]
+    public void APatchIsWrittenIntoTheModuleBeforeItsCodeRuns()
+    {
+        Skip.If(Program is null, NoCompiler);
+
+        // Rewrite the Doubled getter — "return Count * 2", which on Count == 7 is 14 — to "return 99".
+        // ldc.i4.s 99 (1F 63) at the start, ret (2A) at the very end, nop between: a method has to end
+        // on a terminator, so the ret goes last rather than leaving control to fall off into the nops.
+        uint token = Token("Holder", "get_Doubled");
+        var il = MethodIl(Program!, "Holder", "get_Doubled");
+        var patched = new byte[il.Length];
+        Array.Fill(patched, (byte)0x00);
+        patched[0] = 0x1F;
+        patched[1] = 0x63;
+        patched[^1] = 0x2A;
+
+        using var session = new ManagedDebugSession { ShowConsole = false };
+        try
+        {
+            // Queued before anything runs. The getter is never called until the eval below, so it is
+            // still uncompiled when the module loads and the write lands — which is exactly the window
+            // a managed patch has to hit, since after the JIT the IL is no longer what runs.
+            session.ApplyOnLoad(new ManagedPatch("Shapes.exe", token, 0, [.. patched], [.. il]));
+
+            Assert.Null(session.Start(Program!, holdAtStart: true, timeout: TimeSpan.FromSeconds(30)));
+            Assert.Null(session.SetBreakpoint("Shapes.exe", Token("Holder", "Look")));
+            session.Continue();
+            Assert.True(
+                session.WaitUntilStopped(TimeSpan.FromSeconds(30)),
+                "it never stopped:\n" + string.Join("\n", session.Recent));
+
+            var doubled = Find(session, "Doubled");
+
+            // Running the getter now compiles it from the patched IL. Unpatched this is 14; the patch
+            // reached the image if and only if it is 99.
+            Assert.Equal("99", session.EvaluateProperty(doubled.Path, doubled.Getter!, doubled.Name, doubled.Type)?.Value);
+        }
+        catch
+        {
+            session.Dispose();
+            throw;
+        }
+    }
+
+    [SkippableFact]
+    public void APatchWhoseExpectedBytesAreWrongIsRefusedNotWritten()
+    {
+        Skip.If(Program is null, NoCompiler);
+
+        uint token = Token("Holder", "get_Doubled");
+        var wrong = new byte[3];
+        Array.Fill(wrong, (byte)0xDD);   // nothing the getter's first IL bytes could be
+
+        using var session = new ManagedDebugSession { ShowConsole = false };
+        try
+        {
+            session.ApplyOnLoad(new ManagedPatch("Shapes.exe", token, 0, [0x1F, 0x63, 0x2A], [.. wrong]));
+
+            Assert.Null(session.Start(Program!, holdAtStart: true, timeout: TimeSpan.FromSeconds(30)));
+            Assert.Null(session.SetBreakpoint("Shapes.exe", Token("Holder", "Look")));
+            session.Continue();
+            Assert.True(session.WaitUntilStopped(TimeSpan.FromSeconds(30)), "it never stopped");
+
+            // The check caught that the running bytes were not what the patch was cut against, said so,
+            // and left the getter alone — so it still returns the real 14.
+            Assert.Contains(session.Recent, r => r.Contains("not applied") && r.Contains("expected"));
+            var doubled = Find(session, "Doubled");
+            Assert.Equal("14", session.EvaluateProperty(doubled.Path, doubled.Getter!, doubled.Name, doubled.Type)?.Value);
+        }
+        catch
+        {
+            session.Dispose();
+            throw;
+        }
+    }
+
+    [SkippableFact]
+    public void ABreakpointResolvesIntoAnotherAssemblyByName()
+    {
+        Skip.If(Program is null, NoCompiler);
+
+        using var session = new ManagedDebugSession { ShowConsole = false };
+        try
+        {
+            Assert.Null(session.Start(Program!, holdAtStart: true, timeout: TimeSpan.FromSeconds(30)));
+
+            // System.Console lives in mscorlib, not in Shapes.exe — a method in an assembly other than
+            // the one opened. At the initial hold no module is loaded yet, so it is recorded and waits;
+            // as the run brings mscorlib in, it resolves against it and plants. The fixture then calls
+            // Console.WriteLine, which is the breakpoint.
+            string result = session.SetBreakpointByName("System.Console", "WriteLine");
+            Assert.Contains("recorded", result, StringComparison.OrdinalIgnoreCase);
+
+            session.Continue();
+            Assert.True(
+                session.WaitUntilStopped(TimeSpan.FromSeconds(30)),
+                "it never stopped:\n" + string.Join("\n", session.Recent));
+
+            // The only breakpoints set were the WriteLine overloads, so a stop in mscorlib is that hit.
+            Assert.NotNull(session.StoppedAt);
+            Assert.Contains("mscorlib", session.StoppedAt!.Module, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            session.Dispose();
+            throw;
+        }
+    }
+
+    // ------------------------------------------------------------------
 
     /// <summary>One row of what <c>this</c> holds, by name.</summary>
     private static ManagedVariable Find(ManagedDebugSession session, string name)
         => Assert.Single(Fields(session), f => f.Name == name);
+
+    /// <summary>The IL bytes of a method's body.</summary>
+    private static byte[] MethodIl(string file, string type, string method)
+    {
+        using var pe = new PEReader(File.OpenRead(file));
+        var metadata = pe.GetMetadataReader();
+        var handle = metadata.MethodDefinitions.First(h =>
+        {
+            var definition = metadata.GetMethodDefinition(h);
+            return metadata.GetString(definition.Name) == method
+                   && metadata.GetString(metadata.GetTypeDefinition(definition.GetDeclaringType()).Name) == type;
+        });
+
+        int bodyRva = metadata.GetMethodDefinition(handle).RelativeVirtualAddress;
+        return pe.GetMethodBody(bodyRva).GetILBytes()!;
+    }
 
     /// <summary>A session stopped at the first instruction of a method in the fixture.</summary>
     private static ManagedDebugSession StopIn(string type, string method)

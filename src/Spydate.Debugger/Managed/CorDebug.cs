@@ -300,9 +300,13 @@ internal interface ICorDebugProcess
 
     [PreserveSig] int SetThreadContext(uint threadID, uint contextSize, IntPtr context);
 
-    [PreserveSig] int ReadMemory(ulong address, uint size, byte[] buffer, out IntPtr read);
+    // The buffer is spelled out as an LPArray whose length is the size parameter. Left to itself the
+    // marshaller treats a byte[] on a [ComImport] interface as a SAFEARRAY — it reads a SAFEARRAY
+    // header out of a flat buffer of bytes, and clearing that afterwards takes the whole host down
+    // (0xC0000005 in MngdSafeArrayMarshaler). Same trap, same fix as ICorDebugModule::GetName.
+    [PreserveSig] int ReadMemory(ulong address, uint size, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1), Out] byte[] buffer, out IntPtr read);
 
-    [PreserveSig] int WriteMemory(ulong address, uint size, byte[] buffer, out IntPtr written);
+    [PreserveSig] int WriteMemory(ulong address, uint size, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1), In] byte[] buffer, out IntPtr written);
 
     [PreserveSig] int ClearCurrentException(uint threadID);
 

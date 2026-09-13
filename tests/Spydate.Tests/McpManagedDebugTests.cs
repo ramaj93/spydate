@@ -1,3 +1,4 @@
+using System.Reflection.Metadata.Ecma335;
 using Spydate.Core.PE;
 using Spydate.Decompiler.Managed;
 using Spydate.Mcp;
@@ -126,6 +127,84 @@ public class McpManagedDebugTests
     }
 
     [Fact]
+    public void ABreakpointCanBeSetByAListingAddressToo()
+    {
+        var (tools, debug, store) = Open();
+
+        // The token the name form produces, so the address form can be held to the same answer.
+        tools.Break("Spydate.Core.PE.PeImage::Load");
+        uint token = debug.Token;
+
+        // The address the IL view would print against the first instruction of that method: the image
+        // base plus where its IL sits. An agent reads exactly this off the listing.
+        var body = store.Current!.Bodies!.All.Single(b => (uint)MetadataTokens.GetToken(b.Method) == token);
+        ulong va = store.Current.Image.ImageBase + body.IlRva;
+
+        string text = tools.Break($"0x{va:X}");
+
+        // Same method, resolved through the body map rather than a name — and the offset comes out of
+        // the address, not a +IL_ suffix.
+        Assert.Equal(token, debug.Token);
+        Assert.Equal(0u, debug.Offset);
+        Assert.Contains("PeImage::Load", text, StringComparison.Ordinal);
+        Assert.Contains($"0x{va:X}", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnAddressPartWayIntoAMethodBecomesThatMethodAndAnOffset()
+    {
+        var (tools, debug, store) = Open();
+
+        tools.Break("Spydate.Core.PE.PeImage::Load");
+        uint token = debug.Token;
+        var body = store.Current!.Bodies!.All.Single(b => (uint)MetadataTokens.GetToken(b.Method) == token);
+
+        tools.Break($"0x{store.Current.Image.ImageBase + body.IlRva + 4:X}");
+
+        Assert.Equal(token, debug.Token);
+        Assert.Equal(4u, debug.Offset);
+    }
+
+    [Fact]
+    public void AnAddressThatIsNotInAnyMethodsIlIsRefusedAsAnAddress()
+    {
+        var (tools, debug, store) = Open();
+
+        // A real address inside the image but before any code — the PE header — so it parses but lands
+        // in no method's IL. It is refused as an address, not mistaken for a name.
+        ulong va = store.Current!.Image.ImageBase + 0x40;
+        string text = tools.Break($"0x{va:X}");
+
+        Assert.Contains("not inside any method's IL", text, StringComparison.Ordinal);
+        Assert.Null(debug.Module);   // nothing was set
+    }
+
+    [Fact]
+    public void AMethodInAnotherAssemblyIsBrokenOnByName()
+    {
+        var (tools, debug, _) = Open();
+
+        // Not in the opened assembly, but shaped like a method — handed to the resolver that waits for
+        // its assembly to load rather than refused as "not in this assembly".
+        string text = tools.Break("System.Environment::Exit");
+
+        Assert.Equal(("System.Environment", "Exit", 0u, true), debug.Named);
+        Assert.Contains("Environment", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AByNameBreakpointCarriesItsOffsetAndItsClear()
+    {
+        var (tools, debug, _) = Open();
+
+        tools.Break("System.Environment::Exit+IL_0007");
+        Assert.Equal(("System.Environment", "Exit", 0x7u, true), debug.Named);
+
+        tools.Break("System.Windows.Application::Shutdown", on: false);
+        Assert.Equal(("System.Windows.Application", "Shutdown", 0u, false), debug.Named);
+    }
+
+    [Fact]
     public void BreakingOnATypeSaysWhyThatIsNotAPlace()
     {
         var (tools, _, _) = Open();
@@ -194,6 +273,66 @@ public class McpManagedDebugTests
         Assert.DoesNotContain("bytes at", text, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------------------------
+    // Threads
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void AStopListsItsThreads()
+    {
+        var (tools, debug, _) = Open();
+        debug.State = "stopped";
+        debug.Threads = ["1 #1 Main Thread — Shapes.exe!Program::Main (stopped it, shown)", "2 Worker Thread — [not in managed code]"];
+
+        string text = tools.State();
+
+        Assert.Contains("threads:", text, StringComparison.Ordinal);
+        Assert.Contains("Main Thread", text, StringComparison.Ordinal);
+        Assert.Contains("Worker Thread", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShowingAThreadPicksIt()
+    {
+        var (tools, debug, _) = Open();
+        debug.State = "stopped";
+
+        tools.State(thread: 2);
+
+        // The agent works from ids, and the point of asking for one is that values and the stack then
+        // follow it — so the id is passed straight to the selection the window uses.
+        Assert.Equal(2u, debug.Selected);
+    }
+
+    [Fact]
+    public void SteppingAGivenThreadSelectsItFirst()
+    {
+        var (tools, debug, _) = Open();
+        debug.State = "stopped";
+
+        tools.Run("step", thread: 3);
+
+        Assert.Equal(3u, debug.Selected);
+        Assert.Equal(1, debug.Steps);
+    }
+
+    [Fact]
+    public void ASessionThatDoesNotOwnItsAssemblyLeavesItUsableAfterDisposal()
+    {
+        var assembly = ManagedAssembly.Load(CoreAssembly);
+        var session = new BinarySession(
+            CoreAssembly, Corpus.Image(CoreAssembly), null, null, DiscoveryState.None,
+            managed: assembly, ownsManaged: false);
+
+        session.Dispose();
+
+        // The window opened the assembly and its views are still on it, so the assistant's session
+        // going away must not take it with them. Reading the bodies is exactly what those views do,
+        // and it would throw on a disposed assembly.
+        Assert.NotEmpty(ManagedBodies.Build(assembly).All);
+        assembly.Dispose();
+    }
+
     /// <summary>A debugger that records what it was asked rather than doing any of it.</summary>
     private sealed class Fake : IManagedDebugControl
     {
@@ -221,6 +360,11 @@ public class McpManagedDebugTests
         public IReadOnlyList<ManagedSlot> Arguments { get; set; } = [];
 
         public IReadOnlyList<ManagedSlot> Locals { get; set; } = [];
+
+        public IReadOnlyList<string> Threads { get; set; } = [];
+
+        /// <summary>The last thread asked to be looked at, or null if none was.</summary>
+        public uint? Selected { get; private set; }
 
         public string? Start(bool holdAtStart)
         {
@@ -254,6 +398,15 @@ public class McpManagedDebugTests
             return null;
         }
 
+        /// <summary>The last Type::Method asked for by name, and its offset.</summary>
+        public (string Type, string Method, uint Offset, bool On)? Named { get; private set; }
+
+        public string SetBreakpointByName(string type, string method, uint ilOffset, bool on)
+        {
+            Named = (type, method, ilOffset, on);
+            return $"recorded {type}::{method}";
+        }
+
         public ManagedSnapshot Snapshot() => new()
         {
             State = State,
@@ -262,7 +415,14 @@ public class McpManagedDebugTests
             Mapping = Mapping,
             Arguments = Arguments,
             Locals = Locals,
+            Threads = Threads,
         };
+
+        public string? SelectThread(uint threadId)
+        {
+            Selected = threadId;
+            return null;
+        }
 
         public bool WaitUntilStopped(TimeSpan timeout) => State == "stopped";
     }

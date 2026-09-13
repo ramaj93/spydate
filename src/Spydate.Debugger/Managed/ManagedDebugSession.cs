@@ -126,6 +126,27 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
     private readonly List<Planted> _planted = new();
 
     /// <summary>
+    /// Breakpoints named by a <c>Type::Method</c> that is not in a module known yet — a framework
+    /// method, most often. A managed breakpoint needs a module and a token, and neither is known until
+    /// a module defining that type loads, so these are held and resolved against each module as it
+    /// arrives, the way a breakpoint by module name waits for its module. Once one resolves it becomes
+    /// an ordinary planted breakpoint and leaves this list.
+    /// </summary>
+    private readonly List<NamedBreakpoint> _byName = new();
+
+    /// <summary>A breakpoint waiting to be matched to a type in some not-yet-known module.</summary>
+    private sealed record NamedBreakpoint(string Type, string Method, uint Offset);
+
+    /// <summary>
+    /// Patches to write into a module the moment it loads, before its methods are compiled.
+    ///
+    /// Held rather than applied, the way breakpoints are: the module the address is in may not be
+    /// loaded yet — usually it is not — and the only useful time to write a managed patch is the
+    /// instant it lands, which is what <see cref="IManagedEvents.ModuleLoaded"/> is for.
+    /// </summary>
+    private readonly List<ManagedPatch> _patches = new();
+
+    /// <summary>
     /// A breakpoint that is actually in the process, and the runtime's object for it.
     ///
     /// The pointer is kept beside what it is a breakpoint <em>for</em>, which is the whole of what
@@ -726,6 +747,333 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
         return null;
     }
 
+    /// <summary>
+    /// Sets or clears a breakpoint named by a <c>Type::Method</c> that may be in an assembly other than
+    /// the one opened. Returns a line saying what happened.
+    ///
+    /// A method's module and token are only knowable from that module's metadata, so a name in an
+    /// assembly not loaded yet cannot be turned into a breakpoint now. It is held and resolved against
+    /// each module as it loads — a framework assembly like <c>PresentationFramework</c> arrives well
+    /// after the run starts — which is the same "wait for the module" a breakpoint by module name does,
+    /// one level up. A name in an assembly already loaded resolves and plants at once.
+    /// </summary>
+    public string SetBreakpointByName(string type, string method, uint ilOffset = 0, bool on = true)
+        => Interop(() => on ? SetByNameCore(type, method, ilOffset) : ClearByNameCore(type, method, ilOffset));
+
+    private string SetByNameCore(string type, string method, uint ilOffset)
+    {
+        var wanted = new NamedBreakpoint(type, method, ilOffset);
+        List<(string Name, ICorDebugModule Module)> loaded;
+        lock (_gate)
+        {
+            if (!_byName.Contains(wanted))
+            {
+                _byName.Add(wanted);
+            }
+
+            loaded = _loaded.Select(kv => (kv.Key, kv.Value)).ToList();
+        }
+
+        // Resolve now against everything already in — mscorlib and the like are loaded before the
+        // program's own code runs, so a break on Environment::Exit can go in at the initial hold.
+        var planted = new List<string>();
+        foreach (var (name, module) in loaded)
+        {
+            Resolve(name, module, wanted, planted);
+        }
+
+        if (planted.Count > 0)
+        {
+            lock (_gate)
+            {
+                _byName.Remove(wanted);
+            }
+
+            return $"breakpoint in {type}::{method} at IL_{ilOffset:X4} — {string.Join(", ", planted)}";
+        }
+
+        return $"recorded a breakpoint for {type}::{method} at IL_{ilOffset:X4}; it is not in any module "
+               + "loaded yet, so it goes in when one that defines it loads";
+    }
+
+    private string ClearByNameCore(string type, string method, uint ilOffset)
+    {
+        bool pending;
+        List<(string Name, ICorDebugModule Module)> loaded;
+        lock (_gate)
+        {
+            pending = _byName.RemoveAll(b =>
+                b.Type.Equals(type, StringComparison.OrdinalIgnoreCase) && b.Method == method && b.Offset == ilOffset) > 0;
+            loaded = _loaded.Select(kv => (kv.Key, kv.Value)).ToList();
+        }
+
+        // Resolution is stable — the same modules define the same tokens — so re-resolving finds
+        // exactly what setting it planted, and clears that.
+        int cleared = 0;
+        foreach (var (name, module) in loaded)
+        {
+            foreach (uint token in _types.MethodsNamed(Com.NameOf(module), type, method))
+            {
+                if (ClearBreakpointCore(name, token, ilOffset) is null)
+                {
+                    cleared++;
+                }
+            }
+        }
+
+        if (cleared > 0)
+        {
+            return $"cleared the breakpoint in {type}::{method} at IL_{ilOffset:X4}";
+        }
+
+        return pending
+            ? $"removed the pending breakpoint for {type}::{method}, which had not been planted yet"
+            : $"there is no breakpoint in {type}::{method} at IL_{ilOffset:X4}";
+    }
+
+    /// <summary>Plants a by-name breakpoint into one module if that module defines its type and method.</summary>
+    private void Resolve(string moduleName, ICorDebugModule module, NamedBreakpoint wanted, List<string> planted)
+    {
+        foreach (uint token in _types.MethodsNamed(Com.NameOf(module), wanted.Type, wanted.Method))
+        {
+            var bp = new ManagedBreakpoint(moduleName, token, wanted.Offset);
+            lock (_gate)
+            {
+                if (_planted.Exists(p => Same(p.Module, p.MethodToken, p.Offset, moduleName, token, wanted.Offset)))
+                {
+                    continue;   // already there
+                }
+
+                _wanted.Add(bp);
+            }
+
+            if (Plant(module, bp) is { } problem)
+            {
+                lock (_gate)
+                {
+                    _wanted.Remove(bp);
+                }
+
+                Note(problem);
+            }
+            else
+            {
+                planted.Add($"{moduleName}!0x{token:X8}+IL_{wanted.Offset:X4}");
+                Note($"breakpoint planted in {moduleName} at method 0x{token:X8}+IL_{wanted.Offset:X4}");
+            }
+        }
+    }
+
+    /// <summary>The by-name breakpoints still waiting for a module, written for a listing.</summary>
+    public IReadOnlyList<string> PendingNamedBreakpoints
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _byName
+                    .Select(b => $"{b.Type}::{b.Method}+IL_{b.Offset:X4} (waiting for its module)")
+                    .ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Records a patch to write into its module the moment that module loads.
+    ///
+    /// Meant to be called before the run starts, alongside the breakpoints: the patch is held and
+    /// written when the module lands, which for a managed patch is the only time it can take — the
+    /// method's IL is in memory then and the JIT has not yet turned it into the native code that
+    /// actually runs. Applied afterwards it would change bytes nothing reads. Whether each patch went
+    /// in, and why one did not, is reported on the log as its module loads.
+    /// </summary>
+    public void ApplyOnLoad(ManagedPatch patch)
+    {
+        ArgumentNullException.ThrowIfNull(patch);
+        ArgumentException.ThrowIfNullOrWhiteSpace(patch.Module);
+
+        if (patch.Bytes.IsDefaultOrEmpty)
+        {
+            return;
+        }
+
+        string name = System.IO.Path.GetFileName(patch.Module);
+        var normalised = patch with { Module = name };
+
+        ICorDebugModule? loaded;
+        lock (_gate)
+        {
+            _patches.Add(normalised);
+            _loaded.TryGetValue(name, out loaded);
+        }
+
+        // The usual case is that the module has not loaded, so this is only a note; the module-load
+        // callback writes it. But a caller adding one after its module is already in — which is too
+        // late to matter for a method that has run, and exactly right for one that has not — should
+        // not have it silently ignored, so it is written now.
+        if (loaded is not null)
+        {
+            Interop(() =>
+            {
+                if (WritePatch(loaded, normalised) is { } problem)
+                {
+                    Note(problem);
+                }
+
+                lock (_gate)
+                {
+                    _patches.Remove(normalised);
+                }
+            });
+        }
+        else
+        {
+            Note($"patch recorded for {name}, to write when it loads");
+        }
+    }
+
+    /// <summary>The patches still waiting for a module, by that module's name.</summary>
+    private List<ManagedPatch> PatchesFor(string module)
+    {
+        lock (_gate)
+        {
+            return _patches.Where(p => string.Equals(p.Module, module, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+    }
+
+    /// <summary>The by-name breakpoints still unresolved — every module load is a chance to place them.</summary>
+    private List<NamedBreakpoint> NamedFor()
+    {
+        lock (_gate)
+        {
+            return _byName.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Writes one patch into a loaded module's method IL, or says why it would not go.
+    ///
+    /// The address comes from the runtime's IL-code object for the method, not from the module base
+    /// and an RVA: a managed image is not mapped section-for-section into the process, so the IL lives
+    /// wherever the loader put it and only <c>GetAddress</c> knows where. That is the same route the
+    /// breakpoints take to a method (token, then IL code), for the same reason. When the patch carries
+    /// what it expected to replace, the IL is read back and checked first, so a patch cut against IL
+    /// the method no longer has — recompiled, or a native image running instead — is refused rather
+    /// than written over whatever is there now.
+    /// </summary>
+    private string? WritePatch(ICorDebugModule module, ManagedPatch patch)
+    {
+        if (_process is not { } process)
+        {
+            return $"cannot patch {patch.Module}: there is no process";
+        }
+
+        int hr = module.GetFunctionFromToken(patch.MethodToken, out var function);
+        if (hr < 0 || function is null)
+        {
+            return $"cannot patch {patch.Module}: it has no method with token 0x{patch.MethodToken:X8} (0x{hr:X8})";
+        }
+
+        try
+        {
+            hr = function.GetILCode(out var code);
+            if (hr < 0 || code is null)
+            {
+                return $"cannot patch method 0x{patch.MethodToken:X8}: it has no IL to write into (0x{hr:X8})";
+            }
+
+            try
+            {
+                hr = code.GetAddress(out ulong ilStart);
+                if (hr < 0 || ilStart == 0)
+                {
+                    return $"cannot patch method 0x{patch.MethodToken:X8}: its IL has no address yet (0x{hr:X8})";
+                }
+
+                _ = code.GetSize(out uint ilSize);
+                int length = patch.Bytes.Length;
+                if (ilSize != 0 && patch.IlOffset + (uint)length > ilSize)
+                {
+                    return $"cannot patch method 0x{patch.MethodToken:X8}: {length} byte(s) at IL_{patch.IlOffset:X4} "
+                           + $"run past the {ilSize}-byte method";
+                }
+
+                ulong address = ilStart + patch.IlOffset;
+                string where = $"{patch.Module}!0x{patch.MethodToken:X8}+IL_{patch.IlOffset:X4}";
+
+                var expected = patch.Expected;
+                if (expected.Length == length)
+                {
+                    byte[] present = new byte[length];
+                    hr = process.ReadMemory(address, (uint)length, present, out IntPtr read);
+                    if (hr < 0 || (int)read != length)
+                    {
+                        return $"patch at {where} not applied: could not read the {length} byte(s) there (0x{hr:X8})";
+                    }
+
+                    if (!present.AsSpan().SequenceEqual(expected.AsSpan()))
+                    {
+                        return $"patch at {where} not applied: the method's IL holds {Convert.ToHexString(present)} "
+                               + $"where the patch expected {Convert.ToHexString(expected.AsSpan())} — the code running "
+                               + "here is not the file the patch was made against (a recompiled or precompiled method?)";
+                    }
+                }
+
+                // A method's IL is mapped read-only — nothing is meant to change it — so both the
+                // runtime's own WriteMemory and a plain WriteProcessMemory refuse it with
+                // ERROR_NOACCESS (0x800703E6). The page has to be made writable first: unlike native
+                // code, which lives on executable pages WriteProcessMemory will write through, IL is
+                // read-only data. So the protection is lifted with VirtualProtectEx, the bytes are
+                // written, and the protection is put straight back.
+                if (process.GetHandle(out IntPtr handle) < 0 || handle == IntPtr.Zero)
+                {
+                    return $"patch at {where} not applied: the process gave no handle to write through";
+                }
+
+                if (!Native.VirtualProtectEx(handle, address, (nuint)length, Native.PageReadWrite, out uint previous))
+                {
+                    return $"patch at {where} not applied: the IL page could not be made writable "
+                           + $"(Win32 0x{Marshal.GetLastWin32Error():X})";
+                }
+
+                byte[] bytes = patch.Bytes.ToArray();
+                bool wrote;
+                nuint written;
+                try
+                {
+                    unsafe
+                    {
+                        fixed (byte* p = bytes)
+                        {
+                            wrote = Native.WriteProcessMemory(handle, address, p, (nuint)length, out written);
+                        }
+                    }
+                }
+                finally
+                {
+                    Native.VirtualProtectEx(handle, address, (nuint)length, previous, out _);
+                }
+
+                if (!wrote || (int)written != length)
+                {
+                    return $"patch at {where} not applied: the write failed (Win32 0x{Marshal.GetLastWin32Error():X})";
+                }
+
+                Native.FlushInstructionCache(handle, address, (nuint)length);
+                Note($"patched {where}: {length} byte(s) written before the method was compiled");
+                return null;
+            }
+            finally
+            {
+                Com.Drop(code);
+            }
+        }
+        finally
+        {
+            Com.Drop(function);
+        }
+    }
+
     /// <summary>Every breakpoint asked for, and whether it is in the process yet.</summary>
     public IReadOnlyList<ManagedBreakpoint> Breakpoints
     {
@@ -1254,9 +1602,14 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         // Breakpoints outlive the modules they are in. One set before anything ran has been waiting
         // for exactly this moment, and a debugger that only planted at the time of asking could
-        // never break on a library that loads later — which is most of them.
+        // never break on a library that loads later — which is most of them. Patches wait for the
+        // same moment, and for a stronger reason: this is the only point at which writing a managed
+        // patch has any effect (see ManagedPatch), so a module with patches queued is held here even
+        // when it has no breakpoints.
         var pending = Waiting(name);
-        if (pending.Count == 0)
+        var patches = PatchesFor(name);
+        var named = NamedFor();
+        if (pending.Count == 0 && patches.Count == 0 && named.Count == 0)
         {
             return false;
         }
@@ -1277,6 +1630,22 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
 
         ThreadPool.QueueUserWorkItem(_ =>
         {
+            // Patches first, before the breakpoints and before the continue: writing the module's IL
+            // while it is loaded and none of its methods has compiled is the whole point of doing it
+            // here. Each is dropped once attempted, so a module loading again does not rewrite it.
+            foreach (var patch in patches)
+            {
+                if (WritePatch(held, patch) is { } problem)
+                {
+                    Note(problem);
+                }
+
+                lock (_gate)
+                {
+                    _patches.Remove(patch);
+                }
+            }
+
             foreach (var wanted in pending)
             {
                 if (Plant(held, wanted) is { } problem)
@@ -1286,6 +1655,21 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                 else
                 {
                     Note($"breakpoint planted in {name} at method 0x{wanted.MethodToken:X8}+IL_{wanted.Offset:X4}");
+                }
+            }
+
+            // A Type::Method named before its assembly was known — this may be that assembly. What
+            // resolves here plants and leaves the waiting list; what does not stays for a later module.
+            foreach (var wanted in named)
+            {
+                var planted = new List<string>();
+                Resolve(name, held, wanted, planted);
+                if (planted.Count > 0)
+                {
+                    lock (_gate)
+                    {
+                        _byName.Remove(wanted);
+                    }
                 }
             }
 
