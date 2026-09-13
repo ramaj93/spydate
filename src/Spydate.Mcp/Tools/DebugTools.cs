@@ -202,7 +202,7 @@ public sealed class DebugTools
             : "\n\nwhat it has done:\n" + string.Join("\n", snapshot.Recent.Select(line => $"  {line}"));
 
     [McpServerTool(Name = "debug_break")]
-    [Description("Set or clear a breakpoint at a listing address, or in .NET at Type::Method or Type::Method+IL_7. Works before anything runs, and before the module it is in loads.")]
+    [Description("Set or clear a breakpoint at a listing address (open module) or a .NET Type::Method(+IL_7); in another assembly, by name not address. Works before its module loads.")]
     public string Break(
         [Description("Address, sub_XXXX, an existing name, or a .NET method.")] string target,
         [Description("True to set it, false to clear it.")] bool on = true)

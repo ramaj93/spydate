@@ -181,6 +181,17 @@ public sealed class SessionTools
                                        : string.Empty));
         }
 
+        if (managed.PInvokes.Count > 0)
+        {
+            // The native dependencies the PE import table cannot show — a managed image imports only
+            // the runtime stub — and where an anti-debug check reaches for the kernel. Named here so an
+            // agent does not have to parse the ImplMap table out of the bytes to find them.
+            var libraries = managed.PInvokes.Select(p => p.Library).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            Line(sb, "native", $"{managed.PInvokes.Count} P/Invoke(s) into {string.Join(", ", libraries.Take(MaxReferencesListed))}"
+                                   + (libraries.Count > MaxReferencesListed ? $", +{libraries.Count - MaxReferencesListed} more" : string.Empty)
+                                   + " - find_symbol names each and the method that calls it");
+        }
+
         // Which of the two readings to trust, said once, in the terms that decide it. ILOnly is the
         // question exactly: a mixed-mode assembly has real native code and both halves are worth
         // reading, and a ReadyToRun image has native code the runtime prefers over the IL.

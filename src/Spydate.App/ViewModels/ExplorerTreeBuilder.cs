@@ -76,6 +76,21 @@ public static class ExplorerTreeBuilder
                 return refNode;
             });
 
+            // The native functions the managed code calls — the P/Invokes the PE import table cannot
+            // show, since a managed image imports only the runtime stub. Each opens the method that
+            // makes the call. Where an anti-debug check lives, most of the time.
+            if (managed.PInvokes.Count > 0)
+            {
+                var native = root.Add(new ExplorerNodeViewModel("Native calls", SymbolRegular.PlugConnected24, null, managed.PInvokes.Count.ToString(CultureInfo.InvariantCulture)));
+                native.ChildrenFactory = () => managed.PInvokes.Select(p =>
+                {
+                    NodeTarget? target = managed.Locate(p.Token) is { Member: { } member } located
+                        ? new ManagedMemberTarget(located.Type, member)
+                        : null;
+                    return new ExplorerNodeViewModel(p.Native, SymbolRegular.ArrowExport24, target, p.Managed);
+                });
+            }
+
             var namespaces = root.Add(new ExplorerNodeViewModel("Namespaces", SymbolRegular.Braces24, new ManagedAssemblyTarget(), managed.Namespaces.Count.ToString()));
             namespaces.IsExpanded = true;
             foreach (var ns in managed.Namespaces)

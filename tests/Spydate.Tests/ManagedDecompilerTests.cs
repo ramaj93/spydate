@@ -101,6 +101,27 @@ public class ManagedDecompilerTests
     }
 
     [Fact]
+    public void PInvokesAreFoundWithTheirNativeTargets()
+    {
+        // Spydate.Debugger calls into kernel32 (ReadProcessMemory, VirtualProtectEx, ...) — the native
+        // dependencies that never appear in the PE import table of a managed image.
+        string debugger = typeof(Spydate.Debugger.Managed.ManagedDebugSession).Assembly.Location;
+        using var asm = ManagedAssembly.Load(debugger);
+
+        Assert.NotEmpty(asm.PInvokes);
+        Assert.Contains(asm.PInvokes, p => p.Library.Contains("kernel32", StringComparison.OrdinalIgnoreCase));
+
+        // Each names the managed method that makes the call, a native target, and a real token.
+        Assert.All(asm.PInvokes, p =>
+        {
+            Assert.NotEqual(0, p.Token);
+            Assert.NotEmpty(p.Method);
+            Assert.NotEmpty(p.EntryPoint);
+            Assert.Contains("!", p.Native, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
     public void DecompilesTypeToCSharp()
     {
         using var asm = ManagedAssembly.Load(CoreAssemblyPath);

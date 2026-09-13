@@ -104,7 +104,7 @@ public sealed class NavigationTools
         // question about the file that nobody asked.
         if (open.ManagedIndex is { } managed && open.Image.ClrHeader?.IsILOnly == true)
         {
-            return FindManaged(managed, query, limit);
+            return FindManaged(managed, open.Managed!.PInvokes, query, limit);
         }
 
         if (open.Analysis is not { } analysis)
@@ -436,7 +436,7 @@ public sealed class NavigationTools
     /// returns that type and everything in it. Each row carries the type it belongs to, because a
     /// bare method name cannot be handed back to any other tool.
     /// </summary>
-    private static string FindManaged(ManagedIndex index, string query, int limit)
+    private static string FindManaged(ManagedIndex index, IReadOnlyList<ManagedPInvoke> pinvokes, string query, int limit)
     {
         limit = Math.Clamp(limit, 1, MaxLimit);
 
@@ -457,6 +457,22 @@ public sealed class NavigationTools
                 }
 
                 hits.Add((member.Kind.ToString().ToLowerInvariant(), $"{type.FullName}::{member.Signature}"));
+            }
+        }
+
+        // P/Invokes match on the native side too — the library or the entry point — so an agent
+        // chasing IsDebuggerPresent or ntdll finds the managed method that calls it, which is the one
+        // thing the metadata knows and nothing else here surfaces. The native target is shown beside
+        // the managed method, which is what a breakpoint or read_function then takes.
+        foreach (var pinvoke in pinvokes)
+        {
+            if (query.Length == 0
+                || pinvoke.Method.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || pinvoke.Type.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || pinvoke.EntryPoint.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || pinvoke.Library.Contains(query, StringComparison.OrdinalIgnoreCase))
+            {
+                hits.Add(("pinvoke", $"{pinvoke.Managed} -> {pinvoke.Native}"));
             }
         }
 

@@ -297,6 +297,14 @@ public sealed class CodeTools
         {
             sb.Append(CultureInfo.InvariantCulture, $"{type.FullName}::{shown.Signature}   {shown.Kind.ToString().ToLowerInvariant()}\n");
             sb.Append(CultureInfo.InvariantCulture, $"in          {type.FullName} ({type.Kind.ToString().ToLowerInvariant()})\n");
+
+            // A P/Invoke has no IL body — it is a call into a native library — so the native target is
+            // named where the body would be, which is the fact worth having about it.
+            int memberToken = (int)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(shown.Handle);
+            if (managed.PInvokes.FirstOrDefault(p => p.Token == memberToken) is { } pinvoke)
+            {
+                sb.Append(CultureInfo.InvariantCulture, $"native      {pinvoke.Native} (P/Invoke)\n");
+            }
         }
         else
         {

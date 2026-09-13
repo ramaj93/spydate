@@ -50,6 +50,23 @@ public sealed record ManagedReference(string Name, string Display, AssemblyRefer
 }
 
 /// <summary>
+/// A P/Invoke: a managed method that is really a call into a native library. These are the native
+/// dependencies of a .NET assembly — invisible in its PE import table, which for a managed image holds
+/// only the runtime stub — and they are where an anti-debug check reaches for <c>IsDebuggerPresent</c>
+/// or <c>NtQueryInformationProcess</c>. Read out of the metadata's <c>ImplMap</c> table.
+/// </summary>
+public sealed record ManagedPInvoke(string Type, string Method, string Library, string EntryPoint, int Token)
+{
+    /// <summary>The native function it lands on, the way an import reads: <c>kernel32.dll!IsDebuggerPresent</c>.</summary>
+    public string Native => $"{Library}!{EntryPoint}";
+
+    /// <summary>The managed method, as a target read_function or a breakpoint takes.</summary>
+    public string Managed => $"{Type}::{Method}";
+
+    public override string ToString() => $"{Managed} -> {Native}";
+}
+
+/// <summary>
 /// A loaded .NET assembly: metadata browsing (namespaces → types → members), plus a shared
 /// <see cref="ManagedDecompiler"/> for C# and IL output. Wraps the ILSpy engine.
 /// </summary>
@@ -58,6 +75,7 @@ public sealed class ManagedAssembly : IDisposable
     private readonly UniversalAssemblyResolver _resolver;
     private readonly Lazy<CSharpDecompiler> _csharp;
     private readonly Lazy<IReadOnlyList<ManagedNamespace>> _namespaces;
+    private readonly Lazy<IReadOnlyList<ManagedPInvoke>> _pinvokes;
     private readonly Dictionary<AssemblyReferenceHandle, ManagedAssembly?> _resolved = new();
     private readonly Lock _resolveLock = new();
 
@@ -93,6 +111,7 @@ public sealed class ManagedAssembly : IDisposable
 
         _csharp = new Lazy<CSharpDecompiler>(() => new CSharpDecompiler(Module, _resolver, Settings), LazyThreadSafetyMode.ExecutionAndPublication);
         _namespaces = new Lazy<IReadOnlyList<ManagedNamespace>>(BuildNamespaces, LazyThreadSafetyMode.ExecutionAndPublication);
+        _pinvokes = new Lazy<IReadOnlyList<ManagedPInvoke>>(BuildPInvokes, LazyThreadSafetyMode.ExecutionAndPublication);
         Decompiler = new ManagedDecompiler(this);
     }
 
@@ -125,6 +144,55 @@ public sealed class ManagedAssembly : IDisposable
 
     /// <summary>Namespaces sorted by name, each with its top-level types sorted by name.</summary>
     public IReadOnlyList<ManagedNamespace> Namespaces => _namespaces.Value;
+
+    /// <summary>
+    /// Every P/Invoke in the assembly — the native functions its managed code calls, which nothing
+    /// else here surfaces because they are not in the PE import table. Sorted by the library and then
+    /// the function, so the same native dependency's calls sit together.
+    /// </summary>
+    public IReadOnlyList<ManagedPInvoke> PInvokes => _pinvokes.Value;
+
+    private IReadOnlyList<ManagedPInvoke> BuildPInvokes()
+    {
+        var list = new List<ManagedPInvoke>();
+        foreach (var handle in Metadata.MethodDefinitions)
+        {
+            var method = Metadata.GetMethodDefinition(handle);
+            if ((method.Attributes & System.Reflection.MethodAttributes.PinvokeImpl) == 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                var import = method.GetImport();
+                if (import.Module.IsNil)
+                {
+                    continue;
+                }
+
+                string library = Metadata.GetString(Metadata.GetModuleReference(import.Module).Name);
+
+                // An absent import name means the entry point is the method's own name, which is the
+                // rule the runtime follows when [DllImport] gives no EntryPoint.
+                string entry = import.Name.IsNil ? Metadata.GetString(method.Name) : Metadata.GetString(import.Name);
+
+                var type = Metadata.GetTypeDefinition(method.GetDeclaringType());
+                string space = Metadata.GetString(type.Namespace);
+                string name = Metadata.GetString(type.Name);
+                string typeName = space.Length == 0 ? name : $"{space}.{name}";
+
+                list.Add(new ManagedPInvoke(typeName, Metadata.GetString(method.Name), library, entry, MetadataTokens.GetToken(handle)));
+            }
+            catch (BadImageFormatException)
+            {
+                // A hand-mangled ImplMap entry: skip the one row rather than lose the rest.
+            }
+        }
+
+        list.Sort((a, b) => string.Compare(a.Native, b.Native, StringComparison.OrdinalIgnoreCase));
+        return list;
+    }
 
     /// <summary>Referenced assemblies (display names).</summary>
     public IReadOnlyList<string> AssemblyReferences =>

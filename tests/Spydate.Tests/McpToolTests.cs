@@ -43,6 +43,24 @@ public class McpToolTests
         Assert.DoesNotContain("is not a", text, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void FindSymbolSurfacesAPInvokeByItsNativeTarget()
+    {
+        // Spydate.Debugger P/Invokes into kernel32. A managed image never shows that in its PE import
+        // table, so an agent hunting a native call has to find it through the metadata — which is what
+        // find_symbol now does, rather than leaving it to parse the ImplMap table out of the bytes.
+        string debugger = typeof(Spydate.Debugger.Managed.ManagedDebugSession).Assembly.Location;
+        var store = new SessionStore();
+        store.Set(new BinarySession(
+            debugger, Corpus.Image(debugger), null, null, DiscoveryState.None,
+            managed: ManagedAssembly.Load(debugger)));
+
+        string text = new NavigationTools(store).FindSymbol("kernel32");
+
+        Assert.Contains("pinvoke", text, StringComparison.Ordinal);
+        Assert.Contains("kernel32", text, StringComparison.OrdinalIgnoreCase);
+    }
+
     // ------------------------------------------------------------------
     // The worklist
     // ------------------------------------------------------------------
