@@ -53,14 +53,14 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
         ManagedAssembly assembly,
         ManagedType type,
         Func<ManagedImage?>? image = null)
-        => new($"managed:type:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null, image);
+        => new($"managed:type:{assembly.Name}:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null, image);
 
     public static ManagedCodeDocumentViewModel ForMember(
         ManagedAssembly assembly,
         ManagedType type,
         ManagedMember member,
         Func<ManagedImage?>? image = null)
-        => new($"managed:member:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, image);
+        => new($"managed:member:{assembly.Name}:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, image);
 
     public IReadOnlyList<ManagedLanguage> Languages { get; } = new[] { ManagedLanguage.CSharp, ManagedLanguage.IL };
 

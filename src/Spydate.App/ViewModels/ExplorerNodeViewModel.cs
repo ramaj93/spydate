@@ -21,8 +21,12 @@ public sealed record HexTarget(long Offset) : NodeTarget;
 public sealed record DisassemblyTarget(ulong Va, string Name) : NodeTarget;
 public sealed record RangeDisassemblyTarget(ulong Va, int Bytes, string Title) : NodeTarget;
 public sealed record ManagedAssemblyTarget : NodeTarget;
-public sealed record ManagedTypeTarget(Spydate.Decompiler.Managed.ManagedType Type) : NodeTarget;
-public sealed record ManagedMemberTarget(Spydate.Decompiler.Managed.ManagedType Type, Spydate.Decompiler.Managed.ManagedMember Member) : NodeTarget;
+/// <param name="Assembly">
+/// The assembly to decompile the type through, when it is not the one opened — a resolved reference.
+/// Null means the opened binary's own assembly, which also carries the debugger's addresses.
+/// </param>
+public sealed record ManagedTypeTarget(Spydate.Decompiler.Managed.ManagedType Type, Spydate.Decompiler.Managed.ManagedAssembly? Assembly = null) : NodeTarget;
+public sealed record ManagedMemberTarget(Spydate.Decompiler.Managed.ManagedType Type, Spydate.Decompiler.Managed.ManagedMember Member, Spydate.Decompiler.Managed.ManagedAssembly? Assembly = null) : NodeTarget;
 
 /// <summary>A node in the explorer tree. Children may be materialised lazily via <see cref="ChildrenFactory"/>.</summary>
 public sealed partial class ExplorerNodeViewModel : ObservableObject

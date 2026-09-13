@@ -54,6 +54,25 @@ public class ManagedDecompilerTests
     }
 
     [Fact]
+    public void ATypeInAResolvedReferenceDecompilesThroughThatReference()
+    {
+        using var asm = ManagedAssembly.Load(CoreAssemblyPath);
+        var resolved = asm.References
+            .Select(r => asm.Resolve(r))
+            .FirstOrDefault(a => a is { Namespaces.Count: > 0 });
+        Assert.NotNull(resolved);
+
+        // A real type in the reference — decompiled through the reference's own assembly, which is
+        // exactly what opening it from the explorer (go-to-definition) does. Through the opened
+        // assembly instead it would find nothing.
+        var type = resolved!.Namespaces.SelectMany(n => n.Types).First(t => t.Members.Count > 0);
+        string cs = resolved.Decompiler.DecompileType(type);
+
+        Assert.NotEmpty(cs);
+        Assert.Contains(type.Name, cs, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DecompilesTypeToCSharp()
     {
         using var asm = ManagedAssembly.Load(CoreAssemblyPath);

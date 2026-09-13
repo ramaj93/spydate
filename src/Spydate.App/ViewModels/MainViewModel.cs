@@ -1211,8 +1211,12 @@ public sealed partial class MainViewModel : ObservableObject
             DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
-            ManagedTypeTarget t when b.Managed is { } m => Find($"managed:type:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type, Locate),
-            ManagedMemberTarget mm when b.Managed is { } m => Find($"managed:member:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member, Locate),
+
+            // The target may name a resolved reference to decompile through rather than the opened
+            // assembly — a type in another module. Only the opened one carries the debugger's
+            // addresses (Locate); a reference has no place in the running image to point at.
+            ManagedTypeTarget t when (t.Assembly ?? b.Managed) is { } m => Find($"managed:type:{m.Name}:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type, t.Assembly is null ? Locate : null),
+            ManagedMemberTarget mm when (mm.Assembly ?? b.Managed) is { } m => Find($"managed:member:{m.Name}:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member, mm.Assembly is null ? Locate : null),
             _ => null,
         };
 

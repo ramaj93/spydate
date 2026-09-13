@@ -82,7 +82,7 @@ public static class ExplorerTreeBuilder
             {
                 var n = ns;
                 var nsNode = namespaces.Add(new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString()));
-                nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(managed, t));
+                nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t));
             }
         }
 
@@ -120,9 +120,9 @@ public static class ExplorerTreeBuilder
 
     /// <summary>
     /// A reference's own types and members, loaded on expansion — the resolved assembly grouped into
-    /// namespaces, the same shape the opened assembly has. Its nodes do not open a document yet: a type
-    /// in another assembly decompiles through that assembly, not this one, which is a second step; for
-    /// now the reference is there to walk. When the assembly is not on this machine, one node says so.
+    /// namespaces, the same shape the opened assembly has. Opening one decompiles through that
+    /// assembly rather than this one, so a type carries it in its target. When the assembly is not on
+    /// this machine, one node says so.
     /// </summary>
     private static IEnumerable<ExplorerNodeViewModel> ReferenceChildren(ManagedAssembly parent, ManagedReference reference)
     {
@@ -136,17 +136,23 @@ public static class ExplorerTreeBuilder
         {
             var n = ns;
             var nsNode = new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString(CultureInfo.InvariantCulture));
-            nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(resolved, t, openable: false));
+            nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, resolved));
             return nsNode;
         });
     }
 
-    private static ExplorerNodeViewModel TypeNode(ManagedAssembly managed, ManagedType type, bool openable = true)
+    /// <summary>
+    /// A type node and, lazily, its nested types and members. <paramref name="external"/> is the
+    /// assembly to open the type through when it is not the one opened — a resolved reference — and
+    /// null for the opened assembly's own types, which the factory decompiles through the binary and
+    /// draws the debugger's addresses against.
+    /// </summary>
+    private static ExplorerNodeViewModel TypeNode(ManagedType type, ManagedAssembly? external = null)
     {
-        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), openable ? new ManagedTypeTarget(type) : null, type.Kind.ToString().ToLowerInvariant());
+        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), new ManagedTypeTarget(type, external), type.Kind.ToString().ToLowerInvariant());
         node.ChildrenFactory = () =>
-            type.NestedTypes.Select(n => TypeNode(managed, n, openable))
-                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), openable ? new ManagedMemberTarget(type, m) : null)));
+            type.NestedTypes.Select(n => TypeNode(n, external))
+                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), new ManagedMemberTarget(type, m, external))));
         return node;
     }
 
