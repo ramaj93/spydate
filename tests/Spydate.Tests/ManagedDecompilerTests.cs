@@ -73,6 +73,34 @@ public class ManagedDecompilerTests
     }
 
     [Fact]
+    public void DecompiledCSharpCarriesReferencesThatLandOnRealIdentifiers()
+    {
+        using var asm = ManagedAssembly.Load(CoreAssemblyPath);
+        var type = asm.Namespaces.First(n => n.Name == "Spydate.Core.PE").Types.First(t => t.Name == "PeImage");
+        var source = asm.Decompiler.SourceForType(type);
+
+        Assert.NotEmpty(source.References);
+
+        // Every reference's (line, column, length) must cut a real identifier out of the text — this
+        // is the mapping a Ctrl+click depends on, and an off-by-one would send it to the wrong word.
+        var lines = source.Text.Replace("\r", "", StringComparison.Ordinal).Split('\n');
+        foreach (var r in source.References)
+        {
+            Assert.InRange(r.Line, 1, lines.Length);
+            string line = lines[r.Line - 1];
+            Assert.InRange(r.Column - 1, 0, line.Length);
+            Assert.InRange(r.Column - 1 + r.Length, 0, line.Length);
+            string span = line.Substring(r.Column - 1, r.Length);
+            Assert.Matches("^@?[A-Za-z_][A-Za-z0-9_]*$", span);
+            Assert.NotEqual(0, r.Token);
+            Assert.NotEmpty(r.Assembly);
+        }
+
+        // And at least one names PeImage's own assembly — a same-assembly definition a click can open.
+        Assert.Contains(source.References, r => r.Assembly.Equals("Spydate.Core", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void DecompilesTypeToCSharp()
     {
         using var asm = ManagedAssembly.Load(CoreAssemblyPath);

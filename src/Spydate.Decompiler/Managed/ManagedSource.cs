@@ -5,6 +5,7 @@ using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.CSharp.OutputVisitor;
 using ICSharpCode.Decompiler.CSharp.Syntax;
 using ICSharpCode.Decompiler.IL;
+using ICSharpCode.Decompiler.TypeSystem;
 
 namespace Spydate.Decompiler.Managed;
 
@@ -16,6 +17,18 @@ namespace Spydate.Decompiler.Managed;
 /// method it is into names nothing.
 /// </summary>
 public readonly record struct SourceLine(int Line, uint MethodToken, int Offset);
+
+/// <summary>
+/// A span of decompiled text that names a type or member, and what it names.
+///
+/// <paramref name="Line"/> and <paramref name="Column"/> are 1-based, the way the decompiler and the
+/// editor both count, so the span survives the trailing address comments being added to each line —
+/// those go after the code, never before it. <paramref name="Assembly"/> is the simple name of the
+/// assembly that defines the target (which may be a reference rather than the one on screen), and
+/// <paramref name="Token"/> its metadata token there. This is what turns a click on an identifier
+/// into its definition.
+/// </summary>
+public readonly record struct SourceReference(int Line, int Column, int Length, string Assembly, int Token);
 
 /// <summary>
 /// One statement's IL, from its first instruction to the first of the next.
@@ -39,9 +52,13 @@ public readonly record struct SourceStatement(uint MethodToken, int From, int To
 /// about is the decompiler itself — a PDB, if there even is one, maps IL offsets onto lines of a
 /// source file this program has never seen.
 /// </summary>
-public sealed record ManagedSource(string Text, IReadOnlyList<SourceLine> Lines, IReadOnlyList<SourceStatement> Statements)
+public sealed record ManagedSource(
+    string Text,
+    IReadOnlyList<SourceLine> Lines,
+    IReadOnlyList<SourceStatement> Statements,
+    IReadOnlyList<SourceReference> References)
 {
-    public static ManagedSource Empty { get; } = new(string.Empty, Array.Empty<SourceLine>(), Array.Empty<SourceStatement>());
+    public static ManagedSource Empty { get; } = new(string.Empty, Array.Empty<SourceLine>(), Array.Empty<SourceStatement>(), Array.Empty<SourceReference>());
 }
 
 /// <summary>
@@ -68,6 +85,9 @@ internal static class SequencePoints
         var recorder = new Recorder(output);
         tree.AcceptVisitor(new CSharpOutputVisitor(recorder, settings.CSharpFormattingOptions));
 
+        string text = output.ToString();
+        var references = ResolveReferences(recorder.Raw, text);
+
         var statements = Statements(decompiler, tree);
 
         // Each line moved to the start of the statement it is in. What the recorder caught is the
@@ -84,7 +104,44 @@ internal static class SequencePoints
             }
         }
 
-        return new ManagedSource(output.ToString(), lines, statements);
+        return new ManagedSource(text, lines, statements, references);
+    }
+
+    /// <summary>
+    /// Turns each identifier's absolute offset into the 1-based line and column the editor counts in,
+    /// so a reference survives the per-line address comments that get appended afterward.
+    /// </summary>
+    private static IReadOnlyList<SourceReference> ResolveReferences(IReadOnlyList<(int Start, int Length, string Assembly, int Token)> raw, string text)
+    {
+        if (raw.Count == 0)
+        {
+            return Array.Empty<SourceReference>();
+        }
+
+        // Line starts, so an offset becomes a line and a column in one pass rather than counting
+        // newlines per reference.
+        var lineStart = new List<int> { 0 };
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] == '\n')
+            {
+                lineStart.Add(i + 1);
+            }
+        }
+
+        var result = new List<SourceReference>(raw.Count);
+        foreach (var (start, length, assembly, token) in raw)
+        {
+            int line = lineStart.FindLastIndex(s => s <= start);
+            int column = start - lineStart[line] + 1;
+
+            // A \r sits at the end of the line in the text but not in the editor's document, and it
+            // is always after the code, so it never falls inside an identifier — the column is the
+            // editor's column as it stands.
+            result.Add(new SourceReference(line + 1, column, length, assembly, token));
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -193,15 +250,67 @@ internal static class SequencePoints
     /// </summary>
     private sealed class Recorder : TextWriterTokenWriter
     {
-        internal Recorder(TextWriter writer) : base(writer)
+        private readonly Stack<AstNode> _nodes = new();
+        private readonly StringBuilder _text;
+
+        internal Recorder(StringWriter writer) : base(writer)
         {
+            _text = writer.GetStringBuilder();
         }
 
         internal Dictionary<int, SourceLine> Lines { get; } = new();
 
+        /// <summary>Each identifier that names a type or member: its absolute offset, length, and target.</summary>
+        internal List<(int Start, int Length, string Assembly, int Token)> Raw { get; } = new();
+
+        public override void EndNode(AstNode node)
+        {
+            base.EndNode(node);
+            if (_nodes.Count > 0 && ReferenceEquals(_nodes.Peek(), node))
+            {
+                _nodes.Pop();
+            }
+        }
+
+        /// <summary>
+        /// Records an identifier's span and target as it is written. The symbol is on the node the
+        /// identifier belongs to — a member reference, a type name, a call — which is the one on top
+        /// of the stack while its tokens are written. The offset is read from the output buffer's own
+        /// length rather than from a column: indentation is written as part of the same call, and the
+        /// identifier is its tail, so the end is exact and an escaped <c>@name</c> is caught by the
+        /// character before it.
+        /// </summary>
+        public override void WriteIdentifier(Identifier identifier)
+        {
+            base.WriteIdentifier(identifier);
+
+            if (_nodes.Count == 0
+                || _nodes.Peek().GetSymbol() is not IEntity entity
+                || entity.MetadataToken.IsNil
+                || entity.ParentModule is not { } module)
+            {
+                return;
+            }
+
+            int end = _text.Length;
+            int length = identifier.Name.Length;
+            int start = end - length;
+            if (start > 0 && _text[start - 1] == '@')
+            {
+                start--;
+                length++;
+            }
+
+            if (start >= 0)
+            {
+                Raw.Add((start, length, module.AssemblyName, MetadataTokens.GetToken(entity.MetadataToken)));
+            }
+        }
+
         public override void StartNode(AstNode node)
         {
             base.StartNode(node);
+            _nodes.Push(node);
 
             foreach (var instruction in node.Annotations.OfType<ILInstruction>())
             {

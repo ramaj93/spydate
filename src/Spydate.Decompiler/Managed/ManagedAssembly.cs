@@ -43,8 +43,8 @@ public sealed record ManagedNamespace(string Name, IReadOnlyList<ManagedType> Ty
     public override string ToString() => DisplayName;
 }
 
-/// <summary>A referenced assembly: its display name, and the handle that resolves it to a file.</summary>
-public sealed record ManagedReference(string Display, AssemblyReferenceHandle Handle)
+/// <summary>A referenced assembly: its simple and display names, and the handle that resolves it.</summary>
+public sealed record ManagedReference(string Name, string Display, AssemblyReferenceHandle Handle)
 {
     public override string ToString() => Display;
 }
@@ -143,10 +143,62 @@ public sealed class ManagedAssembly : IDisposable
             .Select(h =>
             {
                 var r = Metadata.GetAssemblyReference(h);
-                return new ManagedReference($"{Metadata.GetString(r.Name)}, Version={r.Version}", h);
+                string name = Metadata.GetString(r.Name);
+                return new ManagedReference(name, $"{name}, Version={r.Version}", h);
             })
             .OrderBy(r => r.Display, StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+    /// <summary>The assembly's simple name (no version), for matching a reference to what defines a type.</summary>
+    public string SimpleName => Metadata.IsAssembly ? Metadata.GetString(Metadata.GetAssemblyDefinition().Name) : Name;
+
+    /// <summary>
+    /// The type or member a metadata token names in this assembly — a type with no member, or the
+    /// type and the member — or null when the token names neither (a compiler-only accessor, say).
+    /// This is what turns a reference behind a clicked identifier into something to open.
+    /// </summary>
+    public (ManagedType Type, ManagedMember? Member)? Locate(int token)
+    {
+        var handle = MetadataTokens.EntityHandle(token);
+        foreach (var ns in Namespaces)
+        {
+            foreach (var type in ns.Types)
+            {
+                if (LocateIn(type, handle) is { } found)
+                {
+                    return found;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static (ManagedType Type, ManagedMember? Member)? LocateIn(ManagedType type, EntityHandle handle)
+    {
+        if (type.Handle.Equals(handle))
+        {
+            return (type, null);
+        }
+
+        foreach (var member in type.Members)
+        {
+            if (member.Handle.Equals(handle))
+            {
+                return (type, member);
+            }
+        }
+
+        foreach (var nested in type.NestedTypes)
+        {
+            if (LocateIn(nested, handle) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Loads a referenced assembly from wherever the resolver finds it — the runtime pack, the GAC, or

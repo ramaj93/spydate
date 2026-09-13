@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.Decompiler.Managed;
 using Wpf.Ui.Controls;
@@ -29,6 +30,8 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     private CancellationTokenSource? _cts;
 
     private readonly Func<ManagedImage?>? _image;
+    private readonly Action<SourceReference, ManagedAssembly>? _navigate;
+    private IReadOnlyList<SourceReference> _lastReferences = Array.Empty<SourceReference>();
 
     private ManagedCodeDocumentViewModel(
         string key,
@@ -37,13 +40,15 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
         ManagedAssembly assembly,
         ManagedType? type,
         ManagedMember? member,
-        Func<ManagedImage?>? image = null)
+        Func<ManagedImage?>? image = null,
+        Action<SourceReference, ManagedAssembly>? navigate = null)
         : base(key, title, icon)
     {
         _assembly = assembly;
         _type = type;
         _member = member;
         _image = image;
+        _navigate = navigate;
     }
 
     public static ManagedCodeDocumentViewModel ForAssembly(ManagedAssembly assembly)
@@ -52,15 +57,25 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     public static ManagedCodeDocumentViewModel ForType(
         ManagedAssembly assembly,
         ManagedType type,
-        Func<ManagedImage?>? image = null)
-        => new($"managed:type:{assembly.Name}:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null, image);
+        Func<ManagedImage?>? image = null,
+        Action<SourceReference, ManagedAssembly>? navigate = null)
+        => new($"managed:type:{assembly.Name}:{type.FullName}", type.Name, SymbolRegular.Class24, assembly, type, null, image, navigate);
 
     public static ManagedCodeDocumentViewModel ForMember(
         ManagedAssembly assembly,
         ManagedType type,
         ManagedMember member,
-        Func<ManagedImage?>? image = null)
-        => new($"managed:member:{assembly.Name}:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, image);
+        Func<ManagedImage?>? image = null,
+        Action<SourceReference, ManagedAssembly>? navigate = null)
+        => new($"managed:member:{assembly.Name}:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, image, navigate);
+
+    /// <summary>Identifiers in the current C# that name a type or member, for Ctrl+click.</summary>
+    [ObservableProperty]
+    private IReadOnlyList<SourceReference> _references = Array.Empty<SourceReference>();
+
+    /// <summary>Follows a clicked reference to its definition, through the assembly that owns it.</summary>
+    [RelayCommand]
+    private void GoToDefinition(SourceReference reference) => _navigate?.Invoke(reference, _assembly);
 
     public IReadOnlyList<ManagedLanguage> Languages { get; } = new[] { ManagedLanguage.CSharp, ManagedLanguage.IL };
 
@@ -92,6 +107,7 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             if (!cts.IsCancellationRequested)
             {
                 Text = text;
+                References = _lastReferences;
             }
         }
         catch (OperationCanceledException)
@@ -139,14 +155,37 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     private string Produce(ManagedLanguage language, CancellationToken ct)
     {
         var d = _assembly.Decompiler;
-        return (language, _member, _type) switch
+        _lastReferences = Array.Empty<SourceReference>();
+
+        // The C# member and type views carry references — the identifiers a Ctrl+click can follow.
+        // The other views (IL, whole assembly) do not, so they leave the set empty.
+        switch (language, _member, _type)
         {
-            (ManagedLanguage.CSharp, { } m, _) => Addressed(d.SourceForMember(m, ct)),
-            (ManagedLanguage.CSharp, null, { } t) => Addressed(d.SourceForType(t, ct)),
-            (ManagedLanguage.CSharp, null, null) => d.DecompileAssembly(ct),
-            (ManagedLanguage.IL, { } m, _) => Addressed(d.DisassembleMember(m, ct), m),
-            (ManagedLanguage.IL, null, { } t) => d.DisassembleType(t, ct),
-            _ => d.DisassembleModuleHeader(ct),
-        };
+            case (ManagedLanguage.CSharp, { } m, _):
+            {
+                var source = d.SourceForMember(m, ct);
+                _lastReferences = source.References;
+                return Addressed(source);
+            }
+
+            case (ManagedLanguage.CSharp, null, { } t):
+            {
+                var source = d.SourceForType(t, ct);
+                _lastReferences = source.References;
+                return Addressed(source);
+            }
+
+            case (ManagedLanguage.CSharp, null, null):
+                return d.DecompileAssembly(ct);
+
+            case (ManagedLanguage.IL, { } m, _):
+                return Addressed(d.DisassembleMember(m, ct), m);
+
+            case (ManagedLanguage.IL, null, { } t):
+                return d.DisassembleType(t, ct);
+
+            default:
+                return d.DisassembleModuleHeader(ct);
+        }
     }
 }

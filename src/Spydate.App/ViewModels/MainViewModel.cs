@@ -1215,8 +1215,8 @@ public sealed partial class MainViewModel : ObservableObject
             // The target may name a resolved reference to decompile through rather than the opened
             // assembly — a type in another module. Only the opened one carries the debugger's
             // addresses (Locate); a reference has no place in the running image to point at.
-            ManagedTypeTarget t when (t.Assembly ?? b.Managed) is { } m => Find($"managed:type:{m.Name}:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type, t.Assembly is null ? Locate : null),
-            ManagedMemberTarget mm when (mm.Assembly ?? b.Managed) is { } m => Find($"managed:member:{m.Name}:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member, mm.Assembly is null ? Locate : null),
+            ManagedTypeTarget t when (t.Assembly ?? b.Managed) is { } m => Find($"managed:type:{m.Name}:{t.Type.FullName}") ?? ManagedCodeDocumentViewModel.ForType(m, t.Type, t.Assembly is null ? Locate : null, GoToDefinition),
+            ManagedMemberTarget mm when (mm.Assembly ?? b.Managed) is { } m => Find($"managed:member:{m.Name}:{mm.Type.FullName}::{mm.Member.Handle.GetHashCode():X}") ?? ManagedCodeDocumentViewModel.ForMember(m, mm.Type, mm.Member, mm.Assembly is null ? Locate : null, GoToDefinition),
             _ => null,
         };
 
@@ -1275,6 +1275,32 @@ public sealed partial class MainViewModel : ObservableObject
         => Binary is { Bodies: { } bodies } open
             ? new Documents.ManagedImage(bodies, open.Image.ImageBase, open.Image.Is64Bit)
             : null;
+
+    /// <summary>
+    /// Follows a Ctrl+clicked identifier to its definition. The target may be in the assembly on
+    /// screen or in one it references; resolution runs from the viewed assembly so a click inside a
+    /// reference's code can go on into a third assembly. A definition in the opened binary opens as
+    /// its own code — with the debugger's addresses — and one elsewhere opens through that assembly.
+    /// </summary>
+    private void GoToDefinition(SourceReference reference, ManagedAssembly viewed)
+    {
+        var target = reference.Assembly == viewed.SimpleName
+            ? viewed
+            : viewed.References.FirstOrDefault(r => r.Name == reference.Assembly) is { } refx
+                ? viewed.Resolve(refx)
+                : null;
+
+        if (target?.Locate(reference.Token) is not { } located)
+        {
+            StatusText = $"Could not find {reference.Assembly}!0x{reference.Token:X} to go to.";
+            return;
+        }
+
+        var external = ReferenceEquals(target, Binary?.Managed) ? null : target;
+        OpenTarget(located.Member is { } member
+            ? new ManagedMemberTarget(located.Type, member, external)
+            : new ManagedTypeTarget(located.Type, external));
+    }
 
     private void OpenFunctionGraph(Function f)
     {

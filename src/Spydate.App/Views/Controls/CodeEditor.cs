@@ -1,9 +1,11 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using ICSharpCode.AvalonEdit;
 using Spydate.App.Services;
 using Spydate.Core.Text;
+using Spydate.Decompiler.Managed;
 
 namespace Spydate.App.Views.Controls;
 
@@ -59,6 +61,16 @@ public sealed class CodeEditor : TextEditor
         nameof(RevealLine), typeof(int), typeof(CodeEditor),
         new FrameworkPropertyMetadata(0, OnRevealLineChanged));
 
+    /// <summary>Identifiers in the text that name a type or member, for Ctrl+click to definition.</summary>
+    public static readonly DependencyProperty ReferencesProperty = DependencyProperty.Register(
+        nameof(References), typeof(IReadOnlyList<SourceReference>), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null));
+
+    /// <summary>Invoked with the <see cref="SourceReference"/> under a Ctrl+click.</summary>
+    public static readonly DependencyProperty GoToDefinitionCommandProperty = DependencyProperty.Register(
+        nameof(GoToDefinitionCommand), typeof(System.Windows.Input.ICommand), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null));
+
     public CodeEditor()
     {
         IsReadOnly = true;
@@ -101,6 +113,55 @@ public sealed class CodeEditor : TextEditor
         TextArea.LeftMargins.Insert(0, new BreakpointMargin(this));
         TextArea.Caret.PositionChanged += (_, _) => UpdateCaretContext();
         PreviewMouseRightButtonDown += MoveCaretToClick;
+        PreviewMouseLeftButtonDown += GoToDefinitionOnCtrlClick;
+    }
+
+    public IReadOnlyList<SourceReference>? References
+    {
+        get => (IReadOnlyList<SourceReference>?)GetValue(ReferencesProperty);
+        set => SetValue(ReferencesProperty, value);
+    }
+
+    public System.Windows.Input.ICommand? GoToDefinitionCommand
+    {
+        get => (System.Windows.Input.ICommand?)GetValue(GoToDefinitionCommandProperty);
+        set => SetValue(GoToDefinitionCommandProperty, value);
+    }
+
+    /// <summary>
+    /// Ctrl+click on an identifier that names a type or member follows it to its definition. The
+    /// click maps to a line and column, and a reference covering that column on that line is the one
+    /// to open — the same 1-based counting the decompiler recorded them in.
+    /// </summary>
+    private void GoToDefinitionOnCtrlClick(object sender, MouseButtonEventArgs e)
+    {
+        if ((Keyboard.Modifiers & ModifierKeys.Control) == 0
+            || GoToDefinitionCommand is not { } command
+            || References is not { Count: > 0 } references)
+        {
+            return;
+        }
+
+        if (GetPositionFromPoint(e.GetPosition(this)) is not { } position)
+        {
+            return;
+        }
+
+        foreach (var reference in references)
+        {
+            if (reference.Line == position.Line
+                && position.Column >= reference.Column
+                && position.Column < reference.Column + reference.Length)
+            {
+                if (command.CanExecute(reference))
+                {
+                    command.Execute(reference);
+                }
+
+                e.Handled = true;
+                return;
+            }
+        }
     }
 
     public string BoundText
