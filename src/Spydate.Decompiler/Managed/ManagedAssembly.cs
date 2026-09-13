@@ -152,6 +152,12 @@ public sealed class ManagedAssembly : IDisposable
     /// <summary>The assembly's simple name (no version), for matching a reference to what defines a type.</summary>
     public string SimpleName => Metadata.IsAssembly ? Metadata.GetString(Metadata.GetAssemblyDefinition().Name) : Name;
 
+    /// <summary>The preferred base the image states, so an address it carries can be turned into an RVA.</summary>
+    public ulong ImageBase => Module.Reader.PEHeaders.PEHeader?.ImageBase ?? 0;
+
+    /// <summary>The module's file name, which is how a loaded module names itself to the debugger.</summary>
+    public string ModuleName => Path is { } path ? System.IO.Path.GetFileName(path) : Name;
+
     /// <summary>
     /// The type or member a metadata token names in this assembly — a type with no member, or the
     /// type and the member — or null when the token names neither (a compiler-only accessor, say).

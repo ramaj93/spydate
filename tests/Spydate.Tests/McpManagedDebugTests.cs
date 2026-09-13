@@ -166,6 +166,23 @@ public class McpManagedDebugTests
     }
 
     [Fact]
+    public void AnAddressInAnotherModuleIsSentToTheByNameForm()
+    {
+        // An address well above the opened image is in some other module. Because managed assemblies
+        // share image bases, an address cannot say which — so rather than guess, the tool points at the
+        // unambiguous by-name form. (A referenced module that uniquely claims the address does resolve;
+        // that path is exercised live, where the module layout is real.)
+        var (tools, debug, store) = Open();
+        ulong far = store.Current!.Image.ImageBase + 0x80000000;   // past the end of the opened image
+
+        string text = tools.Break($"0x{far:X}");
+
+        Assert.Contains("another assembly", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Type::Method", text, StringComparison.Ordinal);
+        Assert.Null(debug.Module);   // nothing was set
+    }
+
+    [Fact]
     public void AnAddressThatIsNotInAnyMethodsIlIsRefusedAsAnAddress()
     {
         var (tools, debug, store) = Open();

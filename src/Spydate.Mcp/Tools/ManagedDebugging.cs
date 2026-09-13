@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Text;
+using Spydate.Decompiler.Managed;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
 
@@ -173,6 +174,7 @@ internal static class ManagedDebugging
 
         uint token;
         string what;
+        string module = System.IO.Path.GetFileName(session.Path);
 
         var found = ManagedTargets.Resolve(session, text);
         if (found.Found)
@@ -196,16 +198,26 @@ internal static class ManagedDebugging
         else if (AsAddress(session, target) is { } located)
         {
             // A listing address rather than a name — the whole target, since an address carries its
-            // own offset and never a +IL_ suffix.
+            // own offset and never a +IL_ suffix. It may be in the opened module or a referenced one,
+            // so the breakpoint goes into whichever module the address resolved in.
             token = located.Token;
             offset = located.Offset;
+            module = located.Module;
             what = $"{located.Method} at IL_{offset:X4} (0x{located.Va:X})";
         }
         else if (Targets.Resolve(session, target) is { Found: true } address)
         {
-            // A real address, but not one inside any method's IL — a data address, a native stub in a
-            // mixed image, or simply a mistake. Said as an address, since that is what it is.
-            return $"0x{address.Va:X} is not inside any method's IL, so there is no managed method to break in there";
+            // A real address, but AsAddress could not turn it into one method. If it is outside the
+            // opened module's own span it is in another assembly — where an address cannot name a
+            // module on its own, because assemblies share an image base — so it is named by method
+            // instead. Inside the opened module it simply is not in any method's IL.
+            ulong start = session.Image.ImageBase;
+            ulong end = start + session.Image.OptionalHeader.SizeOfImage;
+            return address.Va < start || address.Va >= end
+                ? $"0x{address.Va:X} is not in the opened module — it is in another assembly, where a "
+                  + "breakpoint is set by name (Type::Method, or Type::Method+IL_7) rather than by address: "
+                  + "an address does not name a module, since assemblies commonly share an image base."
+                : $"0x{address.Va:X} is not inside any method's IL, so there is no managed method to break in there";
         }
         else
         {
@@ -215,7 +227,6 @@ internal static class ManagedDebugging
                    ?? $"'{text}' is not a method in this assembly, nor an address inside one's IL";
         }
 
-        string module = System.IO.Path.GetFileName(session.Path);
         if (debug.SetBreakpoint(module, token, offset, on) is { } problem)
         {
             return problem;
@@ -250,12 +261,14 @@ internal static class ManagedDebugging
     }
 
     /// <summary>Where a breakpoint lands, when a target was a listing address inside a method's IL.</summary>
-    private readonly record struct AddressBreak(ulong Va, uint Token, uint Offset, string Method);
+    private readonly record struct AddressBreak(ulong Va, uint Token, uint Offset, string Method, string Module);
 
     /// <summary>
-    /// A listing address turned into the method it falls in and the offset within it, or null when it
-    /// is not an address or does not land inside any method's IL. The body map is the only thing that
-    /// can do this — the same map the IL view uses to print addresses in the first place.
+    /// A listing address turned into the module, method and offset it falls in, or null when it is not
+    /// an address or does not land inside any method's IL. The opened assembly is tried first, then
+    /// each referenced one against its own image base — an address in a framework or dependency module,
+    /// which carries the same <c>ImageBase + RVA</c> the opened one does. The body map is the only
+    /// thing that can do this, the same map the IL view uses to print the addresses in the first place.
     /// </summary>
     private static AddressBreak? AsAddress(BinarySession session, string target)
     {
@@ -265,20 +278,50 @@ internal static class ManagedDebugging
             return null;
         }
 
-        if (session.Image.VaToRva(resolved.Va) is not { } rva
-            || session.Bodies?.At(rva) is not { } body)
+        ulong va = resolved.Va;
+
+        if (session.Image.VaToRva(va) is { } rva && session.Bodies?.At(rva) is { } body)
         {
-            return null;
+            return new AddressBreak(va, (uint)MetadataTokens.GetToken(body.Method), (uint)body.OffsetOf(rva),
+                MethodName(session.Managed, body.Method), System.IO.Path.GetFileName(session.Path));
         }
 
-        uint token = (uint)MetadataTokens.GetToken(body.Method);
-        return new AddressBreak(resolved.Va, token, (uint)body.OffsetOf(rva), MethodName(session, body.Method));
+        // A referenced module, by its own image base. This only works when exactly one reference lays
+        // claim to the address: managed DLLs share a base far too often — 0x400000 and 0x180000000 are
+        // both common defaults — for an address to name a module on its own, so a hit in two of them is
+        // no answer at all. When it is ambiguous the caller is told to name it by method instead, which
+        // is unambiguous. Requiring a method's IL there, not merely the address range, narrows it.
+        AddressBreak? unique = null;
+        if (session.Managed is { } managed)
+        {
+            foreach (var reference in managed.References)
+            {
+                if (managed.Resolve(reference) is not { } assembly || assembly.ImageBase == 0 || va < assembly.ImageBase)
+                {
+                    continue;
+                }
+
+                uint refRva = (uint)(va - assembly.ImageBase);
+                if (session.BodiesFor(assembly).At(refRva) is { } refBody)
+                {
+                    if (unique is not null)
+                    {
+                        return null;   // more than one module has code there — ambiguous, so no answer
+                    }
+
+                    unique = new AddressBreak(va, (uint)MetadataTokens.GetToken(refBody.Method), (uint)refBody.OffsetOf(refRva),
+                        MethodName(assembly, refBody.Method), assembly.ModuleName);
+                }
+            }
+        }
+
+        return unique;
     }
 
     /// <summary>A method's name as <c>Namespace.Type::Method</c>, for a message about an address.</summary>
-    private static string MethodName(BinarySession session, MethodDefinitionHandle handle)
+    private static string MethodName(ManagedAssembly? assembly, MethodDefinitionHandle handle)
     {
-        if (session.Managed is not { } assembly)
+        if (assembly is null)
         {
             return $"method 0x{MetadataTokens.GetToken(handle):X8}";
         }

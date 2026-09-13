@@ -133,6 +133,27 @@ public sealed class BinarySession : IDisposable
     private readonly Dictionary<ManagedAssembly, ManagedIndex> _referenceIndexes = new();
 
     /// <summary>
+    /// The body map for a resolved reference, built once and kept — the same as <see cref="Bodies"/>
+    /// is for the opened assembly, so an address in a referenced module can be turned into the method
+    /// it falls in.
+    /// </summary>
+    public ManagedBodies BodiesFor(ManagedAssembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        lock (_referenceBodies)
+        {
+            if (!_referenceBodies.TryGetValue(assembly, out var bodies))
+            {
+                _referenceBodies[assembly] = bodies = ManagedBodies.Build(assembly);
+            }
+
+            return bodies;
+        }
+    }
+
+    private readonly Dictionary<ManagedAssembly, ManagedBodies> _referenceBodies = new();
+
+    /// <summary>
     /// Who refers to what, read out of the IL. Null for a native binary.
     ///
     /// Lazy, and worth being lazy about: it walks every method body in the assembly, which is the
