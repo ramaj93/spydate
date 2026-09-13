@@ -138,7 +138,17 @@ public static class ManagedTargets
     public static ManagedTarget Resolve(BinarySession session, string? target)
     {
         ArgumentNullException.ThrowIfNull(session);
-        if (session.ManagedIndex is not { } index || string.IsNullOrWhiteSpace(target))
+        return Resolve(session.ManagedIndex, target);
+    }
+
+    /// <summary>
+    /// Resolves against one assembly's index — the open one or a referenced one just as well, which is
+    /// what lets a name be looked for in a framework or dependency assembly when the opened one has no
+    /// such type.
+    /// </summary>
+    public static ManagedTarget Resolve(ManagedIndex? index, string? target)
+    {
+        if (index is null || string.IsNullOrWhiteSpace(target))
         {
             return ManagedTarget.None;
         }

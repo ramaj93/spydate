@@ -56,7 +56,14 @@ public sealed class CodeTools
                 return view is "pseudo_c" or "asm"
                     ? $"{found.Describe()} is managed code; \"{view}\" is for native code. "
                       + $"Use view=\"csharp\" or view=\"il\"."
-                    : ReadManaged(session, found, view, offset, maxLines);
+                    : ReadManaged(session, session.Managed!, found, view, offset, maxLines, opened: true);
+            }
+
+            // Not in the opened assembly. It may be a framework or dependency method — resolve the name
+            // against each referenced assembly as it is found, and read it through the one that has it.
+            if (view is not ("pseudo_c" or "asm") && ExternalRead(session, target, view, offset, maxLines) is { } external)
+            {
+                return external;
             }
 
             managedProblem = found.Problem;
@@ -221,9 +228,39 @@ public sealed class CodeTools
     /// what calls it is a question this cannot answer yet. Repeating what the body already says
     /// would be spending an agent's context to tell it what it is about to read.
     /// </summary>
-    private static string ReadManaged(BinarySession session, ManagedTarget target, string view, int offset, int maxLines)
+    /// <summary>
+    /// Reads a type or member that is in a referenced assembly rather than the opened one — a
+    /// framework method, say — by resolving the name against each reference as it loads and reading it
+    /// through the assembly that has it. Null when no reference has it. The references are searched in
+    /// order and the first hit wins; a name in two of them is read from whichever comes first, which is
+    /// the same rule the runtime's own binder would reach.
+    /// </summary>
+    private static string? ExternalRead(BinarySession session, string target, string view, int offset, int maxLines)
     {
-        var managed = session.Managed!;
+        if (session.Managed is not { } managed)
+        {
+            return null;
+        }
+
+        foreach (var reference in managed.References)
+        {
+            if (managed.Resolve(reference) is not { } assembly)
+            {
+                continue;
+            }
+
+            var found = ManagedTargets.Resolve(session.IndexFor(assembly), target);
+            if (found.Found)
+            {
+                return ReadManaged(session, assembly, found, view, offset, maxLines, opened: false);
+            }
+        }
+
+        return null;
+    }
+
+    private static string ReadManaged(BinarySession session, ManagedAssembly managed, ManagedTarget target, string view, int offset, int maxLines, bool opened)
+    {
         bool il = view == "il";
         var type = target.Type!;
 
@@ -234,7 +271,10 @@ public sealed class CodeTools
             {
                 (false, { } member) => managed.Decompiler.DecompileMember(member),
                 (false, null) => managed.Decompiler.DecompileType(type),
-                (true, { } member) => Listing(session, managed.Decompiler.DisassembleMember(member), member),
+
+                // The IL address column comes from the opened image's bodies; a referenced assembly is
+                // not in the process this session is about, so its listing carries no addresses.
+                (true, { } member) => opened ? Listing(session, managed.Decompiler.DisassembleMember(member), member) : managed.Decompiler.DisassembleMember(member),
                 (true, null) => managed.Decompiler.DisassembleType(type),
             };
         }

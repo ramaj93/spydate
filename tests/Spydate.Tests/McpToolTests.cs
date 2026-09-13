@@ -1,3 +1,5 @@
+using Spydate.Core.PE;
+using Spydate.Decompiler.Managed;
 using Spydate.Mcp;
 using Spydate.Mcp.Session;
 using Spydate.Mcp.Tools;
@@ -21,6 +23,25 @@ public class McpToolTests
     private static NavigationTools Nav(string path) => new(Store(path));
 
     private static CodeTools Code(string path) => new(Store(path));
+
+    [Fact]
+    public void ReadFunctionReadsAMethodInAReferencedAssembly()
+    {
+        // The test assembly references Spydate.Core, so PeImage::Load is not in it but is one
+        // reference away — the exact shape of reading a framework or dependency method by name.
+        string testAssembly = typeof(McpToolTests).Assembly.Location;
+        var store = new SessionStore();
+        store.Set(new BinarySession(
+            testAssembly, Corpus.Image(testAssembly), null, null, DiscoveryState.None,
+            managed: ManagedAssembly.Load(testAssembly)));
+
+        string text = new CodeTools(store).ReadFunction("Spydate.Core.PE.PeImage::Load", view: "csharp");
+
+        // Read through the assembly that has it, not refused as absent from the opened one.
+        Assert.Contains("Load", text, StringComparison.Ordinal);
+        Assert.Contains("Spydate.Core", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("is not a", text, StringComparison.OrdinalIgnoreCase);
+    }
 
     // ------------------------------------------------------------------
     // The worklist

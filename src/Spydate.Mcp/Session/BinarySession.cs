@@ -112,6 +112,27 @@ public sealed class BinarySession : IDisposable
     public ManagedIndex? ManagedIndex => _index ??= Managed is null ? null : new ManagedIndex(Managed);
 
     /// <summary>
+    /// The name index for a resolved reference, built once and kept, so reading several framework
+    /// methods does not re-index the framework each time. The opened assembly's own index is
+    /// <see cref="ManagedIndex"/>; this is for the assemblies it references.
+    /// </summary>
+    public ManagedIndex IndexFor(ManagedAssembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        lock (_referenceIndexes)
+        {
+            if (!_referenceIndexes.TryGetValue(assembly, out var index))
+            {
+                _referenceIndexes[assembly] = index = new ManagedIndex(assembly);
+            }
+
+            return index;
+        }
+    }
+
+    private readonly Dictionary<ManagedAssembly, ManagedIndex> _referenceIndexes = new();
+
+    /// <summary>
     /// Who refers to what, read out of the IL. Null for a native binary.
     ///
     /// Lazy, and worth being lazy about: it walks every method body in the assembly, which is the
