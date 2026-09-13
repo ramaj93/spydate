@@ -200,9 +200,13 @@ internal sealed class ManagedCallback : ICorDebugManagedCallback, ICorDebugManag
 
     public int UnloadClass(IntPtr pAppDomain, IntPtr c) => Continued(pAppDomain, null);
 
-    public int EvalComplete(IntPtr pAppDomain, IntPtr pThread, IntPtr pEval) => Continued(pAppDomain, null);
+    // An evaluation the session started ends with one of these. Held, not continued, so the session
+    // can read the result while the process is still stopped; if it was not ours, continued as before.
+    public int EvalComplete(IntPtr pAppDomain, IntPtr pThread, IntPtr pEval)
+        => _events.EvalFinished(failed: false) ? 0 : Continued(pAppDomain, null);
 
-    public int EvalException(IntPtr pAppDomain, IntPtr pThread, IntPtr pEval) => Continued(pAppDomain, null);
+    public int EvalException(IntPtr pAppDomain, IntPtr pThread, IntPtr pEval)
+        => _events.EvalFinished(failed: true) ? 0 : Continued(pAppDomain, null);
 
     public int LogMessage(IntPtr pAppDomain, IntPtr pThread, int lLevel, IntPtr pLogSwitchName, IntPtr pMessage)
         => Continued(pAppDomain, null);
@@ -290,6 +294,12 @@ internal interface IManagedEvents
 
     /// <summary>Something stopped the debuggee. True to stay stopped, false to carry on.</summary>
     bool Stopped(ManagedStopKind kind, IntPtr controller, IntPtr thread, string text);
+
+    /// <summary>
+    /// A function evaluation finished, well or with an exception. True when the session started it and
+    /// wants the debuggee held so the result can be read; false when it was not ours, to continue.
+    /// </summary>
+    bool EvalFinished(bool failed);
 
     void Exited();
 

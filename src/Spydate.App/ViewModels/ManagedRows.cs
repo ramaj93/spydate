@@ -29,18 +29,23 @@ public sealed partial class VariableRow : ObservableObject
         Kind = variable.Kind;
         Expandable = variable.Expandable;
         Path = variable.Path;
+        Getter = variable.Getter;
         Depth = depth;
         _toggled = toggled;
     }
 
     public string Name { get; }
 
-    public string Value { get; }
+    /// <summary>Value, Type and Kind can change once — a property row shows "…" until its getter has run.</summary>
+    [ObservableProperty]
+    private string _value;
 
-    public string Type { get; }
+    [ObservableProperty]
+    private string _type;
 
     /// <summary>What the value text is, which decides its colour.</summary>
-    public ManagedValueKind Kind { get; }
+    [ObservableProperty]
+    private ManagedValueKind _kind;
 
     public bool Expandable { get; }
 
@@ -50,6 +55,17 @@ public sealed partial class VariableRow : ObservableObject
 
     /// <summary>How to find this value again from the frame, which is what opening it walks.</summary>
     internal ManagedValuePath Path { get; }
+
+    /// <summary>Set when the row is a property; the getter to run to read it. Null for a field or element.</summary>
+    internal ManagedPropertyGetter? Getter { get; }
+
+    /// <summary>Replaces the placeholder with what running the getter produced.</summary>
+    internal void Resolve(ManagedVariable evaluated)
+    {
+        Value = evaluated.Value;
+        Type = evaluated.Type;
+        Kind = evaluated.Kind;
+    }
 
     [ObservableProperty]
     private bool _isExpanded;
@@ -98,4 +114,11 @@ public sealed record ManagedThreadRow(
         thread.State,
         thread.IsStopped,
         thread.IsSelected);
+}
+
+/// <summary>One frame of the call stack, as the Call Stack pane shows it.</summary>
+public sealed record ManagedFrameRow(int Index, string Display, bool IsManaged, bool IsCurrent)
+{
+    internal static ManagedFrameRow From(ManagedFrame frame)
+        => new(frame.Index, frame.Display, frame.IsManaged, frame.IsCurrent);
 }

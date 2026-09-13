@@ -49,6 +49,14 @@ public class ManagedVariablesTests
 
             public Holder() { Name = "auto"; Next = null; }
 
+            // A plain getter, an expression getter, an enum getter, a static getter, and one that
+            // throws — the range the property evaluator has to handle.
+            public int Doubled { get { return Count * 2; } }
+            public string Greeting { get { return "hi " + Label; } }
+            public Mood CurrentMood { get { return Mood; } }
+            public static int Answer { get { return 42; } }
+            public int Bang { get { throw new InvalidOperationException("no"); } }
+
             public void Look(int factor, string why)
             {
                 int doubled = factor * 2;
@@ -148,8 +156,9 @@ public class ManagedVariablesTests
         Assert.Contains(fields, f => f.Name == "baseName" && f.Value == "\"base\"");
         Assert.Contains(fields, f => f.Name == "Count" && f.Value == "7" && f.Type == "int");
 
-        // An auto-property's backing field, under the name the property was written with.
-        Assert.Contains(fields, f => f.Name == "Name" && f.Value == "\"auto\"");
+        // An auto-property shows as a property, under the name it was written with, and its hidden
+        // backing field is not listed separately.
+        Assert.Contains(fields, f => f.Name == "Name" && f.Getter is not null);
         Assert.DoesNotContain(fields, f => f.Name.Contains("k__BackingField", StringComparison.Ordinal));
     }
 
@@ -338,7 +347,131 @@ public class ManagedVariablesTests
         var self = Assert.Single(roots, r => r.Name == "this");
         Assert.Equal("Spydate.Mcp.McpOptions", self.Type);
         Assert.Contains(roots, r => r.Name == "path" && r.Value.Contains("where.exe", StringComparison.Ordinal));
-        Assert.Contains(session.Children(self.Path), f => f.Name == "MaxFunctions" && f.Value == "20000");
+
+        // MaxFunctions is an auto-property, so it opens as a property and its value comes from
+        // running the getter — the same evaluation path as .NET Framework, on CoreCLR.
+        var maxFunctions = Assert.Single(session.Children(self.Path), f => f.Name == "MaxFunctions");
+        Assert.NotNull(maxFunctions.Getter);
+        Assert.Equal("20000", session.EvaluateProperty(maxFunctions.Path, maxFunctions.Getter!, maxFunctions.Name, maxFunctions.Type)?.Value);
+    }
+
+    // ------------------------------------------------------------------
+    // Call stack
+    // ------------------------------------------------------------------
+
+    [SkippableFact]
+    public void TheCallStackRunsFromTheMethodThatStoppedToItsCallers()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var frames = session.Frames();
+
+        // Look was called from Main. Innermost first.
+        Assert.True(frames.Count >= 2, "only " + frames.Count + " frames");
+        Assert.Contains("Holder.Look", frames[0].Display, StringComparison.Ordinal);
+        Assert.True(frames[0].IsCurrent);
+        Assert.Contains(frames, f => f.Display.Contains("Program.Main", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void PickingACallerShowsItsLocalsAndMovesTheArrow()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var main = session.Frames().First(f => f.Display.Contains("Program.Main", StringComparison.Ordinal));
+        Assert.Null(session.SelectFrame(main.Index));
+
+        // The arrow is in Main now, and the locals are Main's — the two Thread variables it holds,
+        // not Look's factor/why.
+        Assert.Equal(main.MethodToken, session.StoppedAt?.MethodToken);
+        var locals = session.Variables();
+        Assert.DoesNotContain(locals, v => v.Name == "factor");
+        Assert.Contains(locals, v => v.Type.Contains("Thread", StringComparison.Ordinal));
+
+        // And the current marker moved with it.
+        Assert.True(session.Frames().Single(f => f.Index == main.Index).IsCurrent);
+    }
+
+    // ------------------------------------------------------------------
+    // Properties, by running their getters
+    // ------------------------------------------------------------------
+
+    [SkippableFact]
+    public void APropertyIsListedWithAGetterAndNoValueUntilItIsRun()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var doubled = Assert.Single(Fields(session), f => f.Name == "Doubled");
+
+        Assert.NotNull(doubled.Getter);
+        Assert.Equal(ManagedValueKind.Property, doubled.Kind);
+        Assert.Equal("…", doubled.Value);
+
+        // No plain field row for an auto-property's backing store — the property row stands for it.
+        Assert.DoesNotContain(Fields(session), f => f.Name.Contains("k__BackingField", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public void RunningAGetterGivesItsValue()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var doubled = Assert.Single(Fields(session), f => f.Name == "Doubled");
+        var value = session.EvaluateProperty(doubled.Path, doubled.Getter!, doubled.Name, doubled.Type);
+
+        // Count is 7, so Doubled runs to 14 — a value only a getter, not a field read, could give.
+        Assert.Equal("14", value?.Value);
+        Assert.Equal(ManagedValueKind.Number, value?.Kind);
+    }
+
+    [SkippableFact]
+    public void AStaticGetterAndAnAutoPropertyBothRun()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+        var fields = Fields(session);
+
+        var answer = Assert.Single(fields, f => f.Name == "Answer");
+        Assert.True(answer.Getter!.IsStatic);
+        Assert.Equal("42", session.EvaluateProperty(answer.Path, answer.Getter!, answer.Name, answer.Type)?.Value);
+
+        var name = Assert.Single(fields, f => f.Name == "Name");
+        Assert.Equal("\"auto\"", session.EvaluateProperty(name.Path, name.Getter!, name.Name, name.Type)?.Value);
+    }
+
+    [SkippableFact]
+    public void AGetterThatThrowsSaysSoRatherThanAValue()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        var bang = Assert.Single(Fields(session), f => f.Name == "Bang");
+        var value = session.EvaluateProperty(bang.Path, bang.Getter!, bang.Name, bang.Type);
+
+        Assert.Contains("threw", value?.Value ?? string.Empty, StringComparison.Ordinal);
+        Assert.Contains("InvalidOperationException", value?.Value ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
+    public void RunningAGetterLeavesTheProgramWhereItWas()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+        var where = session.StoppedAt;
+
+        var doubled = Assert.Single(Fields(session), f => f.Name == "Doubled");
+        _ = session.EvaluateProperty(doubled.Path, doubled.Getter!, doubled.Name, doubled.Type);
+
+        // The evaluation ran the process; it must have come back to rest exactly where it was, with
+        // its locals still readable, or stepping through a program by reading its properties would
+        // move it.
+        Assert.Equal(where?.MethodToken, session.StoppedAt?.MethodToken);
+        Assert.Equal(where?.Offset, session.StoppedAt?.Offset);
+        Assert.Contains(session.Variables(), v => v.Name == "this");
     }
 
     // ------------------------------------------------------------------

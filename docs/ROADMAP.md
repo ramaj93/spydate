@@ -293,9 +293,22 @@ native side already reads it, because native is what it is.
   Found on the way: `ICorDebugBoxValue`'s id had been `ICorDebugEval`'s since it was written, so no
   boxed value was ever unboxed; a comment beside it claimed a test pinned it, and none did. One does
   now, against a live box.
-  Still to do: a call stack and frames beyond the innermost; properties, which need function
-  evaluation; static members; setting values; and a location for a thread waiting inside the runtime,
-  which needs a stack walk rather than the innermost frame and today reads "not in managed code".
+  The call stack is a pane of its own: the frames of the thread being looked at, innermost first,
+  walked through the runtime's chains so a waiting thread's managed frames are found below the native
+  wait rather than reported as "not in managed code". Picking a frame moves the locals and the arrow
+  to it, so a caller's variables are readable, not only the method that stopped. Native and runtime
+  frames are listed too, greyed, so the shape of the stack is honest.
+  Properties are read by running their getters — function evaluation, the one thing here that runs
+  the program's own code. It is fenced: only when a person opens the object, never on its own; every
+  other thread suspended for the duration; a timeout, and an abort for a getter that overstays; a
+  getter that throws reports what it threw. Static getters and auto-properties both run; a getter on
+  a generic type needs its type arguments passed and is not evaluated yet, reading "(cannot
+  evaluate)". The value is a display, not an expandable subtree — an eval result is not reachable
+  from a frame by a path, so there is nothing to walk to open it. `ICorDebugEval`'s id, which the box
+  bug had wrongly borrowed, and every chain, frame and enum id were asked of a live process first.
+  Still to do: expanding an evaluated property in place (it needs a handle to keep the result alive
+  across a step); a getter on a generic type; static members of a type with no instance in a frame;
+  and setting values.
   Four things cost real time and are worth knowing before touching this again. Registering for
   runtime startup yields an `ICorDebug` and nothing else — `DebugActiveProcess` is a separate act,
   and without it the runtime reports nothing at all. A `[ComImport]` interface takes its vtable

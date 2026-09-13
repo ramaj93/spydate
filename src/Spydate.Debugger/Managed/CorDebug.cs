@@ -60,6 +60,14 @@ internal static class CorDebugGuids
     internal const string Value2 = "5E0B54E7-D88A-4626-9420-A691E0A78B49";
     internal const string Type = "D613F0BB-ACE1-4C19-BD72-E4C08D5DA7F5";
     internal const string ThreadEnum = "CC7BCB06-8A68-11D2-983C-0000F808342D";
+
+    // The call stack and function evaluation, all asked of live objects by ProbeThreadInterfaces
+    // before anything was built on them.
+    internal const string Chain = "CC7BCAEE-8A68-11d2-983C-0000F808342D";
+    internal const string ChainEnum = "CC7BCB08-8A68-11d2-983C-0000F808342D";
+    internal const string FrameEnum = "CC7BCB07-8A68-11d2-983C-0000F808342D";
+    internal const string Eval = "CC7BCAF6-8A68-11d2-983C-0000F808342D";
+    internal const string Eval2 = "FB0D9CE7-BE66-4683-9D32-A42A04E2FD91";
 }
 
 [ComImport]
@@ -857,4 +865,166 @@ internal interface ICorDebugThreadEnum
     [PreserveSig] int GetCount(out uint pcelt);
 
     [PreserveSig] int Next(uint celt, out IntPtr thread, out uint pceltFetched);
+}
+
+/// <summary>
+/// A run of stack frames of one kind — managed, or a stretch of native code between managed calls.
+///
+/// A thread's stack is a list of these, and each holds a list of frames. The reason a chain exists
+/// rather than a flat frame list is exactly the thing that made a waiting thread read "[not in
+/// managed code]": the innermost chain is often native (the thread is blocked in a syscall), and its
+/// managed frames are one chain down. Walking the chains is what finds them.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Chain)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugChain
+{
+    [PreserveSig] int GetThread(out IntPtr ppThread);
+
+    [PreserveSig] int GetStackRange(out ulong pStart, out ulong pEnd);
+
+    [PreserveSig] int GetContext(out IntPtr ppContext);
+
+    [PreserveSig] int GetCaller(out IntPtr ppChain);
+
+    [PreserveSig] int GetCallee(out IntPtr ppChain);
+
+    [PreserveSig] int GetPrevious(out IntPtr ppChain);
+
+    [PreserveSig] int GetNext(out IntPtr ppChain);
+
+    [PreserveSig] int IsManaged(out int pManaged);
+
+    [PreserveSig] int EnumerateFrames(out IntPtr ppFrames);
+
+    [PreserveSig] int GetActiveFrame(out IntPtr ppFrame);
+
+    [PreserveSig] int GetRegisterSet(out IntPtr ppRegisters);
+
+    [PreserveSig] int GetReason(out int pReason);
+}
+
+/// <summary>
+/// One stack frame, of whatever kind. Its token and function say which method it is in; whether it
+/// answers to <see cref="ICorDebugILFrame"/> says whether there is IL to read a location from.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Frame)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugFrame
+{
+    [PreserveSig] int GetChain(out IntPtr ppChain);
+
+    [PreserveSig] int GetCode(out IntPtr ppCode);
+
+    [PreserveSig] int GetFunction(out ICorDebugFunction? ppFunction);
+
+    [PreserveSig] int GetFunctionToken(out uint pToken);
+
+    [PreserveSig] int GetStackRange(out ulong pStart, out ulong pEnd);
+
+    [PreserveSig] int GetCaller(out IntPtr ppFrame);
+
+    [PreserveSig] int GetCallee(out IntPtr ppFrame);
+
+    [PreserveSig] int CreateStepper(out IntPtr ppStepper);
+}
+
+/// <summary>The chains of a thread, one at a time. <c>ICorDebugEnum</c>'s four slots come first.</summary>
+[ComImport]
+[Guid(CorDebugGuids.ChainEnum)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugChainEnum
+{
+    [PreserveSig] int Skip(uint celt);
+
+    [PreserveSig] int Reset();
+
+    [PreserveSig] int Clone(out IntPtr ppEnum);
+
+    [PreserveSig] int GetCount(out uint pcelt);
+
+    [PreserveSig] int Next(uint celt, out IntPtr chains, out uint pceltFetched);
+}
+
+/// <summary>The frames of a chain, one at a time.</summary>
+[ComImport]
+[Guid(CorDebugGuids.FrameEnum)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugFrameEnum
+{
+    [PreserveSig] int Skip(uint celt);
+
+    [PreserveSig] int Reset();
+
+    [PreserveSig] int Clone(out IntPtr ppEnum);
+
+    [PreserveSig] int GetCount(out uint pcelt);
+
+    [PreserveSig] int Next(uint celt, out IntPtr frames, out uint pceltFetched);
+}
+
+/// <summary>
+/// A pending function evaluation: the runtime running a method in the debuggee on its behalf.
+///
+/// This is how a property's value is got — a property is a method, and the only way to know what it
+/// returns is to run it. It is the sharpest tool here: it runs real code in the program under study,
+/// so a getter that blocks or has side effects does so for real. It is fenced accordingly — other
+/// threads suspended, a timeout, an abort — and never done except when a person opens the object.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Eval)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugEval
+{
+    [PreserveSig] int CallFunction([MarshalAs(UnmanagedType.Interface)] ICorDebugFunction pFunction, uint nArgs, IntPtr ppArgs);
+
+    [PreserveSig] int NewObject(IntPtr pConstructor, uint nArgs, IntPtr ppArgs);
+
+    [PreserveSig] int NewObjectNoConstructor(IntPtr pClass);
+
+    [PreserveSig] int NewString([MarshalAs(UnmanagedType.LPWStr)] string @string);
+
+    [PreserveSig] int NewArray(int elementType, IntPtr pElementClass, uint rank, IntPtr dims, IntPtr lowBounds);
+
+    [PreserveSig] int IsActive(out int pbActive);
+
+    [PreserveSig] int Abort();
+
+    [PreserveSig] int GetResult(out IntPtr ppResult);
+
+    [PreserveSig] int GetThread(out IntPtr ppThread);
+
+    [PreserveSig] int CreateValue(int elementType, IntPtr pElementClass, out IntPtr ppValue);
+}
+
+/// <summary>
+/// The newer evaluation interface, for the one thing the old one cannot do here: call a method on a
+/// generic type, which needs the type arguments passed alongside. Its <c>RudeAbort</c> is the second
+/// way to stop a runaway getter when the polite <c>Abort</c> will not take.
+/// </summary>
+[ComImport]
+[Guid(CorDebugGuids.Eval2)]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICorDebugEval2
+{
+    [PreserveSig] int CallParameterizedFunction(
+        [MarshalAs(UnmanagedType.Interface)] ICorDebugFunction pFunction,
+        uint nTypeArgs,
+        IntPtr ppTypeArgs,
+        uint nArgs,
+        IntPtr ppArgs);
+
+    [PreserveSig] int CreateValueForType(IntPtr pType, out IntPtr ppValue);
+
+    [PreserveSig] int NewParameterizedObject(IntPtr pConstructor, uint nTypeArgs, IntPtr ppTypeArgs, uint nArgs, IntPtr ppArgs);
+
+    [PreserveSig] int NewParameterizedObjectNoConstructor(IntPtr pClass, uint nTypeArgs, IntPtr ppTypeArgs);
+
+    [PreserveSig] int NewParameterizedArray(IntPtr pType, uint rank, IntPtr dims, IntPtr lowBounds);
+
+    [PreserveSig] int NewStringWithLength([MarshalAs(UnmanagedType.LPWStr)] string @string, uint uiLength);
+
+    [PreserveSig] int RudeAbort();
 }

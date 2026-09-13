@@ -99,6 +99,21 @@ internal static class Com
         }
     }
 
+    /// <summary>
+    /// Asks a pointer for an interface by id, returning an owned pointer to it or zero. The raw form,
+    /// for walking vtables where a typed wrapper is not wanted — the caller releases the result.
+    /// </summary>
+    internal static IntPtr QueryInterface(IntPtr unknown, string iid)
+    {
+        if (unknown == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        Guid guid = new(iid);
+        return Marshal.QueryInterface(unknown, in guid, out IntPtr answer) == 0 ? answer : IntPtr.Zero;
+    }
+
     /// <summary>Lets go of something <see cref="Keep{TInterface}"/> took.</summary>
     internal static void Drop(object? wrapper)
     {

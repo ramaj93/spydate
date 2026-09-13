@@ -9,6 +9,9 @@ namespace Spydate.Debugger.Managed;
 /// <summary>One field of a type, as the runtime will be asked for it.</summary>
 internal readonly record struct ManagedField(string Name, uint Token, string Type = "");
 
+/// <summary>One readable property of a type: its getter is run to find its value.</summary>
+internal readonly record struct ManagedProperty(string Name, uint GetterToken, bool IsStatic, string Type);
+
 /// <summary>A method as its metadata declares it: whether it has a <c>this</c>, and what its parameters are called.</summary>
 internal sealed record ManagedMethodShape(
     bool IsStatic,
@@ -67,6 +70,47 @@ internal sealed class ManagedTypes : IDisposable
     /// declares it, and asking the wrong class for it is an error rather than a wrong answer. What
     /// the reader wants first is what this type added, which is what this returns.
     /// </summary>
+    /// <summary>
+    /// The readable properties a type declares: name, the getter's token, whether it is static, and
+    /// its type. Its own only, like <see cref="Fields"/>.
+    ///
+    /// Getters that take a parameter — indexers — are left out: there is no single value to show for
+    /// <c>this[int i]</c>, only a value per index nobody has asked for. A property with no getter (a
+    /// set-only one, which is rare) has nothing to read and is left out too.
+    /// </summary>
+    internal IReadOnlyList<ManagedProperty> Properties(string? module, uint typeDefToken)
+        => Reading<IReadOnlyList<ManagedProperty>>(module, reader =>
+        {
+            var definition = reader.GetTypeDefinition(Handle(typeDefToken));
+            var scope = new GenericScope(Handle(typeDefToken), default);
+            var found = new List<ManagedProperty>();
+
+            foreach (var handle in definition.GetProperties())
+            {
+                var property = reader.GetPropertyDefinition(handle);
+                var getter = property.GetAccessors().Getter;
+                if (getter.IsNil)
+                {
+                    continue;
+                }
+
+                var method = reader.GetMethodDefinition(getter);
+                var signature = method.DecodeSignature(new ManagedTypeNames(reader), scope);
+                if (signature.ParameterTypes.Length > 0)
+                {
+                    continue;
+                }
+
+                found.Add(new ManagedProperty(
+                    reader.GetString(property.Name),
+                    (uint)MetadataTokens.GetToken(getter),
+                    !signature.Header.IsInstance,
+                    signature.ReturnType));
+            }
+
+            return found;
+        }) ?? Array.Empty<ManagedProperty>();
+
     internal IReadOnlyList<ManagedField> Fields(string? module, uint typeDefToken, int limit)
     {
         if (Reader(module) is not { } reader)

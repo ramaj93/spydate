@@ -490,6 +490,11 @@
                                                          Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
                                                          ToolTip="Arguments and locals of the frame being looked at. Open a row to see inside it."
                                                          AutomationProperties.Name="Locals pane" />
+                                            <RadioButton x:Name="PaneCallStack" DockPanel.Dock="Left"
+                                                         Style="{StaticResource StripTab}" Content="Call stack"
+                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         ToolTip="The frames of the thread being looked at. Pick one to read its locals."
+                                                         AutomationProperties.Name="Call stack pane" />
                                             <RadioButton x:Name="PaneManagedThreads" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Threads"
                                                          Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
@@ -689,6 +694,11 @@
                                                                             <DataTrigger Binding="{Binding Kind}" Value="Unavailable">
                                                                                 <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
                                                                             </DataTrigger>
+                                                                            <!-- A property not yet run, or one that threw. A resolved value takes
+                                                                                 its real kind's colour instead. -->
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="Property">
+                                                                                <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
+                                                                            </DataTrigger>
                                                                         </Style.Triggers>
                                                                     </Style>
                                                                 </TextBlock.Style>
@@ -703,6 +713,41 @@
 
                                         <!-- Every thread, as a Threads window shows them. Picking one moves
                                              the values, the arrow and stepping to it. -->
+                                        <!-- The call stack, innermost first. Picking a frame moves the
+                                             locals and the arrow to it. -->
+                                        <DataGrid ItemsSource="{Binding CallStack}" AutoGenerateColumns="False"
+                                                  IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  SelectedItem="{Binding SelectedCallFrame, Mode=TwoWay}"
+                                                  CanUserSortColumns="False" SelectionMode="Single" SelectionUnit="FullRow"
+                                                  Visibility="{Binding IsChecked, ElementName=PaneCallStack, Converter={StaticResource BoolToVisibility}}"
+                                                  ToolTip="Pick a frame to read its locals"
+                                                  AutomationProperties.Name="Call stack">
+                                            <DataGrid.Columns>
+                                                <DataGridTemplateColumn Header="" Width="18">
+                                                    <DataGridTemplateColumn.CellTemplate>
+                                                        <DataTemplate>
+                                                            <TextBlock Text="&#x25B6;" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                       Foreground="{DynamicResource Debug.Current}"
+                                                                       Visibility="{Binding IsCurrent, Converter={StaticResource BoolToVisibility}}" />
+                                                        </DataTemplate>
+                                                    </DataGridTemplateColumn.CellTemplate>
+                                                </DataGridTemplateColumn>
+                                                <DataGridTextColumn Header="Frame" Binding="{Binding Display}" Width="*"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}">
+                                                    <DataGridTextColumn.CellStyle>
+                                                        <Style TargetType="DataGridCell">
+                                                            <Style.Triggers>
+                                                                <!-- A native or runtime frame is greyed: there is nothing to read in it. -->
+                                                                <DataTrigger Binding="{Binding IsManaged}" Value="False">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </DataGridTextColumn.CellStyle>
+                                                </DataGridTextColumn>
+                                            </DataGrid.Columns>
+                                        </DataGrid>
+
                                         <DataGrid ItemsSource="{Binding ManagedThreads}" AutoGenerateColumns="False"
                                                   IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
                                                   SelectedItem="{Binding SelectedManagedThread, Mode=TwoWay}"

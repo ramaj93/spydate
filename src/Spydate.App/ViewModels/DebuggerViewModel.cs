@@ -93,6 +93,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Threads.Clear();
         Variables.Clear();
         ManagedThreads.Clear();
+        CallStack.Clear();
         _expanded.Clear();
         _statements.Clear();   // a different binary has different methods under the same tokens
         _localNames.Clear();
@@ -216,6 +217,18 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>True while the selection is being set from the session rather than by a person.</summary>
     private bool _quietManagedThread;
+
+    /// <summary>The call stack of the thread being looked at, innermost first.</summary>
+    public ObservableCollection<ManagedFrameRow> CallStack { get; } = new();
+
+    /// <summary>
+    /// The frame picked in the Call Stack pane. Picking one moves the locals and the arrow to it,
+    /// so a caller's variables can be read, not only the method that stopped.
+    /// </summary>
+    [ObservableProperty]
+    private ManagedFrameRow? _selectedCallFrame;
+
+    private bool _quietCallFrame;
 
     /// <summary>The top of the stack as of the last stop.</summary>
     public ObservableCollection<StackRow> Stack { get; } = new();
@@ -804,6 +817,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             // about somewhere the program no longer is.
             Variables.Clear();
             ManagedThreads.Clear();
+            CallStack.Clear();
             _shownStops = -1;
             NotifyCommands();
             return;
@@ -817,6 +831,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             _shownStops = session.Stops;
             RefreshVariables(session);
             RefreshManagedThreads(session);
+            RefreshCallStack(session);
         }
 
         NotifyCommands();
@@ -882,9 +897,57 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         int insert = at + 1;
+        var opened = new List<VariableRow>();
         foreach (var child in session.Children(row.Path))
         {
-            Variables.Insert(insert++, new VariableRow(child, row.Depth + 1, OnVariableToggled));
+            var childRow = new VariableRow(child, row.Depth + 1, OnVariableToggled);
+            Variables.Insert(insert++, childRow);
+            opened.Add(childRow);
+        }
+
+        // Property rows come up showing "…" and are filled in by running their getters, one at a
+        // time and off the window's thread — running code in the debuggee is not something to do on
+        // the thread painting the panel. Fields and elements are already final and are left alone.
+        var properties = opened.Where(r => r.Getter is not null).ToList();
+        if (properties.Count > 0)
+        {
+            _ = EvaluatePropertiesAsync(properties);
+        }
+    }
+
+    /// <summary>
+    /// Fills in each property row by running its getter. Sequential, because every one continues the
+    /// debuggee and only one evaluation can be in flight; and abandoned the moment the process moves
+    /// on, so a value from a frame that is no longer there is never written into the panel.
+    /// </summary>
+    private async Task EvaluatePropertiesAsync(IReadOnlyList<VariableRow> rows)
+    {
+        int stops = _managed?.Stops ?? -1;
+
+        foreach (var row in rows)
+        {
+            if (_managed is not { } session || !IsStopped || session.Stops != stops || row.Getter is null)
+            {
+                return;
+            }
+
+            var getter = row.Getter;
+            var path = row.Path;
+            var name = row.Name;
+            var type = row.Type;
+
+            var evaluated = await Task.Run(() => session.EvaluateProperty(path, getter, name, type));
+
+            // Back on the window's thread. Only written if nothing has moved underneath in the
+            // meantime — a step, a continue, another thread selected — and the row is still shown.
+            if (evaluated is not null && _managed == session && IsStopped && session.Stops == stops && Variables.Contains(row))
+            {
+                row.Resolve(evaluated);
+            }
+            else
+            {
+                return;
+            }
         }
     }
 
@@ -970,6 +1033,75 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         // Now rather than when the session's note arrives, so the pane answers the click it was given.
         SyncManaged();
+    }
+
+    private void RefreshCallStack(ManagedDebugSession session)
+    {
+        CallStack.Clear();
+        foreach (var frame in session.Frames())
+        {
+            var row = ManagedFrameRow.From(frame);
+            CallStack.Add(row);
+
+            if (row.IsCurrent)
+            {
+                _quietCallFrame = true;
+                SelectedCallFrame = row;
+                _quietCallFrame = false;
+            }
+        }
+    }
+
+    partial void OnSelectedCallFrameChanged(ManagedFrameRow? value)
+    {
+        if (_quietCallFrame || value is null || value.IsCurrent || _managed is not { } session)
+        {
+            return;
+        }
+
+        if (!value.IsManaged)
+        {
+            // A native or runtime frame has no locals to move to; leave the selection where it was.
+            _quietCallFrame = true;
+            SelectedCallFrame = CallStack.FirstOrDefault(f => f.IsCurrent);
+            _quietCallFrame = false;
+            return;
+        }
+
+        if (session.SelectFrame(value.Index) is { } problem)
+        {
+            Add(problem);
+            return;
+        }
+
+        // Re-read the frame's locals and move the arrow, and re-mark the stack — but do not re-read
+        // the whole stack, which would fold the just-made selection back to the innermost frame.
+        _shownStops = session.Stops;
+        RefreshVariables(session);
+        Remark(value.Index);
+        ExecutionAddress = Located(session.StoppedAt);
+        if (ExecutionAddress is { } at)
+        {
+            StoppedAt?.Invoke(this, at);
+        }
+
+        NotifyCommands();
+    }
+
+    /// <summary>Moves the current-frame marker to the picked frame, without rebuilding the list.</summary>
+    private void Remark(int index)
+    {
+        _quietCallFrame = true;
+        for (int i = 0; i < CallStack.Count; i++)
+        {
+            if (CallStack[i].IsCurrent != (CallStack[i].Index == index))
+            {
+                CallStack[i] = CallStack[i] with { IsCurrent = CallStack[i].Index == index };
+            }
+        }
+
+        SelectedCallFrame = CallStack.FirstOrDefault(f => f.Index == index);
+        _quietCallFrame = false;
     }
 
     private void OnReported(object? sender, DebugEvent e)
@@ -1391,6 +1523,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         Variables.Clear();
         ManagedThreads.Clear();
+        CallStack.Clear();
         _shownStops = -1;
 
         LivePatches.Clear();

@@ -15,6 +15,7 @@ public enum ManagedValueKind
     Character,
     Object,
     Enum,
+    Property,
     Unavailable,
 }
 
@@ -71,7 +72,17 @@ public sealed record ManagedVariable(
     string Type,
     ManagedValueKind Kind,
     bool Expandable,
-    ManagedValuePath Path);
+    ManagedValuePath Path,
+    ManagedPropertyGetter? Getter = null);
+
+/// <summary>
+/// What it takes to read a property: the module and token of its getter, and whether it is static.
+///
+/// A property has no value to read out of memory — it is a method, and its value is whatever running
+/// that method returns. The row carries this so the caller can run the getter when a person opens the
+/// object, rather than the tree running code the moment it is drawn.
+/// </summary>
+public sealed record ManagedPropertyGetter(string Module, uint Token, bool IsStatic);
 
 /// <summary>
 /// A value as a tree, one level at a time.
@@ -426,8 +437,22 @@ internal static class ManagedVariables
                     break;
                 }
 
+                var properties = types.Properties(link.Module, link.Token);
+
+                // An auto-property's backing field carries the same value under the same name, so the
+                // property row stands for it and the field is not listed a second time. Only in the
+                // tree — the flat preview has no property rows, so there it keeps the field.
+                var covered = properties
+                    .Select(p => p.Name)
+                    .ToHashSet(StringComparer.Ordinal);
+
                 foreach (var field in types.Fields(link.Module, link.Token, int.MaxValue))
                 {
+                    if (covered.Contains(field.Name))
+                    {
+                        continue;
+                    }
+
                     var at = path.Then(new ManagedStep(FileName(link.Module), link.Token, field.Token));
                     var row = Com.Borrow<ICorDebugObjectValue, ManagedVariable>(held, obj =>
                     {
@@ -447,6 +472,24 @@ internal static class ManagedVariables
                     }) ?? Unavailable(field.Name, field.Type, at);
 
                     rows.Add((row, owner));
+                }
+
+                // Properties are rows too, but their values are not read here — a property is a
+                // method, and running it means running code in the process, which cannot be done
+                // while a frame is borrowed. Each row carries what it takes to run the getter later;
+                // the caller evaluates them one at a time. Its value stays "…" until it does.
+                foreach (var property in properties)
+                {
+                    rows.Add((
+                        new ManagedVariable(
+                            property.Name,
+                            "…",
+                            property.Type,
+                            ManagedValueKind.Property,
+                            false,
+                            path,
+                            new ManagedPropertyGetter(FileName(link.Module), property.GetterToken, property.IsStatic)),
+                        owner));
                 }
             }
 

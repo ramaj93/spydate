@@ -458,3 +458,35 @@ mistake the native panel was corrected for.
 did, and no boxed value was ever unboxed. It surfaced only because a purpose-built fixture put a boxed
 `42` in front of the tree. The two ids added for this work were probed on a live value first, and the
 box id is now pinned by a test that asks a real box.
+
+**The call stack is walked through the runtime's chains, and a frame can be looked at.** A thread's
+stack is a list of chains — runs of frames of one kind — not a flat list, and that is the fix for a
+waiting thread reading "not in managed code": its innermost chain is the native wait and the managed
+frames are one chain down, so asking only for the active frame finds nothing. Walking the chains
+finds them. Native and runtime frames are shown too, greyed, so the stack is not silently shortened.
+Picking a frame sets a selected index the value reads honour, so a caller's locals and the arrow move
+to it while the process stays put; a step made against the previously-looked-at frame is retired, or
+it would complete somewhere the reader is no longer looking.
+
+**A property is read by running its getter, and that is fenced because it runs the program's code.**
+A property has no value in memory — it is a method, and the only way to know what it returns is to
+run it, which is function evaluation: the debugger asks the runtime to call the getter on the stopped
+thread and continue until it returns. This is the sharpest tool in the debugger, so it is the most
+constrained. It happens only when a person opens the object, never as the tree is drawn — the rows
+come up showing "…" and are filled in one at a time, off the window's thread. Every other thread is
+suspended for the duration, so the getter's work is not raced by the rest of the program. There is a
+timeout, and a getter still running at the end of it is aborted (politely, then rudely). A getter
+that throws reports what it threw rather than a value it never produced. The result is a display
+string, not an expandable subtree: an evaluation result is not reachable from a frame by a path, and
+without a path there is nothing to walk to open it — expanding one would need a GC handle to keep the
+result alive across a step, which is future work. The target of an instance getter is read from the
+frame before the process runs and released before it does, so no frame-derived pointer is touched
+after it goes stale. A getter on a generic type needs its type arguments passed too
+(`CallParameterizedFunction`), which is not built yet; those read "(cannot evaluate)".
+
+**An auto-property's backing field is hidden in the tree but not in the flat preview.** The tree
+lists the property, whose getter reads the same value under the same name, so the field beside it
+would be the one thing twice. The agent's one-line preview has no property rows and cannot evaluate,
+so there the backing field is what carries the value and it stays. The hiding is therefore in the
+tree's field listing, keyed on a field whose name matches a property of the same class, not in the
+shared metadata reader both use.
