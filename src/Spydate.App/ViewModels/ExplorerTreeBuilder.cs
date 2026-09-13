@@ -68,7 +68,13 @@ public static class ExplorerTreeBuilder
         if (binary.Managed is { } managed)
         {
             var asmNode = root.Add(new ExplorerNodeViewModel("Assembly", SymbolRegular.Library24, new ManagedAssemblyTarget(), managed.TargetFramework));
-            asmNode.ChildrenFactory = () => managed.AssemblyReferences.Select(r => new ExplorerNodeViewModel(r, SymbolRegular.Link24, new ManagedAssemblyTarget()));
+            asmNode.ChildrenFactory = () => managed.References.Select(reference =>
+            {
+                var r = reference;
+                var refNode = new ExplorerNodeViewModel(r.Display, SymbolRegular.Link24, null);
+                refNode.ChildrenFactory = () => ReferenceChildren(managed, r);
+                return refNode;
+            });
 
             var namespaces = root.Add(new ExplorerNodeViewModel("Namespaces", SymbolRegular.Braces24, new ManagedAssemblyTarget(), managed.Namespaces.Count.ToString()));
             namespaces.IsExpanded = true;
@@ -112,12 +118,35 @@ public static class ExplorerTreeBuilder
     public static IEnumerable<ExplorerNodeViewModel> FunctionNodes(BinaryAnalysis analysis)
         => analysis.Functions.Select(f => new ExplorerNodeViewModel(f.Name, SymbolRegular.Flash24, new DisassemblyTarget(f.EntryVa, f.Name), $"0x{f.EntryVa:X} · {f.InstructionCount} insns"));
 
-    private static ExplorerNodeViewModel TypeNode(ManagedAssembly managed, ManagedType type)
+    /// <summary>
+    /// A reference's own types and members, loaded on expansion — the resolved assembly grouped into
+    /// namespaces, the same shape the opened assembly has. Its nodes do not open a document yet: a type
+    /// in another assembly decompiles through that assembly, not this one, which is a second step; for
+    /// now the reference is there to walk. When the assembly is not on this machine, one node says so.
+    /// </summary>
+    private static IEnumerable<ExplorerNodeViewModel> ReferenceChildren(ManagedAssembly parent, ManagedReference reference)
     {
-        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), new ManagedTypeTarget(type), type.Kind.ToString().ToLowerInvariant());
+        var resolved = parent.Resolve(reference);
+        if (resolved is null)
+        {
+            return [new ExplorerNodeViewModel("could not be found", SymbolRegular.Warning24, null, "not on this machine")];
+        }
+
+        return resolved.Namespaces.Select(ns =>
+        {
+            var n = ns;
+            var nsNode = new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString(CultureInfo.InvariantCulture));
+            nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(resolved, t, openable: false));
+            return nsNode;
+        });
+    }
+
+    private static ExplorerNodeViewModel TypeNode(ManagedAssembly managed, ManagedType type, bool openable = true)
+    {
+        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), openable ? new ManagedTypeTarget(type) : null, type.Kind.ToString().ToLowerInvariant());
         node.ChildrenFactory = () =>
-            type.NestedTypes.Select(n => TypeNode(managed, n))
-                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), new ManagedMemberTarget(type, m))));
+            type.NestedTypes.Select(n => TypeNode(managed, n, openable))
+                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), openable ? new ManagedMemberTarget(type, m) : null)));
         return node;
     }
 

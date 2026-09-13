@@ -22,6 +22,38 @@ public class ManagedDecompilerTests
     }
 
     [Fact]
+    public void ReferencesResolveToAssembliesWeCanWalkInto()
+    {
+        using var asm = ManagedAssembly.Load(CoreAssemblyPath);
+        Assert.NotEmpty(asm.References);
+
+        // The runtime this test runs on is on disk, so at least one reference — a core one like
+        // System.Private.CoreLib — resolves to an assembly whose own types can be read. That is what
+        // lets the explorer append a reference's namespaces and members.
+        var walkable = asm.References
+            .Select(r => asm.Resolve(r))
+            .FirstOrDefault(a => a is { Namespaces.Count: > 0 });
+
+        Assert.NotNull(walkable);
+        Assert.NotNull(walkable!.Path);
+        Assert.Contains(walkable.Namespaces, n => n.Types.Count > 0);
+    }
+
+    [Fact]
+    public void ResolvingAReferenceIsCachedAndOwned()
+    {
+        using var asm = ManagedAssembly.Load(CoreAssemblyPath);
+        var reference = asm.References[0];
+
+        var first = asm.Resolve(reference);
+        var second = asm.Resolve(reference);
+
+        // The same instance, so a reference is loaded once and disposed with the assembly that owns
+        // it rather than reloaded on every expansion.
+        Assert.Same(first, second);
+    }
+
+    [Fact]
     public void DecompilesTypeToCSharp()
     {
         using var asm = ManagedAssembly.Load(CoreAssemblyPath);

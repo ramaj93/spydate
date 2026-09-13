@@ -43,6 +43,12 @@ public sealed record ManagedNamespace(string Name, IReadOnlyList<ManagedType> Ty
     public override string ToString() => DisplayName;
 }
 
+/// <summary>A referenced assembly: its display name, and the handle that resolves it to a file.</summary>
+public sealed record ManagedReference(string Display, AssemblyReferenceHandle Handle)
+{
+    public override string ToString() => Display;
+}
+
 /// <summary>
 /// A loaded .NET assembly: metadata browsing (namespaces → types → members), plus a shared
 /// <see cref="ManagedDecompiler"/> for C# and IL output. Wraps the ILSpy engine.
@@ -52,6 +58,8 @@ public sealed class ManagedAssembly : IDisposable
     private readonly UniversalAssemblyResolver _resolver;
     private readonly Lazy<CSharpDecompiler> _csharp;
     private readonly Lazy<IReadOnlyList<ManagedNamespace>> _namespaces;
+    private readonly Dictionary<AssemblyReferenceHandle, ManagedAssembly?> _resolved = new();
+    private readonly Lock _resolveLock = new();
 
     private ManagedAssembly(PEFile module, string? path)
     {
@@ -125,6 +133,58 @@ public sealed class ManagedAssembly : IDisposable
             .Select(r => $"{Metadata.GetString(r.Name)}, Version={r.Version}")
             .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+    /// <summary>
+    /// Referenced assemblies, each carrying the handle that <see cref="Resolve"/> loads it from — the
+    /// display names plus what it takes to open them, for a tree that lets you walk into a reference.
+    /// </summary>
+    public IReadOnlyList<ManagedReference> References =>
+        Metadata.AssemblyReferences
+            .Select(h =>
+            {
+                var r = Metadata.GetAssemblyReference(h);
+                return new ManagedReference($"{Metadata.GetString(r.Name)}, Version={r.Version}", h);
+            })
+            .OrderBy(r => r.Display, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>
+    /// Loads a referenced assembly from wherever the resolver finds it — the runtime pack, the GAC, or
+    /// beside this one — or null when it is not on this machine or cannot be read. The result is cached
+    /// and owned: it lives as long as this assembly and is disposed with it, and the same reference is
+    /// resolved only once. This is what lets the explorer append a reference's own types and members.
+    /// </summary>
+    public ManagedAssembly? Resolve(ManagedReference reference)
+    {
+        ArgumentNullException.ThrowIfNull(reference);
+
+        lock (_resolveLock)
+        {
+            if (_resolved.TryGetValue(reference.Handle, out var cached))
+            {
+                return cached;
+            }
+
+            ManagedAssembly? loaded = null;
+            try
+            {
+                var resolved = _resolver.Resolve(new ICSharpCode.Decompiler.Metadata.AssemblyReference(Module, reference.Handle));
+                if (resolved?.FileName is { Length: > 0 } file && File.Exists(file))
+                {
+                    loaded = Load(file);
+                }
+            }
+            catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or IOException or ArgumentException)
+            {
+                // An assembly that will not read is, to someone browsing the tree, the same as one that
+                // is not there: the node says so rather than the whole tree failing to build.
+                loaded = null;
+            }
+
+            _resolved[reference.Handle] = loaded;
+            return loaded;
+        }
+    }
 
     /// <summary>Full name of the assembly including version and public key token.</summary>
     public string FullName
@@ -214,5 +274,15 @@ public sealed class ManagedAssembly : IDisposable
     public void Dispose()
     {
         Module.Dispose();
+
+        lock (_resolveLock)
+        {
+            foreach (var resolved in _resolved.Values)
+            {
+                resolved?.Dispose();
+            }
+
+            _resolved.Clear();
+        }
     }
 }
