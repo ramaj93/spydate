@@ -150,15 +150,17 @@
                 <!-- F5 is already Re-analyze and has been since before there was a debugger, so
                      these avoid it rather than quietly changing what a familiar key does. -->
                 <MenuItem Header="_Debug">
-                    <MenuItem Header="_Run under the debugger…" Command="{Binding Debugger.StartCommand}"
-                              ToolTip="Starts the open binary on this machine. It will do whatever it does." />
-                    <!-- Beside Run rather than off on its own, because it is a choice about how the
-                         run will be done and is settled the moment one starts. Only for an IL-only
-                         assembly: everything else is native already. -->
-                    <MenuItem Header="Debug _natively" IsCheckable="True"
-                              IsChecked="{Binding Debugger.DebugNatively, Mode=TwoWay}"
-                              IsEnabled="{Binding Debugger.CanChooseDebugger}"
-                              ToolTip="Drive this .NET program with the native debugger, so breakpoints and patches can go into the native DLLs it loads. No managed frames, locals or IL stepping in this mode." />
+                    <!-- Opens the run configuration rather than starting straight away: which
+                         engine, what to start, its arguments and where it should stop are all one
+                         decision, made in one place, and the dialog comes up with whatever was used
+                         for this binary last time. -->
+                    <MenuItem Header="_Start Debugging…" Command="{Binding Debugger.StartCommand}"
+                              ToolTip="Choose how to run the open binary, then start it on this machine. It will do whatever it does." />
+                    <!-- Not built yet, and shown rather than hidden so the gap is visible instead of
+                         looking like an oversight. The debug loop can only launch a process today;
+                         attaching to one already running is its own piece of work (see ROADMAP). -->
+                    <MenuItem Header="Attach to _Process…" IsEnabled="False"
+                              ToolTip="Not yet: the debugger can only start a process, not attach to one that is already running." />
                     <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
                     <Separator />
                     <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
@@ -476,21 +478,6 @@
                                                 <ui:SymbolIcon Symbol="MoreVertical20" />
                                             </Button>
 
-                                            <!-- Only for an IL-only assembly, and only before it
-                                                 starts: which debugger owns the process is settled
-                                                 when the session is made, and the two cannot both
-                                                 attach. Ticked, a .NET program is driven by the
-                                                 native loop, which is the only way to stop in or
-                                                 patch the native DLLs it loads — at the cost of
-                                                 there being no managed frame or locals, because
-                                                 nothing is then talking to the runtime. -->
-                                            <CheckBox DockPanel.Dock="Left" VerticalAlignment="Center" Margin="6,0,0,0"
-                                                      Content="Native"
-                                                      IsChecked="{Binding DebugNatively, Mode=TwoWay}"
-                                                      IsEnabled="{Binding CanChooseDebugger}"
-                                                      Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
-                                                      ToolTip="Debug this .NET program with the native debugger, so breakpoints and patches can go into the native DLLs it loads. No managed frames, locals or IL stepping in this mode."
-                                                      AutomationProperties.Name="Debug natively" />
 
                                             <Border DockPanel.Dock="Left" Width="1" Margin="6,4"
                                                     Background="{DynamicResource Chrome.Border}" />

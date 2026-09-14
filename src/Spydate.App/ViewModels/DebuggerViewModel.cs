@@ -101,9 +101,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RestoreBreakpoints();
         OnPropertyChanged(nameof(NeedsHost));
 
-        // A choice made about the last binary is not a choice about this one, so it goes back to the
-        // default before anything is told to look again.
-        DebugNatively = false;
+        // Read back rather than reset. These are remembered per binary exactly as the host and the
+        // arguments are, so reopening something picks up the way it was last run — which is the whole
+        // point of remembering it.
+        DebugNatively = target?.Engine == DebugEngine.Native;
+        BreakAt = target?.BreakAt ?? DebugBreakAt.CreateProcess;
 
         // Which debugger applies follows from the file, so the panel rearranges itself when a
         // different one is opened rather than when something is run.
@@ -126,11 +128,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Null for whatever the default is, never the default itself. Writing it would give every
+        // binary anybody opens an entry in the remembered targets, because IsEmpty would stop being
+        // true the moment the panel read its own defaults back.
         DebugTargets.Set(path, new DebugTarget
         {
             Host = Host.Trim() is { Length: > 0 } host ? host : null,
             Arguments = Arguments.Trim() is { Length: > 0 } arguments ? arguments : null,
             WorkingDirectory = WorkingDirectory.Trim() is { Length: > 0 } directory ? directory : null,
+            Engine = DebugNatively ? DebugEngine.Native : null,
+            BreakAt = BreakAt == DebugBreakAt.CreateProcess ? null : BreakAt,
         });
     }
 
@@ -298,6 +305,59 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private bool _debugNatively;
 
     /// <summary>
+    /// Remembered like the host and the arguments are, because it is the same kind of thing: how to
+    /// run this binary, decided once and wanted again next time. Resetting it on every open — which
+    /// is what this did when the choice lived on a toolbar checkbox — meant choosing it again for
+    /// every session.
+    /// </summary>
+    partial void OnDebugNativelyChanged(bool value)
+    {
+        RememberTarget();
+        NotifyCommands();
+    }
+
+    /// <summary>
+    /// Where a run stops of its own accord. <see cref="DebugBreakAt.CreateProcess"/> is the default
+    /// because it is what both engines already did: the native loop stops at the loader break, and
+    /// the managed one was started with holdAtStart set.
+    /// </summary>
+    [ObservableProperty]
+    private DebugBreakAt _breakAt = DebugBreakAt.CreateProcess;
+
+    partial void OnBreakAtChanged(DebugBreakAt value) => RememberTarget();
+
+    /// <summary>Whether the run can still be configured: not while it is running, since it is settled by then.</summary>
+    public bool CanEditRun => !IsDebugging;
+
+    /// <summary>One row of a chooser: what it means, and what to call it on screen.</summary>
+    public sealed record EngineChoice(bool Native, string Label);
+
+    public sealed record BreakAtChoice(DebugBreakAt Value, string Label);
+
+    /// <summary>
+    /// The engines, for the run configuration. Only a real choice for an IL-only assembly — a file
+    /// with native code of its own has nothing to decide — which is what <see cref="CanChooseDebugger"/>
+    /// is for.
+    /// </summary>
+    public IReadOnlyList<EngineChoice> EngineChoices { get; } =
+    [
+        new EngineChoice(false, ".NET CLR"),
+        new EngineChoice(true, "Native"),
+    ];
+
+    /// <summary>
+    /// Where to stop, named as dnSpy names them. The last two are not wired yet and say so: a
+    /// dropdown entry that silently does nothing is worse than one that admits it.
+    /// </summary>
+    public IReadOnlyList<BreakAtChoice> BreakAtChoices { get; } =
+    [
+        new BreakAtChoice(DebugBreakAt.None, "Don't break"),
+        new BreakAtChoice(DebugBreakAt.CreateProcess, "Create Process"),
+        new BreakAtChoice(DebugBreakAt.EntryPoint, "Entry Point (not yet)"),
+        new BreakAtChoice(DebugBreakAt.ModuleCctorOrEntryPoint, "Module cctor or Entry Point (not yet)"),
+    ];
+
+    /// <summary>
     /// Whether debugging this binary means driving the CLR rather than the process.
     ///
     /// The decision, as against <see cref="IsManaged"/>'s fact. Everything that used to ask whether
@@ -345,6 +405,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(IsDebugging))]
     [NotifyPropertyChangedFor(nameof(IsStopped))]
     [NotifyPropertyChangedFor(nameof(CanChooseDebugger))]
+    [NotifyPropertyChangedFor(nameof(CanEditRun))]
     private DebugState _state = DebugState.NotStarted;
 
     [ObservableProperty]
@@ -376,6 +437,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private bool _starting;
 
     /// <summary>
+    /// Set when the next stop is to be let go of without being shown.
+    ///
+    /// "Don't break" on the native side cannot be asked of the loop: it stops at the loader break
+    /// whatever anybody wants, because that is the moment its breakpoints go in. So the stop happens
+    /// and is continued from here, once, before the panel has said anything about it. One shot on
+    /// purpose — a flag left set would swallow the first real breakpoint instead.
+    /// </summary>
+    private bool _skipFirstStop;
+
+    /// <summary>
     /// Starts the open binary under a debugger.
     ///
     /// Asynchronous for the managed half of it, and that is not a refinement. Getting hold of a
@@ -403,6 +474,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             Status = _starting ? "It is already starting." : "It is already running.";
             Add("already running — stop it before starting it again");
+            return;
+        }
+
+        // Asked before anything starts, and already filled in with whatever was used for this binary
+        // last time. Closing it is not discarding: every box writes itself through as it is edited,
+        // the way it always has, so Close keeps the settings and only declines to run.
+        var configure = new Views.RunConfigWindow(this) { Owner = Application.Current?.MainWindow };
+        if (configure.ShowDialog() != true)
+        {
             return;
         }
 
@@ -453,6 +533,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             return;
         }
+
+        // The loader break is coming whether or not anybody wants it; "Don't break" means letting go
+        // of it the instant it arrives. See _skipFirstStop.
+        _skipFirstStop = BreakAt == DebugBreakAt.None;
 
         var session = new DebugSession();
         session.Reported += OnReported;
@@ -542,8 +626,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             // Off the window's thread and waited for, rather than done on it. The await comes back
             // here, on the thread that owns the bound collections, so everything below is unchanged.
+            // Held unless the run was asked to go straight through. The runtime does this properly,
+            // where the native loop has to be continued out of a stop it takes regardless.
             problem = await Task.Run(
-                () => session.Start(run, arguments, directory, holdAtStart: true));
+                () => session.Start(run, arguments, directory, holdAtStart: BreakAt != DebugBreakAt.None));
         }
         finally
         {
@@ -1302,6 +1388,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     break;
 
                 case "stopped":
+                    // Let go of before the panel is told anything, so a run asked not to break never
+                    // appears to have stopped. Cleared first: this is good for one stop, and the next
+                    // one is a breakpoint somebody actually set.
+                    if (_skipFirstStop)
+                    {
+                        _skipFirstStop = false;
+                        _session?.Continue();
+                        break;
+                    }
+
                     State = DebugState.Stopped;
                     ExecutionAddress = e.Address;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";

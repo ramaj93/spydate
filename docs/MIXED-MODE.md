@@ -205,6 +205,13 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   is retried with the page unprotected, a readable-but-unwritable address is hard to construct on
   purpose. What is covered is the unmapped case, a patch that cannot be written reporting instead of
   returning success, and the process id
+- ✅ The choice is made in the run configuration, not on a toggle of its own. `Start Debugging…`
+  opens the Debug Program dialog — engine, executable, arguments, folder, break-at — filled in with
+  whatever was used for this binary last time, because all of it is remembered per binary in
+  `debug.json` beside the host. The engine sat on a toolbar checkbox first, which put one launch
+  option somewhere different from every other launch option; a dialog on starting is dnSpy's shape
+  and the right one. `Attach to Process…` is on the menu, disabled, because the debug loop can only
+  launch — see ROADMAP
 - ✅ A managed binary may choose the native engine. `IsManaged` used to mean two things at once —
   "this file is IL-only" and "the CLR will be driving it" — and separating them is the whole change:
   `DebugNatively` is the choice, `UsesManagedDebugger` is `IsManaged && !DebugNatively`, and

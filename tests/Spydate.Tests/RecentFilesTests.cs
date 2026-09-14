@@ -148,6 +148,95 @@ public sealed class DebugTargetTests
         }
     }
 
+    /// <summary>
+    /// The engine and the break-at come back too, and come back as names.
+    ///
+    /// Written as names rather than numbers on purpose: the file is indented and meant to be read,
+    /// and a number would change meaning without a word if either enum were ever reordered. So the
+    /// text is asserted as well as the round trip — a number here would pass the round trip and be a
+    /// trap for the next person to add a member.
+    /// </summary>
+    [Fact]
+    public void TheEngineAndBreakAtComeBackAsNames()
+    {
+        string path = Temp();
+        try
+        {
+            DebugTargets.Set(@"D:\bin\thing.dll", new DebugTarget
+            {
+                Host = @"D:\bin\host.exe",
+                Engine = DebugEngine.Native,
+                BreakAt = DebugBreakAt.EntryPoint,
+            }, path);
+
+            var read = DebugTargets.For(@"D:\bin\thing.dll", path);
+
+            Assert.NotNull(read);
+            Assert.Equal(DebugEngine.Native, read!.Engine);
+            Assert.Equal(DebugBreakAt.EntryPoint, read.BreakAt);
+
+            string written = File.ReadAllText(path);
+            Assert.Contains("\"Native\"", written, StringComparison.Ordinal);
+            Assert.Contains("\"EntryPoint\"", written, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// Choosing only how to run it is still a choice worth keeping.
+    ///
+    /// A target holding nothing but an engine used to count as empty, because empty meant "no host,
+    /// no arguments, no directory" — and an empty target is dropped rather than stored. So picking
+    /// the native debugger for a .NET assembly and nothing else would have been forgotten on the way
+    /// out, which is exactly the setting somebody would expect to stick.
+    /// </summary>
+    [Fact]
+    public void AnEngineOnItsOwnIsRemembered()
+    {
+        string path = Temp();
+        try
+        {
+            DebugTargets.Set(@"D:\bin\thing.dll", new DebugTarget { Engine = DebugEngine.Native }, path);
+            Assert.Equal(DebugEngine.Native, DebugTargets.For(@"D:\bin\thing.dll", path)?.Engine);
+
+            DebugTargets.Set(@"D:\bin\other.dll", new DebugTarget { BreakAt = DebugBreakAt.None }, path);
+            Assert.Equal(DebugBreakAt.None, DebugTargets.For(@"D:\bin\other.dll", path)?.BreakAt);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// Defaults are written as null, so opening a binary does not give it an entry.
+    ///
+    /// The panel reads its own defaults back into itself whenever a binary is opened, and every one
+    /// of those writes through to here. If a default were stored rather than left null, the file
+    /// would collect an entry for every binary anybody had ever looked at — none of which anybody
+    /// chose to run.
+    /// </summary>
+    [Fact]
+    public void ATargetHoldingOnlyDefaultsIsNotStored()
+    {
+        string path = Temp();
+        try
+        {
+            DebugTargets.Set(@"D:\bin\thing.dll", new DebugTarget { Engine = null, BreakAt = null }, path);
+
+            Assert.Null(DebugTargets.For(@"D:\bin\thing.dll", path));
+            Assert.Empty(DebugTargets.All(path));
+            Assert.False(File.Exists(path), "a binary nobody configured was given an entry");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Fact]
     public void TheSameBinaryIsTheSameEntryHoweverThePathWasTyped()
     {

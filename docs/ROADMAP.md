@@ -367,3 +367,14 @@ native side already reads it, because native is what it is.
   constraint is that a process has one debug port, so the native loop keeps it and the DAC rides
   along without one. The design, the spike evidence that settled it, the limits it found — a cold
   method's first call cannot be caught — and the phased plan are all in `MIXED-MODE.md`
+- ⬜ **Attach to a process that is already running.** `DebugSession` can only launch: it calls
+  `CreateProcess` with `DEBUG_ONLY_THIS_PROCESS` and owns the process from its first instruction.
+  Attaching is `DebugActiveProcess` on a process somebody else started, and the interesting part is
+  not the call but what a listing means afterwards — the modules are already mapped, their bases are
+  known rather than waited for, and the binary being read may be any one of them or none. The Debug
+  menu carries a disabled "Attach to Process…" so the gap is visible rather than missing
+- ⬜ **Break at an entry point.** The run configuration offers dnSpy's four choices, and two of them
+  work: "Don't break" and "Create Process". "Entry Point" and "Module cctor or Entry Point" need a
+  breakpoint planted before the first instruction runs — for a native target at
+  `ImageBase + EntryPointRva`, and for a managed one at the entry point's own token, with the module
+  static constructor found from metadata where there is one. See `MIXED-MODE.md`
