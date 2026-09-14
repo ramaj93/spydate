@@ -15,13 +15,11 @@
          Every box writes itself through as it is edited, which is why Close is not a cancel: what was
          typed is kept either way, and the only thing the buttons decide is whether to run now. -->
     <Grid Margin="14">
-        <!-- Seven: engine, executable, the hint under it, arguments, folder, break at, and the
-             buttons. The seventh was missing while something was already placed in it, and a child
-             in a row the Grid does not define is clamped into the last row that exists — so the
-             buttons sat on top of the Break at chooser and squeezed it to half a box, looking for
-             all the world like the row assignment had been ignored. -->
+        <!-- Six rows: engine, executable, arguments, working directory, break at, and the buttons.
+             The buttons keep a row of their own, spanning the width; sharing the Break at row once put
+             them beside the chooser and squeezed it to half a box. A child placed in a row the Grid
+             does not define is clamped into the last row that exists, so the count has to match. -->
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -37,7 +35,8 @@
 
         <!-- Off for anything but an IL-only assembly, which is the only file that has a choice: one
              with native code of its own is debugged natively because that is where its instructions
-             are. Off during a run too — which debugger owns the process is settled when it starts. -->
+             are, and the chooser shows Native and is off. Off during a run too — which debugger owns
+             the process is settled when it starts. -->
         <TextBlock Grid.Row="0" Grid.Column="0" Text="Debug engine" VerticalAlignment="Center" Margin="0,0,10,8" />
         <!-- An explicit template rather than DisplayMemberPath. The themed ComboBox supplies an
              ItemTemplate of its own, which takes precedence — so DisplayMemberPath was ignored and
@@ -57,43 +56,47 @@
             </ComboBox.ItemTemplate>
         </ComboBox>
 
+        <!-- Off, and empty, for an EXE: it is its own executable and starts itself. On for a DLL
+             (or a driver, or a .NET assembly whose launcher is a separate apphost), which is a module
+             something else has to load — and that something is what this names. -->
         <TextBlock Grid.Row="1" Grid.Column="0" Text="Executable" VerticalAlignment="Center" Margin="0,0,10,8" />
         <TextBox Grid.Row="1" Grid.Column="1" Margin="0,0,0,8"
                  Text="{Binding Host, UpdateSourceTrigger=LostFocus}"
-                 IsEnabled="{Binding CanEditRun}"
+                 IsEnabled="{Binding CanEditHost}"
                  Tag="none — the binary starts itself"
                  AutomationProperties.Name="Executable" />
-        <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Margin="6,0,0,8">
+        <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Margin="6,0,0,8"
+                    IsEnabled="{Binding CanEditHost}">
             <Button Content="…" Width="28" Command="{Binding ChooseHostCommand}"
                     AutomationProperties.Name="Choose executable" />
             <Button Content="Clear" Width="52" Margin="4,0,0,0" Command="{Binding ClearHostCommand}"
                     AutomationProperties.Name="Clear executable" />
         </StackPanel>
 
-        <TextBlock Grid.Row="2" Grid.Column="1" Margin="0,0,0,10" TextWrapping="Wrap"
-                   Foreground="{DynamicResource Text.Tertiary}"
-                   Text="A DLL is not a program and cannot be started on its own. Name whatever loads it, and its breakpoints go in when the module arrives." />
-
-        <TextBlock Grid.Row="3" Grid.Column="0" Text="Arguments" VerticalAlignment="Center" Margin="0,0,10,8" />
-        <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+        <TextBlock Grid.Row="2" Grid.Column="0" Text="Arguments" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                  Text="{Binding Arguments, UpdateSourceTrigger=LostFocus}"
                  IsEnabled="{Binding CanEditRun}"
                  AutomationProperties.Name="Arguments" />
 
-        <TextBlock Grid.Row="4" Grid.Column="0" Text="Folder" VerticalAlignment="Center" Margin="0,0,10,8" />
-        <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+        <TextBlock Grid.Row="3" Grid.Column="0" Text="Working directory" VerticalAlignment="Center" Margin="0,0,10,8" />
+        <TextBox Grid.Row="3" Grid.Column="1" Margin="0,0,0,8"
                  Text="{Binding WorkingDirectory, UpdateSourceTrigger=LostFocus}"
                  IsEnabled="{Binding CanEditRun}"
                  Tag="the host's own folder"
                  AutomationProperties.Name="Working directory" />
+        <Button Grid.Row="3" Grid.Column="2" Content="…" Width="28" Margin="6,0,0,8"
+                Command="{Binding ChooseWorkingDirectoryCommand}"
+                IsEnabled="{Binding CanEditRun}"
+                AutomationProperties.Name="Choose working directory" />
 
-        <TextBlock Grid.Row="5" Grid.Column="0" Text="Break at" VerticalAlignment="Center" Margin="0,0,10,14" />
-        <ComboBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+        <TextBlock Grid.Row="4" Grid.Column="0" Text="Break at" VerticalAlignment="Center" Margin="0,0,10,14" />
+        <ComboBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                   ItemsSource="{Binding BreakAtChoices}"
                   SelectedValuePath="Value"
                   SelectedValue="{Binding BreakAt, Mode=TwoWay}"
                   IsEnabled="{Binding CanEditRun}"
-                  ToolTip="Where the run stops by itself. Entry Point and Module cctor are not wired yet and say so."
+                  ToolTip="Where the run stops by itself, before any breakpoint of your own."
                   AutomationProperties.Name="Break at">
             <ComboBox.ItemTemplate>
                 <DataTemplate>
@@ -104,7 +107,7 @@
 
         <!-- Their own row, spanning the width. Sharing the Break at row put them beside the chooser
              and squeezed it to half a box. -->
-        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3"
+        <StackPanel Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3"
                     Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,4,0,0">
             <Button Content="Debug" Width="80" IsDefault="True" Click="OnDebug"
                     IsEnabled="{Binding CanEditRun}"

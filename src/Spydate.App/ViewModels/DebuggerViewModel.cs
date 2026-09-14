@@ -104,7 +104,12 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // Read back rather than reset. These are remembered per binary exactly as the host and the
         // arguments are, so reopening something picks up the way it was last run — which is the whole
         // point of remembering it.
-        DebugNatively = target?.Engine == DebugEngine.Native;
+        //
+        // A native file has no CLR to drive, so its engine is Native and there is nothing to choose:
+        // the chooser shows it and is off. Only a managed file is a real choice, defaulting to the CLR
+        // unless Native was remembered for it. Taken from the file rather than defaulted to the CLR for
+        // everything, so a native exe does not come up reading ".NET CLR", which it can never be.
+        DebugNatively = !IsManaged || target?.Engine == DebugEngine.Native;
         BreakAt = target?.BreakAt ?? DebugBreakAt.CreateProcess;
 
         // Which debugger applies follows from the file, so the panel rearranges itself when a
@@ -115,6 +120,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(ShowsRegisters));
         OnPropertyChanged(nameof(CanPause));
         OnPropertyChanged(nameof(CanPauseNow));
+        OnPropertyChanged(nameof(CanEditHost));
     }
 
     /// <summary>
@@ -136,7 +142,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             Host = Host.Trim() is { Length: > 0 } host ? host : null,
             Arguments = Arguments.Trim() is { Length: > 0 } arguments ? arguments : null,
             WorkingDirectory = WorkingDirectory.Trim() is { Length: > 0 } directory ? directory : null,
-            Engine = DebugNatively ? DebugEngine.Native : null,
+            // Only a managed file's Native choice is worth keeping. A native file is Native with no
+            // choice in it, so recording that would give every native binary a stored target for a
+            // default it cannot depart from — the very thing "null for the default" is meant to avoid.
+            Engine = IsManaged && DebugNatively ? DebugEngine.Native : null,
             BreakAt = BreakAt == DebugBreakAt.CreateProcess ? null : BreakAt,
         });
     }
@@ -176,6 +185,21 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     {
         Host = string.Empty;
         WorkingDirectory = string.Empty;
+    }
+
+    /// <summary>
+    /// Picks the folder the program runs in. A chooser rather than free text, so a path that does not
+    /// exist — which a debuggee refuses to start in, with an error that names the process and not the
+    /// folder — cannot be typed by mistake. Opens where one is already set, if it is still there.
+    /// </summary>
+    [RelayCommand]
+    private void ChooseWorkingDirectory()
+    {
+        string? start = WorkingDirectory.Trim() is { Length: > 0 } current ? current : null;
+        if (_dialogs?.OpenFolder(start) is { Length: > 0 } chosen)
+        {
+            WorkingDirectory = chosen;
+        }
     }
 
     /// <summary>
@@ -329,6 +353,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>Whether the run can still be configured: not while it is running, since it is settled by then.</summary>
     public bool CanEditRun => !IsDebugging;
 
+    /// <summary>
+    /// Whether the executable to launch can be chosen at all.
+    ///
+    /// Only for a file that is not a program of its own. A native EXE starts itself and <em>is</em> the
+    /// executable, so the box is fixed and off. Everything else is a module something else has to load,
+    /// and that something is what the box names: a native DLL or driver, and — the case a plain
+    /// <see cref="PeImage.IsDll"/> misses — a .NET assembly, whose PE is marked an executable (its
+    /// launcher is a separate native apphost) yet which cannot be run on its own. So the test is "is it
+    /// a native EXE", written as its negation: managed, or DLL-marked. Off during a run too, like the
+    /// rest of the run configuration.
+    /// </summary>
+    public bool CanEditHost => CanEditRun && (IsManaged || _workspace.Current?.Image.IsDll == true);
+
     /// <summary>One row of a chooser: what it means, and what to call it on screen.</summary>
     public sealed record EngineChoice(bool Native, string Label);
 
@@ -407,6 +444,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(IsStopped))]
     [NotifyPropertyChangedFor(nameof(CanChooseDebugger))]
     [NotifyPropertyChangedFor(nameof(CanEditRun))]
+    [NotifyPropertyChangedFor(nameof(CanEditHost))]
     private DebugState _state = DebugState.NotStarted;
 
     [ObservableProperty]
