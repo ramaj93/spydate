@@ -1,3 +1,4 @@
+using System.Reflection.Metadata;
 using System.Runtime.Versioning;
 using Spydate.Debugger;
 
@@ -31,6 +32,41 @@ public sealed class ManagedOverlayTests
 
     private const string SpinFrame = "ManagedDebuggee.Program.Spin";
     private const string FixtureType = "ManagedDebuggee.Program";
+
+    /// <summary>
+    /// The metadata token of a fixture method, read straight from the assembly's own metadata — so a
+    /// token-named breakpoint can be set before the CLR is even up, exactly as the window has a token
+    /// from a clicked line before a run. The fixture path is the apphost EXE; the metadata is in the
+    /// DLL beside it.
+    /// </summary>
+    private static int MethodToken(string exePath, string typeFullName, string methodName)
+    {
+        string dll = Path.ChangeExtension(exePath, ".dll");
+        using var stream = File.OpenRead(dll);
+        using var pe = new System.Reflection.PortableExecutable.PEReader(stream);
+        var md = pe.GetMetadataReader();
+        foreach (var th in md.TypeDefinitions)
+        {
+            var td = md.GetTypeDefinition(th);
+            string ns = md.GetString(td.Namespace);
+            string name = md.GetString(td.Name);
+            string full = ns.Length == 0 ? name : $"{ns}.{name}";
+            if (full != typeFullName)
+            {
+                continue;
+            }
+
+            foreach (var mh in td.GetMethods())
+            {
+                if (md.GetString(md.GetMethodDefinition(mh).Name) == methodName)
+                {
+                    return System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(mh);
+                }
+            }
+        }
+
+        return 0;
+    }
 
     private static bool Wait(Func<bool> until, int seconds = 20)
     {
@@ -392,6 +428,46 @@ public sealed class ManagedOverlayTests
         var where = session.Managed!.LocationOf(session.CurrentAddress);
         Assert.NotNull(where);
         Assert.Contains("LateJit", where!.Method, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedBreakpointByTokenIsHeldBeforeTheClrAndPlantedOnceItsCodeExists()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        // The token, read from the file's metadata, is knowable before anything runs — which is the
+        // whole point: the window has it from a clicked line before a run, when there is no CLR to ask.
+        int token = MethodToken(fixture, FixtureType, "Step");
+        Assert.NotEqual(0, token);
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+
+        // Set by token before the CLR is up. A name-based set here would be refused ("no type loaded");
+        // a token-based one is held instead, because a token from the opened assembly is a real method
+        // that will arrive.
+        string? held = session.AddManagedBreakpoint(FixtureType, token, 0);
+        Assert.NotNull(held);
+        Assert.Contains("held", held!, StringComparison.OrdinalIgnoreCase);
+
+        // Once the CLR is up and Step has native code, PlantPending plants the held breakpoint, and it
+        // fires in Step — a managed breakpoint set before the run, planted over the native loop.
+        Assert.True(Wait(() => session.PlantPending() > 0, 30), "the token breakpoint was never planted");
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the token breakpoint never fired");
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("Step", where!.Method, StringComparison.Ordinal);
+
+        // Clearing it by token removes the mark; there is nothing left to fire on a fresh continue.
+        Assert.Null(session.RemoveManagedBreakpoint(FixtureType, token, 0));
 
         session.Stop();
     }

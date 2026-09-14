@@ -240,6 +240,18 @@ public sealed class ManagedOverlay : IDisposable
     /// the offset is a mapped boundary and otherwise the start of the statement that contains it.
     /// </summary>
     public OverlayResolution Resolve(string typeName, string methodName, int ilOffset)
+        => Resolve(typeName, ilOffset, m => m.Name == methodName, methodName, $"has no method {methodName}");
+
+    /// <summary>
+    /// The same, but naming the method by its metadata token rather than its name — which is what the
+    /// window has when a line is clicked, and which an overload cannot make ambiguous the way a bare
+    /// name can. The type is still found by name, since a token is only meaningful inside its module.
+    /// </summary>
+    public OverlayResolution Resolve(string typeName, int methodToken, int ilOffset)
+        => Resolve(typeName, ilOffset, m => (int)m.MetadataToken == methodToken, $"0x{methodToken:X8}",
+            $"has no method with token 0x{methodToken:X8}");
+
+    private OverlayResolution Resolve(string typeName, int ilOffset, Func<ClrMethod, bool> match, string methodLabel, string missing)
     {
         if (Runtime() is not { } runtime)
         {
@@ -254,10 +266,10 @@ public sealed class ManagedOverlay : IDisposable
                 return new OverlayResolution(0, 0, null, $"no type {typeName} is loaded");
             }
 
-            var method = type.Methods.FirstOrDefault(m => m.Name == methodName);
+            var method = type.Methods.FirstOrDefault(match);
             if (method is null)
             {
-                return new OverlayResolution(0, 0, null, $"{typeName} has no method {methodName}");
+                return new OverlayResolution(0, 0, null, $"{typeName} {missing}");
             }
 
             int token = (int)method.MetadataToken;
@@ -265,7 +277,7 @@ public sealed class ManagedOverlay : IDisposable
             if (!IsCompiled(method.NativeCode) || map.Length == 0)
             {
                 return new OverlayResolution(0, token, method.Signature,
-                    $"{methodName} is not compiled yet, so there is no native code to break in; it JITs on its first call")
+                    $"{methodLabel} is not compiled yet, so there is no native code to break in; it JITs on its first call")
                 {
                     NotCompiled = true,
                 };
@@ -275,7 +287,7 @@ public sealed class ManagedOverlay : IDisposable
             if (address == 0)
             {
                 return new OverlayResolution(0, token, method.Signature,
-                    $"IL offset {ilOffset} of {methodName} maps to no native code");
+                    $"IL offset {ilOffset} of {methodLabel} maps to no native code");
             }
 
             return new OverlayResolution(address, token, method.Signature, null);

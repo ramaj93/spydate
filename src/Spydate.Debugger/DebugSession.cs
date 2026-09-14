@@ -1197,13 +1197,27 @@ public sealed class DebugSession : IDisposable
     /// method that was never reached.
     /// </summary>
     public string? AddManagedBreakpoint(string type, string method, int ilOffset)
+        => AddManagedBreakpoint(new HeldManaged(type, method, 0, ilOffset, HoldUntilAvailable: false));
+
+    /// <summary>
+    /// The same, but naming the method by its metadata token — which is what the window has when a line
+    /// is clicked. Held until it can be planted rather than refused up front: a token from the opened
+    /// assembly's own metadata is a real method that <em>will</em> load, so a breakpoint on it set before
+    /// the CLR is up, or before its type is loaded, or before it is JITted, is kept and planted the
+    /// moment each of those is true. That is what lets a managed breakpoint be marked in the gutter
+    /// before the run, over the native loop, and go in once its code exists.
+    /// </summary>
+    public string? AddManagedBreakpoint(string type, int methodToken, int ilOffset)
+        => AddManagedBreakpoint(new HeldManaged(type, null, methodToken, ilOffset, HoldUntilAvailable: true));
+
+    private string? AddManagedBreakpoint(HeldManaged held)
     {
         if (_overlay is not { } overlay)
         {
             return "nothing is running";
         }
 
-        var resolved = overlay.Resolve(type, method, ilOffset);
+        var resolved = held.Resolve(overlay);
         if (resolved.Ok)
         {
             return AddBreakpoint(resolved.Address)
@@ -1211,31 +1225,46 @@ public sealed class DebugSession : IDisposable
                 : $"a breakpoint is already set at 0x{resolved.Address:X}";
         }
 
-        // Not compiled yet: hold it, rather than refuse it outright. The plan's Phase 5 — it is
-        // planted the moment the method has native code, either when a JIT notification announces it
-        // (the deterministic first-call catch) or when PlantPending next re-resolves it (the fallback,
-        // which catches a later call). A method that genuinely does not exist is not held.
-        if (resolved.NotCompiled)
+        // Held rather than refused. A not-yet-compiled method is planted the moment it has native code,
+        // either when a JIT notification announces it (the deterministic first-call catch) or when
+        // PlantPending next re-resolves it (the fallback, which catches a later call). A token-based
+        // breakpoint is also held while the CLR is not up yet or its type has not loaded, since a token
+        // from the opened assembly is a real method that will arrive — a name-based one is not, because
+        // a name that does not resolve is as likely a typo as a thing not loaded yet.
+        bool holdable = resolved.NotCompiled || (held.HoldUntilAvailable && !resolved.Ok);
+        if (holdable)
         {
-            var pending = new ColdBreakpoint(type, method, ilOffset);
-            lock (_pendingCold)
+            lock (_pendingManaged)
             {
-                if (!_pendingCold.Contains(pending))
+                if (!_pendingManaged.Contains(held))
                 {
-                    _pendingCold.Add(pending);
+                    _pendingManaged.Add(held);
                 }
             }
 
-            return $"{method} is not compiled yet; held and planted on its first call once it JITs";
+            return resolved.NotCompiled
+                ? $"{held.Label} is not compiled yet; held and planted on its first call once it JITs"
+                : $"{held.Label} is held; it is planted once the CLR is up and its code exists";
         }
 
         return resolved.Problem ?? "the managed breakpoint could not be resolved";
     }
 
-    /// <summary>A managed breakpoint waiting for its method to be compiled before it can be planted.</summary>
-    private sealed record ColdBreakpoint(string Type, string Method, int IlOffset);
+    /// <summary>
+    /// A managed breakpoint waiting to be planted: it is named by type and either a method name or a
+    /// metadata token, plus the IL offset. <see cref="HoldUntilAvailable"/> is set for a token-named
+    /// one, which is kept through "no CLR yet" and "type not loaded yet" as well as "not compiled yet",
+    /// because a token from the opened assembly is a real method that will turn up.
+    /// </summary>
+    private sealed record HeldManaged(string Type, string? Method, int Token, int IlOffset, bool HoldUntilAvailable)
+    {
+        public OverlayResolution Resolve(ManagedOverlay overlay)
+            => Method is not null ? overlay.Resolve(Type, Method, IlOffset) : overlay.Resolve(Type, Token, IlOffset);
 
-    private readonly List<ColdBreakpoint> _pendingCold = new();
+        public string Label => Method ?? $"{Type} 0x{Token:X8}";
+    }
+
+    private readonly List<HeldManaged> _pendingManaged = new();
 
     private const uint ClrDataNotifyException = 0x04242420;
 
@@ -1256,25 +1285,25 @@ public sealed class DebugSession : IDisposable
             return 0;
         }
 
-        List<ColdBreakpoint> waiting;
-        lock (_pendingCold)
+        List<HeldManaged> waiting;
+        lock (_pendingManaged)
         {
-            waiting = _pendingCold.ToList();
+            waiting = _pendingManaged.ToList();
         }
 
         int planted = 0;
-        foreach (var cold in waiting)
+        foreach (var held in waiting)
         {
-            var resolved = overlay.Resolve(cold.Type, cold.Method, cold.IlOffset);
+            var resolved = held.Resolve(overlay);
             if (resolved.Ok && AddBreakpoint(resolved.Address))
             {
                 planted++;
-                lock (_pendingCold)
+                lock (_pendingManaged)
                 {
-                    _pendingCold.Remove(cold);
+                    _pendingManaged.Remove(held);
                 }
 
-                Report("module", $"{cold.Method} compiled; its held breakpoint is planted at 0x{ToStatic(resolved.Address):X}");
+                Report("module", $"{held.Label} compiled; its held breakpoint is planted at 0x{ToStatic(resolved.Address):X}");
             }
         }
 
@@ -1321,6 +1350,36 @@ public sealed class DebugSession : IDisposable
         }
 
         return RemoveBreakpoint(resolved.Address) ? null : "there was no such breakpoint";
+    }
+
+    /// <summary>
+    /// Clears a managed breakpoint set by the token-named <see cref="AddManagedBreakpoint(string,int,int)"/>.
+    /// Drops it from the held list whether or not it had been planted yet, so a mark cleared before its
+    /// code existed does not quietly plant itself later.
+    /// </summary>
+    public string? RemoveManagedBreakpoint(string type, int methodToken, int ilOffset)
+    {
+        var held = new HeldManaged(type, null, methodToken, ilOffset, HoldUntilAvailable: true);
+        bool wasHeld;
+        lock (_pendingManaged)
+        {
+            wasHeld = _pendingManaged.Remove(held);
+        }
+
+        if (_overlay is not { } overlay)
+        {
+            return wasHeld ? null : "nothing is running";
+        }
+
+        var resolved = overlay.Resolve(type, methodToken, ilOffset);
+        if (resolved.Ok && RemoveBreakpoint(resolved.Address))
+        {
+            return null;
+        }
+
+        // Held but never planted, or planted and now gone: either way the mark is cleared. Only a
+        // token that cannot resolve and was not held is a genuine "there was nothing there".
+        return wasHeld || resolved.NotCompiled ? null : resolved.Problem ?? "there was no such breakpoint";
     }
 
     private bool Add(BreakpointAt at)
@@ -1463,9 +1522,9 @@ public sealed class DebugSession : IDisposable
         _stopping.Cancel();
 
         _managedStep = null;
-        lock (_pendingCold)
+        lock (_pendingManaged)
         {
-            _pendingCold.Clear();
+            _pendingManaged.Clear();
         }
 
         // The DAC's read handle on the process goes before the process does. Disposed here rather than

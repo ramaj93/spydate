@@ -567,9 +567,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         session.Reported += OnReported;
         _session = session;
 
-        foreach (ulong address in BreakpointAddresses)
+        // In mixed mode the gutter marks are managed — they cannot be planted as native int3s at their
+        // IL's static address, which is not executed code. They are seeded as managed breakpoints once
+        // the run is up, by the pump below. In pure native mode a mark is a native address and goes in
+        // now, so it is standing before the loader break.
+        if (!IsMixedMode)
         {
-            session.AddBreakpoint(address);
+            foreach (ulong address in BreakpointAddresses)
+            {
+                session.AddBreakpoint(address);
+            }
         }
 
         // Every patch that is switched on goes into the run, so it behaves like the patched copy
@@ -599,6 +606,13 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             Add(host is null
                 ? $"started {run}"
                 : $"started {run}, waiting for {binary.Image.FileName} to load");
+
+            // Mixed mode: start pumping so the managed marks are seeded the moment the CLR is up and
+            // planted as their methods JIT, without a native breakpoint of the analyst's own to hang it on.
+            if (IsMixedMode)
+            {
+                EnsureMixedPump();
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException)
         {
@@ -870,6 +884,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Mixed mode: a managed program driven by the native loop. The line is C#, so the mark is a
+        // managed breakpoint — resolved to the address the JIT put that IL at and planted as a native
+        // int3 there — not a native breakpoint at the IL's static address, which is not code that runs.
+        if (IsMixedMode && MixedTarget(staticVa) is { } target)
+        {
+            ToggleMixedBreakpoint(staticVa, target);
+            return;
+        }
+
         if (BreakpointAddresses.Remove(staticVa))
         {
             _session?.RemoveBreakpoint(staticVa);
@@ -887,6 +910,138 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         BreakpointsVersion++;
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// A managed program driven by the native loop — the case where a native breakpoint and a managed
+    /// one both make sense in the same run, and the whole point of mixed mode. True only for an IL-only
+    /// assembly the user chose to debug natively; a native file, or one on the CLR's own engine, is not.
+    /// </summary>
+    public bool IsMixedMode => IsManaged && DebugNatively;
+
+    /// <summary>
+    /// The managed method and IL offset a listing address falls in, as the DAC path names them: the
+    /// declaring type's full name, the method's metadata token, and the IL offset. Null when the address
+    /// is not inside a method body, or the file's metadata cannot name the type — in which case the
+    /// caller falls back to a native breakpoint at the address itself.
+    /// </summary>
+    private (string Type, uint Token, uint Offset)? MixedTarget(ulong staticVa)
+    {
+        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        {
+            return null;
+        }
+
+        if (binary.Image.VaToRva(staticVa) is not { } rva || bodies.At(rva) is not { } body)
+        {
+            return null;
+        }
+
+        uint token = (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(body.Method);
+        if (binary.Managed?.Locate((int)token)?.Type.FullName is not { Length: > 0 } type)
+        {
+            return null;
+        }
+
+        return (type, token, (uint)body.OffsetOf(rva));
+    }
+
+    /// <summary>
+    /// Sets or clears a managed breakpoint over the native loop. Marked in the gutter whether or not a
+    /// run is going: set before the run it is seeded and planted when the CLR is up and the method has
+    /// native code; set during a run it goes to the session at once. The session holds it until it can
+    /// plant, so a method not JITted yet is not refused — it is planted on a later call.
+    /// </summary>
+    private void ToggleMixedBreakpoint(ulong staticVa, (string Type, uint Token, uint Offset) target)
+    {
+        if (BreakpointAddresses.Remove(staticVa))
+        {
+            _seededMixed.Remove(staticVa);
+            string? refused = _session?.RemoveManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+            RememberBreakpoint(staticVa, on: false);
+            Add(refused ?? $"cleared the managed breakpoint in {target.Type} at IL_{target.Offset:X4}");
+        }
+        else
+        {
+            BreakpointAddresses.Add(staticVa);
+            RememberBreakpoint(staticVa, on: true);
+
+            if (_session is { } session)
+            {
+                string? result = session.AddManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+                if (result is null || !result.Contains("nothing is running", StringComparison.Ordinal))
+                {
+                    _seededMixed.Add(staticVa);
+                }
+
+                Add(result ?? $"managed breakpoint in {target.Type} at IL_{target.Offset:X4} — a native int3 where the JIT put it");
+                EnsureMixedPump();
+            }
+            else
+            {
+                Add($"managed breakpoint in {target.Type} at IL_{target.Offset:X4}; it plants over the native loop when the run starts");
+            }
+        }
+
+        BreakpointsVersion++;
+        RefreshBreakpoints();
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Managed marks already handed to the current native session, so the pump does not re-add them.</summary>
+    private readonly HashSet<ulong> _seededMixed = new();
+
+    /// <summary>
+    /// Polls the session while a mixed run is live: it hands any managed mark to the session once its
+    /// overlay exists, and plants held ones as their methods JIT. Polling is inherent to the read-only
+    /// DAC — a cold method announces nothing when it compiles, so the plant is caught on the next tick
+    /// (see MIXED-MODE.md Phase 5). Off outside a mixed run.
+    /// </summary>
+    private System.Windows.Threading.DispatcherTimer? _mixedPump;
+
+    private void EnsureMixedPump()
+    {
+        if (_mixedPump is not null || Application.Current is null)
+        {
+            return;
+        }
+
+        _mixedPump = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _mixedPump.Tick += (_, _) => PumpMixed();
+        _mixedPump.Start();
+        PumpMixed();
+    }
+
+    private void PumpMixed()
+    {
+        if (_session is not { } session)
+        {
+            StopMixedPump();
+            return;
+        }
+
+        foreach (ulong va in BreakpointAddresses.ToList())
+        {
+            if (_seededMixed.Contains(va) || MixedTarget(va) is not { } target)
+            {
+                continue;
+            }
+
+            string? result = session.AddManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+            if (result is null || !result.Contains("nothing is running", StringComparison.Ordinal))
+            {
+                _seededMixed.Add(va);
+            }
+        }
+
+        session.PlantPending();
+    }
+
+    private void StopMixedPump()
+    {
+        _mixedPump?.Stop();
+        _mixedPump = null;
+        _seededMixed.Clear();
     }
 
     /// <summary>
@@ -1861,6 +2016,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private void StopSession()
     {
         ExecutionAddress = null;
+        StopMixedPump();
         if (_workspace.Current is { } open)
         {
             open.Patches.Changed -= OnSavedPatchChanged;
