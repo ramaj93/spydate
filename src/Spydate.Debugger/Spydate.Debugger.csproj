@@ -23,6 +23,8 @@
     <PackageReference Include="Iced" />
     <!-- Native asset only: dbgshim.dll beside the output, loaded by name at run time. -->
     <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" GeneratePathProperty="true" />
+    <!-- ClrMD: the passive managed overlay (ManagedOverlay). -->
+    <PackageReference Include="Microsoft.Diagnostics.Runtime" />
   </ItemGroup>
 
   <!--

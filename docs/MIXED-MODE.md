@@ -10,15 +10,15 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: **Phase 1 is complete** on the `mixed-mode` branch. The correctness fixes are in, breakpoints
-and patches can both sit in several named modules at once, a .NET target can be told to use the native
-engine, and all four break-at choices are wired on both engines. Both engines have been run end to end
-**through the Debug Program dialog** — not just the choosing, the running: the native engine launches,
-stops at Create Process, hits a user breakpoint reported at its static listing address, runs on to an
-entry point, and reports its exit code; the managed engine launches under the CLR and holds before
-running anything or continues to a breakpoint at its entry method. The last Phase 1 test — a breakpoint
-in a late-loading DLL's entry, with the DllMain reason at the stop — is in. The managed side of the
-engine, phases 2 onwards, is still planned.
+Status: **Phases 1 and 2 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
+correctness fixes are in, breakpoints and patches can both sit in several named modules at once, a .NET
+target can be told to use the native engine, and all four break-at choices are wired on both engines.
+Both engines have been run end to end **through the Debug Program dialog** — not just the choosing, the
+running. Phase 2 is the managed overlay: `ManagedOverlay` attaches ClrMD passively over the process the
+native loop owns and reads managed threads, stacks, objects, fields, statics and the IL-to-native map
+at a native stop, without a debug port of its own — proven by `ManagedOverlayTests` walking a managed
+stack while `DebugSession` holds the port. Next is Phase 3, managed breakpoints over the native loop:
+resolve method + IL offset to a native address through the overlay, and plant a native int3 there.
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -289,12 +289,34 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
 
 ### Phase 2 — the managed overlay
 
-- ⬜ `Microsoft.Diagnostics.Runtime` in `Directory.Packages.props` (per ADR‑005)
-- ⬜ `ManagedOverlay` in `Spydate.Debugger`: passive attach by pid, disposed with the session
-- ⬜ Managed threads, call stacks, objects, fields and statics at any native stop
-- ⬜ `FlushCachedData` after the debuggee moves, rather than re-attaching
-- ⬜ A managed location beside the native one in the snapshot
-- ⬜ Tests: a managed stack walked while the native loop holds the port
+**Phase 2 is complete.** ClrMD attaches passively over the process the native loop owns, and reads the
+managed world at a native stop without a port of its own.
+
+- ✅ `Microsoft.Diagnostics.Runtime` 4.1.745802 in `Directory.Packages.props` and referenced from
+  `Spydate.Debugger` — the version the spike proved.
+- ✅ `ManagedOverlay` in `Spydate.Debugger`: `DataTarget.AttachToProcess(pid, suspend: false)`, so
+  `OpenProcess` and `ReadProcessMemory` through the DAC and no debug port. The attach is lazy — the CLR
+  is not up the instant a process starts, so every query answers empty until a runtime is present, and
+  a native debuggee answers empty forever. `DebugSession` creates it when the process is created,
+  exposes it as `Managed`, and disposes it on `Stop` so the DAC's read handle on the process goes
+  before the process does.
+- ✅ Managed threads, call stacks, objects, fields and statics at any native stop. `Threads()` walks
+  each thread's stack (method, module, kind, IP), `ObjectAt(address)` reads a heap object's fields
+  flat, `Statics(typeName)` reads a type's statics from the first app domain. Primitives are read as
+  their values — checked before the value-type test, since an `int` is a value type and the other way
+  round every number reads as `System.Int32`; strings as their text; references as their type plus the
+  referent's address to follow.
+- ✅ `FlushCachedData` after the debuggee moves, rather than re-attaching. The loop calls
+  `MarkMoved` when it continues, steps or pauses; the next read flushes the DAC's cache and re-reads,
+  which is far cheaper than a fresh attach.
+- ✅ A managed location beside the native one: `LocationOf(instructionPointer)` gives the method, its
+  module, metadata token, and the IL offset from the JIT map — the same address the registers show,
+  said in the terms the decompiled listing is in. Null for a native address, which is correct.
+- ✅ Tests: `ManagedOverlayTests`, against a `ManagedDebuggee` fixture that spins in a known method and
+  holds a known static. A managed stack is walked (`Wait <- Spin <- Main`) while `DebugSession` holds
+  the port; a static string is read out of memory (`Label = "spydate-overlay"`); a native IP is named
+  in managed terms (`Spin` at `IL_21`, a real token); and a native program's overlay is present but
+  empty rather than throwing.
 
 ### Phase 3 — managed breakpoints over the native loop
 

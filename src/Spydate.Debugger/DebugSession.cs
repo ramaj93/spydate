@@ -257,6 +257,18 @@ public sealed class DebugSession : IDisposable
     public uint ProcessId => _processId;
 
     /// <summary>
+    /// The managed overlay: ClrMD attached passively to this process, or null before it has started.
+    ///
+    /// This loop owns the port and does the breaking; the overlay reads the managed world — threads,
+    /// stacks, objects, the IL-to-native map — without a port of its own. It is only meaningful while
+    /// the process is stopped, which is when this loop has it, and it is told when the process has run
+    /// so its cached view can flush. Disposed when the session stops.
+    /// </summary>
+    public ManagedOverlay? Managed => _overlay;
+
+    private ManagedOverlay? _overlay;
+
+    /// <summary>
     /// The thread being looked at and stepped. Defaults to whichever one stopped.
     ///
     /// Windows decides which thread reports an event; it does not decide which one an analyst is
@@ -507,11 +519,15 @@ public sealed class DebugSession : IDisposable
 
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     /// <summary>Lets it run on, and lets go of anything a step was holding.</summary>
-    public void Continue() => Post(() =>
+    public void Continue()
     {
-        _stepThread = null;
-        ReleaseOthers();
-    });
+        _overlay?.MarkMoved();
+        Post(() =>
+        {
+            _stepThread = null;
+            ReleaseOthers();
+        });
+    }
 
     /// <summary>
     /// Stops a running process wherever it happens to be. Returns false unless it was running.
@@ -528,6 +544,7 @@ public sealed class DebugSession : IDisposable
         }
 
         _pausing = true;
+        _overlay?.MarkMoved();
         if (!Native.DebugBreakProcess(_process))
         {
             _pausing = false;
@@ -538,7 +555,11 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>One instruction, then stop again. Into a call, not over it.</summary>
-    public void StepInstruction() => Post(() => Trap());
+    public void StepInstruction()
+    {
+        _overlay?.MarkMoved();
+        Post(() => Trap());
+    }
 
     /// <summary>
     /// One instruction, but over a call rather than into it.
@@ -551,8 +572,11 @@ public sealed class DebugSession : IDisposable
     /// Everything else is an ordinary step. A conditional jump stepped "over" still has to go where
     /// it goes — there is no instruction after it to break on in any useful sense.
     /// </summary>
-    public void StepOver() => Post(() =>
+    public void StepOver()
     {
+        _overlay?.MarkMoved();
+        Post(() =>
+        {
         if (Decode() is not { } instruction || !IsCall(instruction))
         {
             Trap();
@@ -568,20 +592,25 @@ public sealed class DebugSession : IDisposable
         {
             Trap();
         }
-    });
+        });
+    }
 
     /// <summary>
     /// Runs until execution reaches a static address, then stops. The breakpoint is not remembered:
     /// it is a way of getting somewhere, not a place to keep stopping at.
     /// </summary>
-    public void RunTo(ulong staticVa) => Post(() =>
+    public void RunTo(ulong staticVa)
     {
-        ulong runtime = ToRuntime(staticVa);
-        if (Plant(runtime, temporary: true))
+        _overlay?.MarkMoved();
+        Post(() =>
         {
-            _temporary = runtime;
-        }
-    });
+            ulong runtime = ToRuntime(staticVa);
+            if (Plant(runtime, temporary: true))
+            {
+                _temporary = runtime;
+            }
+        });
+    }
 
     /// <summary>The instruction at RIP, or null when it cannot be read or decoded.</summary>
     private Iced.Intel.Instruction? Decode()
@@ -1101,6 +1130,11 @@ public sealed class DebugSession : IDisposable
     {
         _stopping.Cancel();
 
+        // The DAC's read handle on the process goes before the process does. Disposed here rather than
+        // only in Dispose so a session stopped and left around does not hold the debuggee's handle open.
+        _overlay?.Dispose();
+        _overlay = null;
+
         // Ended first, and only then let go. Resuming the held threads of a live process let them
         // run, and one that was due to trap reported a step after Stop had been pressed.
         if (_process != IntPtr.Zero)
@@ -1191,6 +1225,7 @@ public sealed class DebugSession : IDisposable
 
         _process = info.hProcess;
         _processId = info.dwProcessId;
+        _overlay = new ManagedOverlay(_processId);
 
         // Asked of the running process rather than taken from the file being read: under a host the
         // two are different programs, and it is the host's width that decides how a thread is read.

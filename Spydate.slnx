@@ -10,5 +10,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Spydate.Tests/Spydate.Tests.csproj" />
+    <Project Path="tests/Spydate.Tests.ManagedDebuggee/ManagedDebuggee.csproj" />
   </Folder>
 </Solution>

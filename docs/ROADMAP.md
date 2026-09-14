@@ -355,13 +355,14 @@ native side already reads it, because native is what it is.
   hand-written COM interop over several dozen interfaces plus `dbgshim` startup
   (`RegisterForRuntimeStartup`), with callbacks arriving on ICorDebug's own thread and every one
   of them needing a `Continue()`. dnSpy spent roughly ten thousand lines here
-- ⬜ **Managed inspection without control (CLRMD).** `Microsoft.Diagnostics.Runtime` against a
-  live process or a dump: managed thread stacks, heap objects, field and static values. On its own it
-  does no breaking and no stepping — but "on its own" turned out to be the whole of that
-  qualification. A spike showed that ClrMD being read-only does not matter once a native debug loop
-  owns the process: ClrMD answers where the JIT put a given IL offset, and the loop plants the int3
-  there. That makes this the foundation of mixed-mode debugging rather than a consolation prize for
-  skipping ICorDebug — see `MIXED-MODE.md`
+- ✅ **Managed inspection without control (CLRMD).** `Microsoft.Diagnostics.Runtime` against the
+  live process: managed thread stacks, heap objects, field and static values. On its own it does no
+  breaking and no stepping — but "on its own" turned out to be the whole of that qualification. A spike
+  showed that ClrMD being read-only does not matter once a native debug loop owns the process: ClrMD
+  answers where the JIT put a given IL offset, and the loop plants the int3 there. Built in Phase 2 of
+  mixed mode as `ManagedOverlay` — a passive attach layered on `DebugSession`, reading the managed
+  world at a native stop — which makes it the foundation of mixed-mode debugging rather than a
+  consolation prize for skipping ICorDebug. See `MIXED-MODE.md`
 - ⬜ **Mixed mode: native and managed in one session.** Breakpoints and patches in a .NET program's
   own native DLLs *and* in its managed methods, in one run, on CoreCLR and .NET Framework alike. The
   constraint is that a process has one debug port, so the native loop keeps it and the DAC rides

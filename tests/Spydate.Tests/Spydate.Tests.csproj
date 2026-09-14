@@ -22,6 +22,13 @@
     <ProjectReference Include="..\..\src\Spydate.Mcp\Spydate.Mcp.csproj" />
     <ProjectReference Include="..\..\src\Spydate.Agent\Spydate.Agent.csproj" />
     <ProjectReference Include="..\..\src\Spydate.Debugger\Spydate.Debugger.csproj" />
+    <!--
+      The managed debuggee for the ManagedOverlay tests. Referenced only so it is built and its exe is
+      on disk beside its own bin; the test finds it by path and launches it under the debugger.
+      ReferenceOutputAssembly=false so none of its types leak into the test assembly.
+    -->
+    <ProjectReference Include="..\Spydate.Tests.ManagedDebuggee\ManagedDebuggee.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup>
