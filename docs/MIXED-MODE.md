@@ -23,9 +23,12 @@ reason. Phase 4 is managed stepping: `StepManaged` runs native single-steps unti
 offset changes — step into, over and out, each landing on a real IL boundary. Phase 5 is partial and
 honest about it: a breakpoint on a not-yet-compiled method is held and planted once it has native code
 (catching a later call), and the notification machinery for the deterministic first-call catch is
-built — but enabling the CLR's JIT notifications, which that catch needs, could not be done reliably on
-this runtime, exactly the "may not work" outcome the plan predicted. What remains is Phase 6 (the
-surfaces — the panel showing both worlds at one stop, and the MCP tools).
+built — but that catch cannot be reached from a read-only DAC. The plan called this the part that "may
+not work", and a symbol-backed second pass turned that from a suspicion into a proof: the JIT
+notification is armed only by writing the CLR through a *writable* DAC, which is exactly the mechanism
+this design excludes, so the first-call catch is incompatible with the premise rather than merely
+unbuilt (the evidence is in §4 and Phase 5 below). What remains is Phase 6 (the surfaces — the panel
+showing both worlds at one stop, and the MCP tools), now in progress.
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -164,9 +167,14 @@ as usual.
 The deterministic route is the CLR's **DAC notification** mechanism — exception `0x04242420`, which is
 how SOS's `!bpmd` breaks on a method that has not been jitted. The native loop already receives that
 exception, but the spike measured notifications as **off by default**: one arrived at +135ms during
-startup and none when the cold method was compiled. Turning them on means writing the CLR's
-`g_dacNotificationFlags` in the target, which needs that global located (symbols, or a signature
-scan). This is the one genuinely unproven part of the plan, and the most expensive.
+startup and none when the cold method was compiled. The spike guessed the fix was writing the CLR's
+`g_dacNotificationFlags`; Phase 5 later disassembled the runtime against its public PDB and found that
+guess wrong — that flag has no JIT bit, and the JIT notification is armed only by the DAC populating
+`g_pNotificationTable`, which has no in-process writer and is reachable only through a *writable* DAC
+(`IXCLRDataProcess::SetCodeNotifications`). A writable DAC is what this design deliberately does not use,
+so the first-call catch is not just unproven but **incompatible with the read-only premise** — the full
+evidence is under Phase 5 below. The fallback (hold the breakpoint, plant it the instant the method has
+native code) catches every later call and misses only a method called exactly once.
 
 **Only one target module was exercised.** The spike translated addresses for a single module
 (`winmm.dll`). `DebugSession` keeps one `_target` and one `LoadedBase`, so breakpoints across several
@@ -387,16 +395,34 @@ here is honest about that.
   `ExceptionInformation(i)`, reading the EXCEPTION_RECORD parameters at the x64 offsets. Verified
   against the real DAC notification that fires at startup — three parameters, the first the magic
   `0x31415927` that marks a genuine CLR notification.
-- ⬜ **Locate and set the CLR's DAC JIT-notification flag — attempted, not achieved.** The JIT
-  notification (`0x04242420`, `DACNotify::DoJITNotification`) is raised only when
-  `g_dacNotificationFlags` has its JIT bit set, and it is off by default even with a debugger attached
-  (confirmed: one notification at +100ms during startup, none when a cold method JITted). Enabling it
-  means writing that global in the target, which needs its address. A signature scan located the
-  RaiseException(`0x04242420`) site and its `IsDebuggerPresent` gate, but the flag itself is read in an
-  uninlined caller the scan could not pin down; six `.data` candidates were set to 1 and none turned
-  notifications on; no coreclr PDB is present locally to resolve the symbol. This is exactly the
-  "genuinely unproven, most expensive" outcome the plan flagged, and it is version-specific besides.
-  Left for a later pass with a symbol source (the public coreclr PDB) or the DAC's own globals table.
+- ⬜ **Enable the CLR's JIT notifications — not achievable from a read-only DAC, and now known why.**
+  The earlier note here guessed the blocker was locating `g_dacNotificationFlags`. That guess was
+  wrong, and a second pass settled it against symbols rather than by signature scan. The public
+  `coreclr.pdb` for the loaded runtime was fetched from the Microsoft symbol server and read with the
+  repository's own `PdbFile` (a 45 MB PDB parsed in ~105 ms, GUID and age matching the image), which
+  resolved `?g_dacNotificationFlags@@3IA` to rva `0x446990` exactly. So the flag can be located and
+  written. **Writing it does nothing**, because the JIT notification does not read it. Disassembling
+  the runtime through the repository's own decoder (Iced), against the PDB's names, shows the flag has
+  three readers and no more — `DACNotify::DoModuleLoadNotification` (mask `1`),
+  `DoModuleUnloadNotification` (mask `2`) and `DoExceptionCatcherEnterNotification` (mask `8`) — and
+  `DACNotify::DoJITNotification` is **not** among them: it has no gate at all and stores its type code
+  unconditionally. The six inert `.data` writes of the first attempt were writing a flag with no JIT
+  bit in it. The JIT notification is instead gated by a *table*, `g_pNotificationTable`
+  (`PTR_JITNotification`, rva `0x446998`): `JITNotifications::IsActive` is "is the table pointer
+  non-null" and `JITNotifications::Requested` walks its 24-byte entries (module at `+8`, method token
+  at `+0x10`). That table has exactly two references in executable code, both **readers** — its
+  constructor and `DACNotifyCompilationFinished` — and **no in-process writer**. It is populated only
+  from outside the process, by the DAC's `IXCLRDataProcess::SetCodeNotifications`
+  (`CLRDATA_METHNOTIFY_GENERATED = 1`, IID `5c552ab6-…`), which is how SOS's `!bpmd` arms a cold
+  method. That call needs a data target whose `ICLRDataTarget::WriteVirtual` works — a **writable**
+  DAC — and a writable DAC is exactly what the design excludes: the overlay is read-only, and "read-only
+  is enough because the control comes from the other side" is the load-bearing decision of the whole
+  approach (see `DECISIONS.md`). So the deterministic first-call catch is not merely unproven, it is
+  **incompatible with the read-only-DAC premise**. Reaching it would mean either a second, writable DAC
+  instance driving `SetCodeNotifications` (the ICorDebug-shaped machinery this design set out to avoid)
+  or hand-building the notification table in the debuggee (an undocumented, version-specific struct in
+  memory allocated in the target) — both a great deal of fragile work for the one case the fallback
+  misses: a method called exactly once, ever.
 - ✅ Decode notification → plant. `DebugSession.OnClrNotification` recognises a real notification by its
   magic and, on a JIT one, re-resolves and plants every held breakpoint whose method now has native
   code. Correct and ready — it fires as the deterministic first-call catch the instant JIT
@@ -406,8 +432,9 @@ here is honest about that.
   plants it once its method compiles.
 - ◑ Tests: `AManagedBreakpointOnAColdMethodIsHeldAndPlantedWhenItCompiles` — a breakpoint set on a cold
   method is held, planted once the method JITs, and fires in it. It catches a *later* call, not the
-  first, because the first-call catch needs the notification flag above; the wording says so. The
-  "stops at the first call" test the plan asked for waits on that flag.
+  first, which is the honest limit: the "stops at the first call" the plan asked for needs JIT
+  notifications, and those need a writable DAC the design does not have (above). This is the settled
+  ceiling of the read-only approach, not a task still waiting on a flag.
 
 ### Phase 6 — the surfaces
 

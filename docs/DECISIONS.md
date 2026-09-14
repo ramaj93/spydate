@@ -643,10 +643,17 @@ managed stacks while the loop held the port, an int3 at a DAC-resolved address f
 the managed frame and the native registers were both readable at that stop — a managed argument read
 out of `rcx`. `MIXED-MODE.md` carries the measurements and the plan.
 
-Two things are given up or left open. `funceval` does not come along: running a property getter inside
-the debuggee is an ICorDebug feature with no DAC equivalent, so fields are read out of memory instead,
-which for an obfuscated target is the more truthful answer anyway. And a cold method's first call
-cannot be caught — before the JIT has run there is no address to break at, and the CLR's DAC
-notifications, which is how SOS's `!bpmd` manages it, stay off unless a debugger turns them on. Native
-code has no such gap: it has a static address the moment its module maps, and a breakpoint planted on
-`LOAD_DLL` is standing in `DllMain` before its body runs.
+Two things are given up. `funceval` does not come along: running a property getter inside the debuggee
+is an ICorDebug feature with no DAC equivalent, so fields are read out of memory instead, which for an
+obfuscated target is the more truthful answer anyway. And a cold method's *first* call cannot be caught.
+Before the JIT has run there is no address to break at, so the breakpoint is held and planted the
+instant the method has native code — which catches every later call and misses only a method called
+exactly once. The deterministic alternative, the CLR's DAC JIT notification (how SOS's `!bpmd` does it),
+turns out to be closed to this design on purpose rather than by accident: it is armed only by the DAC
+writing a notification table in the target through `IXCLRDataProcess::SetCodeNotifications`, and that
+needs a *writable* DAC. Disassembling the runtime against its public PDB confirmed there is no other
+door — the table has no in-process writer, and the flag an earlier guess would have written
+(`g_dacNotificationFlags`) has no JIT bit at all. A writable DAC is the one thing "read-only is enough"
+rules out, so the first-call catch is incompatible with the premise, not merely unbuilt; `MIXED-MODE.md`
+§Phase 5 carries the evidence. Native code has no such gap: it has a static address the moment its
+module maps, and a breakpoint planted on `LOAD_DLL` is standing in `DllMain` before its body runs.
