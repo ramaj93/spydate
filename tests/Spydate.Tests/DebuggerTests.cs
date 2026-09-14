@@ -1309,6 +1309,70 @@ public sealed class DebuggerTests
     }
 
     /// <summary>
+    /// A breakpoint named by a module that is not present at startup but arrives partway through the
+    /// run — the loader-event path — fires at that module's entry point, before its own code runs, with
+    /// the DllMain reason code readable at the stop.
+    ///
+    /// This is the case the whole mixed-mode design turned on: a DLL that loads late (a protection
+    /// module, say) and runs code in its own entry point. It needs no custom fixture — rundll32 does a
+    /// LoadLibrary of winmm.dll from its command line, and winmm is not statically linked into it, so
+    /// the load is a genuine LOAD_DLL event after the process is already up. The entry argument is never
+    /// reached: the stop is at winmm's DllMain during the load, and the process is terminated there,
+    /// long before rundll32 looks for the export that does not exist.
+    /// </summary>
+    [Fact]
+    public void ABreakpointInALateLoadingDllFiresAtItsEntryWithTheDllMainReason()
+    {
+        string rundll32 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "rundll32.exe");
+        string winmm = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "winmm.dll");
+        if (!OperatingSystem.IsWindows() || !File.Exists(rundll32) || !File.Exists(winmm))
+        {
+            return;
+        }
+
+        uint entryRva = Spydate.Core.PE.PeImage.Load(winmm).EntryPointRva;
+
+        using var session = Headless();
+        var stops = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops) { stops.Add(e.Text); }
+            }
+        };
+
+        // Named by the module, not by a static address: winmm is nowhere at the loader break, so its
+        // breakpoint waits and is planted when the module lands.
+        Assert.True(session.AddBreakpoint("winmm.dll", entryRva));
+
+        // Don't break at the loader break: let it run on so the one stop is winmm's own entry, not
+        // rundll32's start. The named breakpoint is still planted when winmm lands.
+        session.Start(rundll32, imageBase: 0, imageSize: 0,
+            arguments: "winmm.dll,SpydateProbeEntryThatDoesNotExist", entryStop: EntryStop.DontBreak);
+
+        Assert.True(
+            Wait(() => session.State == DebugState.Stopped
+                       && session.Modules.Any(m => m.Name.Equals("winmm.dll", StringComparison.OrdinalIgnoreCase))),
+            "the late-loading DLL's entry breakpoint never fired");
+
+        ulong winmmBase = session.Modules.Single(m => m.Name.Equals("winmm.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.Equal(winmmBase + entryRva, session.CurrentAddress);
+
+        // DllMain(hinstance, reason, reserved): on x64 the reason is the second argument and sits in
+        // rdx at the entry point the loader jumps to. DLL_PROCESS_ATTACH is 1.
+        ulong rdx = session.Registers()!.Single(r => r.Name == "rdx").Value;
+        Assert.Equal(1u, (uint)rdx);
+
+        lock (stops)
+        {
+            Assert.Contains(stops, s => s.Contains("winmm.dll+0x", StringComparison.OrdinalIgnoreCase));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
     /// A breakpoint naming a module the process never loads waits, and does not claim to be anywhere.
     /// </summary>
     [Fact]

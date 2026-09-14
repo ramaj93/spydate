@@ -10,14 +10,19 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: Phase 1 is all but done on the `mixed-mode-phase-1` branch. The correctness fixes are in,
-breakpoints and patches can both sit in several named modules at once, and a .NET target can now be
-told to use the native engine — which together are the native half of what this was for. Both engines
-have now been run end to end **through the Debug Program dialog** — not just the choosing, the running:
-the native engine launches, stops at Create Process, hits a user breakpoint reported at its static
-listing address, and reports its exit code; the managed engine launches under the CLR and holds before
-running anything. What is left of Phase 1 is one test that needs a fixture. The managed side of the
+Status: **Phase 1 is complete** on the `mixed-mode` branch. The correctness fixes are in, breakpoints
+and patches can both sit in several named modules at once, a .NET target can be told to use the native
+engine, and all four break-at choices are wired on both engines. Both engines have been run end to end
+**through the Debug Program dialog** — not just the choosing, the running: the native engine launches,
+stops at Create Process, hits a user breakpoint reported at its static listing address, runs on to an
+entry point, and reports its exit code; the managed engine launches under the CLR and holds before
+running anything or continues to a breakpoint at its entry method. The last Phase 1 test — a breakpoint
+in a late-loading DLL's entry, with the DllMain reason at the stop — is in. The managed side of the
 engine, phases 2 onwards, is still planned.
+
+The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
+Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
+phase — the earlier name wrongly implied a merge after Phase 1.
 
 One thing worth knowing before touching the debugger panel again: it publishes **nothing** to UI
 Automation. A dump of the whole window found 174 named elements — menus, toolbar, explorer tree,
@@ -238,12 +243,17 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   request that mattered most: patching a protection DLL's process-attach check is a patch in a module
   other than the opened one. Patches for a module are written when that module loads, before its
   breakpoints are planted, so a breakpoint landing on a patched byte still records the patched byte
-- ⬜ Tests: a native breakpoint in a **late**-loading DLL's entry point, and the reason code at the
-  stop. Covered so far: two modules at once with each byte restored to its own module, a
-  module-qualified breakpoint firing at an entry point and reported as `module+0xRVA`, and one naming
-  a module that never loads staying unplanted. All of those are modules present from the start, so the
-  loader-event path — the one the spike proved against a DLL arriving nine seconds in — is still
-  untested in the suite itself
+- ✅ Tests: a native breakpoint in a **late**-loading DLL's entry point, and the reason code at the
+  stop. `ABreakpointInALateLoadingDllFiresAtItsEntryWithTheDllMainReason` needs no custom fixture:
+  `rundll32.exe winmm.dll,<any>` does a `LoadLibrary` of winmm from its command line, and winmm is not
+  statically linked into rundll32, so the load is a genuine `LOAD_DLL` event after the process is up —
+  the loader-event path the spike proved against a DLL arriving nine seconds in. Run with "Don't
+  break" so the one stop is winmm's own entry, the test asserts the stop is at `winmmBase +
+  EntryPointRva`, reported as `winmm.dll+0xRVA`, with `rdx == 1` — `DLL_PROCESS_ATTACH`, the DllMain
+  reason, the second x64 argument — and terminates there, before rundll32 reaches the export that does
+  not exist. Also covered from the start: two modules at once with each byte restored to its own
+  module, a module-qualified breakpoint firing at an entry point, and one naming a module that never
+  loads staying unplanted. **Phase 1 is complete.**
 - ✅ Run end to end from the dialog, both engines, through the real `DebuggerViewModel` and the real
   `RunConfigWindow`. The dialog work had proved the *choosing* and never the *running*; this closes
   that. A scratchpad panel probe (see `docs/DECISIONS.md` on why the App is untestable, and the
