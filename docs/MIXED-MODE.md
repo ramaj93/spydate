@@ -10,11 +10,16 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: Phase 1 is under way on the `mixed-mode-phase-1` branch. The correctness fixes it opens with
-are in, and breakpoints and patches can both now sit in several named modules at once — which is the
-native half of what this was for. The managed side of the engine, and everything after it, is still
-planned; so is letting a .NET target choose the native engine at all, which is an application change
-rather than an engine one.
+Status: Phase 1 is all but done on the `mixed-mode-phase-1` branch. The correctness fixes are in,
+breakpoints and patches can both sit in several named modules at once, and a .NET target can now be
+told to use the native engine — which together are the native half of what this was for. What is left
+of Phase 1 is one test that needs a fixture. The managed side of the engine, phases 2 onwards, is
+still planned.
+
+One thing worth knowing before touching the debugger panel again: it publishes **nothing** to UI
+Automation. A dump of the whole window found 174 named elements — menus, toolbar, explorer tree,
+document tab, bottom-pane tabs, status bar — and not one control from inside that panel. Its own
+contents can only be checked from a screenshot, and its actions only through the Debug menu.
 
 ## 1. The constraint that shapes everything
 
@@ -200,7 +205,15 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   is retried with the page unprotected, a readable-but-unwritable address is hard to construct on
   purpose. What is covered is the unmapped case, a patch that cannot be written reporting instead of
   returning success, and the process id
-- ⬜ A managed binary may choose the native engine: the host wires `Debug` rather than `ManagedDebug`
+- ✅ A managed binary may choose the native engine. `IsManaged` used to mean two things at once —
+  "this file is IL-only" and "the CLR will be driving it" — and separating them is the whole change:
+  `DebugNatively` is the choice, `UsesManagedDebugger` is `IsManaged && !DebugNatively`, and
+  everything that meant the second asks that instead. The start path, the breakpoint toggle, the
+  register and pause panes and the managed-only tabs all follow it, `AssistantViewModel` asks the
+  panel rather than re-deriving the answer from the file — deciding it twice would hand the agent the
+  managed interface for a process the native loop owns — and the choice resets when a different
+  binary is opened. Offered both on the Debug menu and as a toolbar checkbox, enabled only before a
+  run, since which debugger owns the process is settled when the session is made
 - ✅ Breakpoints in **several** named modules at once. One is now kept under `(module, RVA)`, where a
   null module means the one the listing is about and keeps its static address — which is what every
   existing caller still passes, so the public API, the snapshot and the window were untouched. A name

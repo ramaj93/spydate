@@ -101,9 +101,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RestoreBreakpoints();
         OnPropertyChanged(nameof(NeedsHost));
 
-        // Which debugger applies is a fact about the file, so the panel rearranges itself when a
+        // A choice made about the last binary is not a choice about this one, so it goes back to the
+        // default before anything is told to look again.
+        DebugNatively = false;
+
+        // Which debugger applies follows from the file, so the panel rearranges itself when a
         // different one is opened rather than when something is run.
         OnPropertyChanged(nameof(IsManaged));
+        OnPropertyChanged(nameof(UsesManagedDebugger));
+        OnPropertyChanged(nameof(CanChooseDebugger));
         OnPropertyChanged(nameof(ShowsRegisters));
         OnPropertyChanged(nameof(CanPause));
         OnPropertyChanged(nameof(CanPauseNow));
@@ -265,19 +271,52 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public bool NeedsHost => _workspace.Current?.Image.IsDll == true && Host.Trim().Length == 0;
 
     /// <summary>
-    /// Whether debugging this binary means driving the CLR rather than the process.
+    /// Whether the open binary is an IL-only assembly.
     ///
-    /// Decided by the file, not by a setting: an IL-only assembly has no native code of its own to
-    /// stop in, and the two debuggers cannot both attach. A mixed-mode assembly stays native, where
-    /// its real machine instructions are.
+    /// A fact about the file, and only that. It used to be the whole decision as well — IL-only meant
+    /// the CLR's debugger and nothing else — which was right while there was nothing a native debugger
+    /// could usefully do with a .NET process. There is now: a .NET program's own native DLLs are
+    /// reachable by name, and stopping in one of those means the native loop has to own the process.
+    /// So what the file is and what drives it are two questions, and this answers the first.
     /// </summary>
     public bool IsManaged => _workspace.Current?.Image.ClrHeader?.IsILOnly == true;
 
+    /// <summary>
+    /// Drive this .NET program with the native loop instead of the CLR's interface.
+    ///
+    /// Only meaningful for an IL-only assembly, and only before it starts: which debugger owns the
+    /// process is settled when the session is created, and the two cannot both attach. It is what
+    /// makes a breakpoint or a patch in a native DLL the program loads possible at all — the cost
+    /// being that there is then no managed frame, no locals and no IL-level stepping, because nothing
+    /// is talking to the runtime.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UsesManagedDebugger))]
+    [NotifyPropertyChangedFor(nameof(ShowsRegisters))]
+    [NotifyPropertyChangedFor(nameof(CanPause))]
+    [NotifyPropertyChangedFor(nameof(CanPauseNow))]
+    private bool _debugNatively;
+
+    /// <summary>
+    /// Whether debugging this binary means driving the CLR rather than the process.
+    ///
+    /// The decision, as against <see cref="IsManaged"/>'s fact. Everything that used to ask whether
+    /// the file was managed and meant "will the CLR be driving" asks this instead, so that one answer
+    /// decides the engine, the panes and where a breakpoint goes.
+    /// </summary>
+    public bool UsesManagedDebugger => IsManaged && !DebugNatively;
+
+    /// <summary>
+    /// Whether the choice is still open. Only for a managed file, and only while nothing is running:
+    /// afterwards the session exists and is one kind or the other.
+    /// </summary>
+    public bool CanChooseDebugger => IsManaged && !IsDebugging;
+
     /// <summary>Registers and stack words are worth showing only when there is native code.</summary>
-    public bool ShowsRegisters => !IsManaged;
+    public bool ShowsRegisters => !UsesManagedDebugger;
 
     /// <summary>Pausing and running to a cursor are native-only, so far.</summary>
-    public bool CanPause => !IsManaged;
+    public bool CanPause => !UsesManagedDebugger;
 
     /// <summary>The processor flags, spelled out. "ZF 1 CF 0" is read; 0x246 is decoded.</summary>
     [ObservableProperty]
@@ -305,6 +344,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDebugging))]
     [NotifyPropertyChangedFor(nameof(IsStopped))]
+    [NotifyPropertyChangedFor(nameof(CanChooseDebugger))]
     private DebugState _state = DebugState.NotStarted;
 
     [ObservableProperty]
@@ -387,7 +427,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         string run = host ?? path;
 
-        if (IsManaged)
+        if (UsesManagedDebugger)
         {
             // The host, not the assembly. A .NET assembly with an entry point is still a DLL — the
             // .exe beside it is a native launcher with no metadata of its own — so the thing the
@@ -670,7 +710,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     public void ToggleBreakpoint(ulong staticVa)
     {
-        if (IsManaged)
+        if (UsesManagedDebugger)
         {
             ToggleManagedBreakpoint(staticVa);
             return;

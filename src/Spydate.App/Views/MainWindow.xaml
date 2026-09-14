@@ -152,6 +152,13 @@
                 <MenuItem Header="_Debug">
                     <MenuItem Header="_Run under the debugger…" Command="{Binding Debugger.StartCommand}"
                               ToolTip="Starts the open binary on this machine. It will do whatever it does." />
+                    <!-- Beside Run rather than off on its own, because it is a choice about how the
+                         run will be done and is settled the moment one starts. Only for an IL-only
+                         assembly: everything else is native already. -->
+                    <MenuItem Header="Debug _natively" IsCheckable="True"
+                              IsChecked="{Binding Debugger.DebugNatively, Mode=TwoWay}"
+                              IsEnabled="{Binding Debugger.CanChooseDebugger}"
+                              ToolTip="Drive this .NET program with the native debugger, so breakpoints and patches can go into the native DLLs it loads. No managed frames, locals or IL stepping in this mode." />
                     <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
                     <Separator />
                     <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
@@ -447,7 +454,7 @@
                                                  about the program. The runtime already knows. -->
                                             <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
                                                     Command="{Binding StepOutCommand}"
-                                                    Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                    Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                     ToolTip="Step out — run to the end of this method"
                                                     AutomationProperties.Name="Step out">
                                                 <ui:SymbolIcon Symbol="ArrowStepOut20" />
@@ -469,6 +476,22 @@
                                                 <ui:SymbolIcon Symbol="MoreVertical20" />
                                             </Button>
 
+                                            <!-- Only for an IL-only assembly, and only before it
+                                                 starts: which debugger owns the process is settled
+                                                 when the session is made, and the two cannot both
+                                                 attach. Ticked, a .NET program is driven by the
+                                                 native loop, which is the only way to stop in or
+                                                 patch the native DLLs it loads — at the cost of
+                                                 there being no managed frame or locals, because
+                                                 nothing is then talking to the runtime. -->
+                                            <CheckBox DockPanel.Dock="Left" VerticalAlignment="Center" Margin="6,0,0,0"
+                                                      Content="Native"
+                                                      IsChecked="{Binding DebugNatively, Mode=TwoWay}"
+                                                      IsEnabled="{Binding CanChooseDebugger}"
+                                                      Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                      ToolTip="Debug this .NET program with the native debugger, so breakpoints and patches can go into the native DLLs it loads. No managed frames, locals or IL stepping in this mode."
+                                                      AutomationProperties.Name="Debug natively" />
+
                                             <Border DockPanel.Dock="Left" Width="1" Margin="6,4"
                                                     Background="{DynamicResource Chrome.Border}" />
 
@@ -486,18 +509,18 @@
                                                          AutomationProperties.Name="Threads and registers" />
                                             <RadioButton x:Name="PaneLocals" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Locals"
-                                                         IsChecked="{Binding IsManaged, Mode=OneWay}"
-                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         IsChecked="{Binding UsesManagedDebugger, Mode=OneWay}"
+                                                         Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                          ToolTip="Arguments and locals of the frame being looked at. Open a row to see inside it."
                                                          AutomationProperties.Name="Locals pane" />
                                             <RadioButton x:Name="PaneCallStack" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Call stack"
-                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                          ToolTip="The frames of the thread being looked at. Pick one to read its locals."
                                                          AutomationProperties.Name="Call stack pane" />
                                             <RadioButton x:Name="PaneManagedThreads" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Threads"
-                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                          ToolTip="Every thread in the process. Pick one to read its values and step it."
                                                          AutomationProperties.Name="Managed threads pane" />
                                             <RadioButton x:Name="PaneModules" DockPanel.Dock="Left"
