@@ -62,7 +62,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 {
     private readonly WorkspaceService _workspace;
     private ManagedDebugSession? _managed;
-    private readonly Func<string, string, bool> _confirm;
     private DebugSession? _session;
 
     /// <summary>Registers as they were at the previous stop, so a change can be pointed at.</summary>
@@ -70,11 +69,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private readonly IFileDialogService? _dialogs;
 
-    public DebuggerViewModel(WorkspaceService workspace, IFileDialogService? dialogs = null, Func<string, string, bool>? confirm = null)
+    public DebuggerViewModel(WorkspaceService workspace, IFileDialogService? dialogs = null)
     {
         _workspace = workspace;
         _dialogs = dialogs;
-        _confirm = confirm ?? DefaultConfirm;
         workspace.CurrentChanged += (_, _) =>
         {
             StopSession();
@@ -565,20 +563,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Asked every time, not once and remembered. The answer is about this binary, and the cost
-        // of getting it wrong is running something hostile on the analyst's own machine.
-        if (!_confirm(
-                "Run this binary?",
-                (host is null
-                    ? $"{binary.DisplayName} will be started on this machine and will do whatever it does.\n\n"
-                    : $"{Path.GetFileName(host)} will be started on this machine, so that it loads "
-                      + $"{binary.DisplayName}. Both will do whatever they do.\n\n")
-                + "Everything else in Spydate only reads the file. Debug it in a virtual machine if you "
-                + "do not know what it is.\n\nStart it?"))
-        {
-            return;
-        }
-
         var session = new DebugSession();
         session.Reported += OnReported;
         _session = session;
@@ -635,20 +619,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private async Task StartManagedAsync(OpenedBinary binary, string run, string? host)
     {
-        if (!_confirm(
-                "Run this binary?",
-                (host is null
-                    ? $"{binary.DisplayName} will be started on this machine under the .NET debugger "
-                      + "and will do whatever it does.\n\n"
-                    : $"{Path.GetFileName(host)} will be started on this machine under the .NET "
-                      + $"debugger, so that it loads {binary.DisplayName}. Both will do whatever they "
-                      + "do.\n\n")
-                + "Everything else in Spydate only reads the file. Debug "
-                + "it in a virtual machine if you do not know what it is.\n\nStart it?"))
-        {
-            return;
-        }
-
         var session = new ManagedDebugSession();
         session.Reported += OnManagedReported;
         _managed = session;
@@ -2285,9 +2255,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
     }
-
-    private static bool DefaultConfirm(string title, string message)
-        => MessageBox.Show(message, title, MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
 
     public void Dispose() => StopSession();
 }
