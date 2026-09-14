@@ -236,4 +236,125 @@ public sealed class ManagedOverlayTests
 
         session.Stop();
     }
+
+    /// <summary>
+    /// Starts the fixture, sets a breakpoint at an interior IL offset of Step, and waits for it to fire
+    /// — leaving the process stopped in Step, ready to step. Returns the offset it stopped at.
+    /// </summary>
+    private static int StopInStep(DebugSession session, string fixture, Func<int> stops)
+    {
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+
+        var offsets = new List<int>();
+        Assert.True(Wait(() => (offsets = session.Managed!.IlOffsets(FixtureType, "Step").ToList()).Count > 2),
+            "Step never compiled");
+        int interior = offsets.First(o => o > 0);
+
+        Assert.True(Wait(() => session.AddManagedBreakpoint(FixtureType, "Step", interior) is null),
+            "could not set the managed breakpoint");
+        Assert.True(Wait(() => stops() >= 1, 15), "the managed breakpoint never fired");
+        return interior;
+    }
+
+    [Fact]
+    public void AManagedStepOverLandsOnTheNextIlOffsetInTheSameMethod()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        int startIl = StopInStep(session, fixture, () => Volatile.Read(ref stops));
+
+        int before = stops;
+        session.StepManaged(IlStepKind.Over);
+        Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), "the step never landed");
+
+        // Landed on a real IL boundary — a later offset — still inside Step. (The spike showed the same
+        // on desktop CLR 4.8; the suite exercises CoreCLR.)
+        var location = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(location);
+        Assert.Contains("Step", location!.Method, StringComparison.Ordinal);
+        Assert.True(location.IlOffset > startIl, $"expected an IL offset past {startIl}, got {location.IlOffset}");
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedStepOverStaysInTheMethodAcrossACall()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        StopInStep(session, fixture, () => Volatile.Read(ref stops));
+
+        // Out of Step and into its caller Spin, which calls Step and Wait each turn of its loop.
+        int before = stops;
+        session.StepManaged(IlStepKind.Out);
+        Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), "step out never landed");
+        Assert.Contains("Spin", session.Managed!.LocationOf(session.CurrentAddress)!.Method, StringComparison.Ordinal);
+
+        // Several step-overs stay in Spin — the Step and Wait calls are stepped over, not descended into.
+        for (int i = 0; i < 8; i++)
+        {
+            before = stops;
+            session.StepManaged(IlStepKind.Over);
+            Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), $"step over #{i} never landed");
+            var where = session.Managed!.LocationOf(session.CurrentAddress);
+            Assert.NotNull(where);
+            Assert.Contains("Spin", where!.Method, StringComparison.Ordinal);
+        }
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedStepIntoDescendsIntoAManagedCall()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        StopInStep(session, fixture, () => Volatile.Read(ref stops));
+
+        // Out to Spin, then step into repeatedly until it descends out of Spin into a callee — Spin
+        // calls Step and Wait, both managed, so an into step lands in one of them.
+        int before = stops;
+        session.StepManaged(IlStepKind.Out);
+        Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), "step out never landed");
+
+        string? descendedInto = null;
+        for (int i = 0; i < 40 && descendedInto is null; i++)
+        {
+            before = stops;
+            session.StepManaged(IlStepKind.Into);
+            Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), $"step into #{i} never landed");
+            var where = session.Managed!.LocationOf(session.CurrentAddress);
+            if (where is not null && !where.Method.Contains("Spin", StringComparison.Ordinal))
+            {
+                descendedInto = where.Method;
+            }
+        }
+
+        Assert.True(descendedInto is not null, "step into never descended out of Spin");
+        Assert.Contains("ManagedDebuggee.Program", descendedInto!, StringComparison.Ordinal);
+
+        session.Stop();
+    }
 }

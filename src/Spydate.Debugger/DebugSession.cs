@@ -39,6 +39,19 @@ public enum EntryStop
     ModuleEntry,
 }
 
+/// <summary>How a managed step should treat the calls it meets on the way to the next IL offset.</summary>
+public enum IlStepKind
+{
+    /// <summary>Descend into a managed call, stopping at the callee's first line; step over native ones.</summary>
+    Into,
+
+    /// <summary>Stay in this method: step over every call, stopping at the next IL offset here.</summary>
+    Over,
+
+    /// <summary>Run until this method returns to its caller.</summary>
+    Out,
+}
+
 /// <summary>Something the debuggee did, in the order it did it.</summary>
 public sealed record DebugEvent(string Kind, string Text)
 {
@@ -525,6 +538,7 @@ public sealed class DebugSession : IDisposable
         Post(() =>
         {
             _stepThread = null;
+            _managedStep = null;
             ReleaseOthers();
         });
     }
@@ -610,6 +624,183 @@ public sealed class DebugSession : IDisposable
                 _temporary = runtime;
             }
         });
+    }
+
+    /// <summary>A managed step in flight: the thread, what to do with calls, and where it started.</summary>
+    private sealed record ManagedStep(
+        uint Thread, IlStepKind Kind, ulong RangeStart, ulong RangeEnd, ulong MethodStart, ulong MethodEnd, int StartIl, string Method);
+
+    private ManagedStep? _managedStep;
+
+    /// <summary>
+    /// Steps by one IL offset, over the native loop and the DAC together.
+    ///
+    /// A managed step is a run of native single-steps that ends when the IL offset changes — the DAC
+    /// says which native range each IL offset occupies, and while the instruction pointer stays in the
+    /// starting range it is still on the same offset. Calls are the only complication: stepped over by
+    /// a one-shot after them (<see cref="IlStepKind.Over"/>), descended into when they are managed and
+    /// the step is <see cref="IlStepKind.Into"/>, and skipped entirely by <see cref="IlStepKind.Out"/>,
+    /// which just runs to the caller's return address. Nothing here talks to ICorDebug; it is the
+    /// overlay's addresses and the loop's int3s.
+    /// </summary>
+    public void StepManaged(IlStepKind kind) => Post(() => BeginManagedStep(kind));
+
+    private void BeginManagedStep(IlStepKind kind)
+    {
+        uint thread = SelectedThreadId;
+        ulong rip = RipOf(thread);
+        if (_overlay?.StepInfoAt(rip) is not { } info)
+        {
+            Report("problem", "a managed step needs a managed frame, and there is none at this stop");
+            return;
+        }
+
+        _managedStep = new ManagedStep(thread, kind, info.RangeStart, info.RangeEnd, info.MethodStart, info.MethodEnd, info.IlOffset, info.Method);
+
+        if (kind == IlStepKind.Out)
+        {
+            // Out is not a walk: it runs to where the method returns, which is the instruction pointer
+            // of the frame above this one, and the DAC hands that over. The one-shot there is what the
+            // step waits on; the whole process runs until it is hit.
+            ulong ret = CallerReturn(thread);
+            if (ret == 0 || !Plant(ret, temporary: true))
+            {
+                _managedStep = null;
+                Report("problem", "there is no caller to step out to");
+                return;
+            }
+
+            _temporary = ret;
+            return;
+        }
+
+        // Into and Over walk the method one instruction at a time, so the others are held for the run,
+        // the way a plain native step holds them — otherwise another thread could stop first and the
+        // step would report from somewhere else entirely.
+        HoldOthers(thread);
+        AdvanceManagedStep(rip);
+    }
+
+    /// <summary>
+    /// Where a managed step goes next after landing at an address: finished, or one more micro-step.
+    /// Returns whether the step is done — true means the caller reports the stop, false means another
+    /// single-step or a step-over-the-call has been issued and nothing should be said yet.
+    /// </summary>
+    private bool AdvanceManagedStep(ulong rip)
+    {
+        if (_managedStep is not { } step)
+        {
+            return true;
+        }
+
+        bool done = step.Kind switch
+        {
+            IlStepKind.Over => rip < step.RangeStart || rip >= step.RangeEnd,
+            IlStepKind.Out => rip < step.MethodStart || rip >= step.MethodEnd,
+            IlStepKind.Into => IntoLanded(step, rip),
+            _ => true,
+        };
+
+        if (done)
+        {
+            _managedStep = null;
+            return true;
+        }
+
+        // Not done. A call is stepped over by a one-shot after it, unless the step is Into and the call
+        // goes to managed code, in which case single-stepping descends into it.
+        if (Decode() is { } instruction && IsCall(instruction))
+        {
+            bool descend = step.Kind == IlStepKind.Into && CallTargetManaged(instruction);
+            if (!descend && Plant(instruction.NextIP, temporary: true))
+            {
+                _temporary = instruction.NextIP;
+                return false;
+            }
+        }
+
+        ArmSingleStep(step.Thread);
+        return false;
+    }
+
+    /// <summary>Whether an Into step has reached a new managed location — a new IL offset, or a callee.</summary>
+    private bool IntoLanded(ManagedStep step, ulong rip)
+    {
+        if (_overlay?.StepInfoAt(rip) is not { } info)
+        {
+            // Native code — a helper the step wandered into. Keep going until it is back in managed code.
+            return false;
+        }
+
+        return info.Method != step.Method || info.IlOffset != step.StartIl;
+    }
+
+    /// <summary>Whether a direct call goes to code the DAC knows as managed, so an Into step descends.</summary>
+    private bool CallTargetManaged(Iced.Intel.Instruction instruction)
+    {
+        if (instruction.FlowControl != Iced.Intel.FlowControl.Call)
+        {
+            // Indirect: the target is not known without reading the register, so it is stepped over.
+            return false;
+        }
+
+        ulong target = instruction.NearBranchTarget;
+        return target != 0 && _overlay?.LocationOf(target) is not null;
+    }
+
+    /// <summary>The return address of the managed frame above a thread's current one, or zero.</summary>
+    private ulong CallerReturn(uint thread)
+    {
+        var walked = _overlay?.Threads().FirstOrDefault(t => t.OsId == thread);
+        return walked is { Frames.Count: >= 2 } ? walked.Frames[1].InstructionPointer : 0;
+    }
+
+    /// <summary>A thread's instruction pointer, or zero when it cannot be read.</summary>
+    private ulong RipOf(uint thread)
+    {
+        using var context = ThreadContext.For(_wow64);
+        var handle = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, thread);
+        if (handle == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return context.Read(handle) ? context.InstructionPointer : 0;
+        }
+        finally
+        {
+            Native.CloseHandle(handle);
+        }
+    }
+
+    /// <summary>Sets the trap flag on a thread so its next instruction faults, and attributes the step to it.</summary>
+    private void ArmSingleStep(uint thread)
+    {
+        _stepThread = thread;
+        _stepWasWaiting = false;
+
+        using var context = ThreadContext.For(_wow64);
+        var handle = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, thread);
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            if (context.Read(handle))
+            {
+                _stepFrom = context.InstructionPointer;
+                context.SetTrapFlag(true);
+                context.Write(handle);
+            }
+        }
+        finally
+        {
+            Native.CloseHandle(handle);
+        }
     }
 
     /// <summary>The instruction at RIP, or null when it cannot be read or decoded.</summary>
@@ -1183,6 +1374,8 @@ public sealed class DebugSession : IDisposable
     {
         _stopping.Cancel();
 
+        _managedStep = null;
+
         // The DAC's read handle on the process goes before the process does. Disposed here rather than
         // only in Dispose so a session stopped and left around does not hold the debuggee's handle open.
         _overlay?.Dispose();
@@ -1659,6 +1852,13 @@ public sealed class DebugSession : IDisposable
                 // One instruction has run on the thread that was asked to step, so this is where it stops.
                 _stepThread = null;
 
+                // A managed step is many of these — single-steps that go by unmentioned until the IL
+                // offset changes. Only the one that lands on the new offset falls through to report.
+                if (_managedStep is { } stepping && stepping.Thread == _threadId && !AdvanceManagedStep(e.ExceptionAddress))
+                {
+                    return (false, Native.DBG_CONTINUE);
+                }
+
                 // The step is over, so whatever was held for it goes free. Before the stop is
                 // reported, because what is reported next is a session that can be continued.
                 ReleaseOthers();
@@ -1782,6 +1982,14 @@ public sealed class DebugSession : IDisposable
             }
 
             Rewind(address, thenStep: false);
+
+            // A managed step's one-shot — planted after a call to step over it, or at the return for a
+            // step out. It goes back into the step rather than reporting a stop of its own: the step is
+            // over only when the IL offset has changed or the method has returned.
+            if (_managedStep is { } stepping && stepping.Thread == _threadId && !AdvanceManagedStep(address))
+            {
+                return false;
+            }
 
             // Not re-armed — that is the whole difference from a breakpoint someone set.
             CurrentAddress = address;

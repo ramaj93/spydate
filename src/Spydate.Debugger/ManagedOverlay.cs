@@ -26,6 +26,13 @@ public sealed record OverlayField(string Name, string Type, string Value, ulong 
 public sealed record OverlayObject(ulong Address, string Type, IReadOnlyList<OverlayField> Fields);
 
 /// <summary>
+/// What the code at a native address is, for a managed step: the IL offset, the native range of that
+/// offset (<paramref name="RangeStart"/>..<paramref name="RangeEnd"/>, half-open), and the method's
+/// whole native extent (<paramref name="MethodStart"/>..<paramref name="MethodEnd"/>).
+/// </summary>
+public sealed record OverlayStep(int IlOffset, ulong RangeStart, ulong RangeEnd, ulong MethodStart, ulong MethodEnd, string Method);
+
+/// <summary>
 /// The native address to break at for a managed method and IL offset, or the reason there is none.
 ///
 /// <see cref="Ok"/> is the whole question a caller asks: a real address it can plant an int3 at, or a
@@ -305,6 +312,76 @@ public sealed class ManagedOverlay : IDisposable
 
     /// <summary>Whether a <c>NativeCode</c> is a real address rather than the not-jitted sentinel.</summary>
     private static bool IsCompiled(ulong nativeCode) => nativeCode is not 0 and not 0xFFFFFFFFFFFFFFFF;
+
+    /// <summary>
+    /// What a managed step needs to know about the code at a native address: which IL offset it is in,
+    /// the native range of that IL offset, and the whole method's native extent. Null when the address
+    /// is native or in a method with no map.
+    ///
+    /// A step reads this once at the start and then single-steps: while the instruction pointer stays
+    /// inside <see cref="RangeStart"/>..<see cref="RangeEnd"/> it is still on the same IL offset, and
+    /// when it leaves that range the offset has changed — which is the whole of "step one IL offset",
+    /// done without a DAC read per instruction.
+    /// </summary>
+    public OverlayStep? StepInfoAt(ulong ip)
+    {
+        if (Runtime() is not { } runtime)
+        {
+            return null;
+        }
+
+        try
+        {
+            var method = runtime.GetMethodByInstructionPointer(ip);
+            if (method is null)
+            {
+                return null;
+            }
+
+            ulong rangeStart = 0;
+            ulong rangeEnd = 0;
+            int il = -1;
+            ulong methodStart = ulong.MaxValue;
+            ulong methodEnd = 0;
+
+            foreach (var entry in method.ILOffsetMap)
+            {
+                if (entry.StartAddress == 0 || entry.EndAddress <= entry.StartAddress)
+                {
+                    continue;
+                }
+
+                if (entry.StartAddress < methodStart)
+                {
+                    methodStart = entry.StartAddress;
+                }
+
+                if (entry.EndAddress > methodEnd)
+                {
+                    methodEnd = entry.EndAddress;
+                }
+
+                if (ip >= entry.StartAddress && ip < entry.EndAddress)
+                {
+                    rangeStart = entry.StartAddress;
+                    rangeEnd = entry.EndAddress;
+                    il = entry.ILOffset;
+                }
+            }
+
+            if (rangeEnd == 0 || methodEnd == 0)
+            {
+                return null;
+            }
+
+            return new OverlayStep(il, rangeStart, rangeEnd, methodStart, methodEnd,
+                method.Signature ?? method.Name ?? "?");
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// The native address for an IL offset: the exact map entry when the offset is a boundary,

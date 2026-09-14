@@ -10,7 +10,7 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: **Phases 1, 2 and 3 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
+Status: **Phases 1–4 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
 correctness fixes are in, breakpoints and patches can both sit in several named modules at once, a .NET
 target can be told to use the native engine, and all four break-at choices are wired on both engines.
 Both engines have been run end to end **through the Debug Program dialog** — not just the choosing, the
@@ -19,7 +19,10 @@ native loop owns and reads managed threads, stacks, objects, fields, statics and
 at a native stop, without a debug port of its own. Phase 3 is managed breakpoints over that loop:
 `AddManagedBreakpoint` resolves a method + IL offset to a JIT address through the overlay and plants a
 native int3 there, which re-arms and fires like any other and refuses a not-yet-compiled method with a
-reason. Next is Phase 4, managed stepping: native single-steps until the DAC says the IL offset changed.
+reason. Phase 4 is managed stepping: `StepManaged` runs native single-steps until the overlay's IL
+offset changes — step into, over and out, each landing on a real IL boundary. What remains is the two
+optional/edge pieces: Phase 5 (catching a cold method's first call, via DAC notifications) and Phase 6
+(the surfaces — the panel showing both worlds at one stop, and the MCP tools).
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -349,9 +352,25 @@ is the whole mixed-mode payoff, and needs nothing from ICorDebug.
 
 ### Phase 4 — managed stepping
 
-- ⬜ Step one IL offset: native single-steps until the IL offset changes
-- ⬜ Step over a call, and step out
-- ⬜ Tests: a step lands on an IL boundary, on both runtimes
+**Phase 4 is complete.** A managed step is a run of native single-steps that ends when the IL offset
+changes — the overlay's IL-to-native map says which native range each offset occupies, and while the
+instruction pointer stays in the starting range it is still on the same offset. Nothing talks to
+ICorDebug.
+
+- ✅ Step one IL offset: `DebugSession.StepManaged` reads the starting IL range from
+  `ManagedOverlay.StepInfoAt` and single-steps until the instruction pointer leaves it, then reports.
+  No DAC read per instruction — the range is fetched once and the check is a comparison.
+- ✅ Step over a call, and step out. A call is stepped over by a one-shot int3 after it (the existing
+  step-over machinery), so `Over` stays in the method; `Into` decodes the call and, when its target is
+  managed, single-steps into it to land at the callee's first line, stepping over native helpers;
+  `Out` does not walk at all — it reads the caller's return address from the frame above (the overlay's
+  stack walk) and runs to a one-shot there.
+- ✅ Tests: `ManagedOverlayTests`. From a managed breakpoint in Step, a step over lands on the next IL
+  offset in the same method; step out returns to the caller Spin; eight step-overs in Spin stay in Spin
+  across its Step and Wait calls rather than descending; a step into descends out of Spin into a
+  managed callee. Each lands on a real IL boundary. The suite exercises CoreCLR; the spike showed the
+  same on desktop CLR 4.8, so "both runtimes" holds — a .NET Framework build is not something the test
+  project produces, so that half stays the spike's evidence rather than a suite test.
 
 ### Phase 5 — catching a cold method's first call (optional)
 
