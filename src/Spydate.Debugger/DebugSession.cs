@@ -31,6 +31,16 @@ public sealed record DebugEvent(string Kind, string Text)
 public sealed record Breakpoint(ulong Address, byte Original)
 {
     public bool Planted { get; init; }
+
+    /// <summary>
+    /// The module this is in, or null for the one the listing is about.
+    ///
+    /// Null keeps <see cref="Address"/> meaning a static address, which is what every breakpoint was
+    /// before there could be more than one module in play. A name makes it an RVA in that module
+    /// instead — because a static address cannot say which module is meant once several are of
+    /// interest at once.
+    /// </summary>
+    public string? Module { get; init; }
 }
 
 /// <summary>A module the debuggee has loaded, and where it landed.</summary>
@@ -71,9 +81,25 @@ public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyLis
 /// </summary>
 public sealed class DebugSession : IDisposable
 {
+    /// <summary>
+    /// What a breakpoint is kept under.
+    ///
+    /// <paramref name="Module"/> null means the module the listing is about — the one
+    /// <see cref="Start"/> named — and then <paramref name="Address"/> is a static address in it. A
+    /// named module makes <paramref name="Address"/> an RVA in that module instead.
+    ///
+    /// The asymmetry is forced and worth stating. A static address cannot name a module: 0x180000000
+    /// is the default base for an x64 DLL and most of them keep it, so several modules in one process
+    /// routinely claim the same static address, and an address alone would silently mean whichever one
+    /// happened to be asked first. An RVA plus a name always says which. The null case keeps its
+    /// static address because that is what the listing shows and what every existing caller passes,
+    /// and because with no image base given there is no RVA to speak of.
+    /// </summary>
+    private readonly record struct BreakpointAt(string? Module, ulong Address);
+
     private readonly ConcurrentQueue<Action> _commands = new();
     private readonly SemaphoreSlim _resume = new(0, 1);
-    private readonly Dictionary<ulong, Breakpoint> _breakpoints = new();
+    private readonly Dictionary<BreakpointAt, Breakpoint> _breakpoints = new();
     private readonly Dictionary<ulong, LoadedModule> _modules = new();
     private readonly Dictionary<uint, DebugThread> _threads = new();
 
@@ -255,6 +281,81 @@ public sealed class DebugSession : IDisposable
         => Translatable && runtimeVa >= LoadedBase && runtimeVa < LoadedBase + ImageSize;
 
     private bool Translatable => LoadedBase != 0 && ImageBase != 0 && ImageSize != 0;
+
+    /// <summary>Where a named module landed this run, or zero if it is not loaded.</summary>
+    private ulong BaseOf(string module)
+    {
+        lock (_modules)
+        {
+            foreach (var loaded in _modules.Values)
+            {
+                if (string.Equals(loaded.Name, module, StringComparison.OrdinalIgnoreCase))
+                {
+                    return loaded.Base;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Where a breakpoint is right now, or zero when there is nowhere for it to be yet.
+    ///
+    /// Zero is the whole point of the return: a breakpoint whose module is not loaded has no address,
+    /// and the alternative is what used to happen — the translation handed back the static address
+    /// unchanged, and planting wrote an int3 into whatever occupied that number, which on a relocated
+    /// module is nothing at all.
+    /// </summary>
+    private ulong RuntimeOf(BreakpointAt at)
+    {
+        if (at.Module is null)
+        {
+            return TargetLoaded ? ToRuntime(at.Address) : 0;
+        }
+
+        ulong loaded = BaseOf(at.Module);
+        return loaded == 0 ? 0 : loaded + at.Address;
+    }
+
+    /// <summary>The keys, copied, so they can be resolved without holding the table.</summary>
+    private List<BreakpointAt> Keys()
+    {
+        lock (_breakpoints)
+        {
+            return _breakpoints.Keys.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Which breakpoint is at a runtime address, or null for none of them.
+    ///
+    /// A reverse lookup rather than a keyed one, because a runtime address no longer identifies a
+    /// breakpoint on its own — two modules can be at bases that make different breakpoints resolve
+    /// from the same static number. The keys are copied out first: resolving one reads
+    /// <see cref="_modules"/>, and taking that lock inside <see cref="_breakpoints"/> would invert the
+    /// order every other path here uses.
+    /// </summary>
+    private BreakpointAt? Find(ulong runtime)
+    {
+        foreach (var at in Keys())
+        {
+            if (RuntimeOf(at) == runtime)
+            {
+                return at;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>A breakpoint written the way somebody asked for it.</summary>
+    private static string Where(BreakpointAt at)
+        => at.Module is null ? $"0x{at.Address:X}" : $"{at.Module}+0x{at.Address:X}";
+
+    /// <summary>An address written as whichever breakpoint is there, or as a plain listing address.</summary>
+    private string Describe(ulong runtime)
+        => Find(runtime) is { } at ? Where(at) : $"0x{ToStatic(runtime):X}";
 
     public IReadOnlyList<Breakpoint> Breakpoints
     {
@@ -673,15 +774,18 @@ public sealed class DebugSession : IDisposable
             }
         }
 
-        lock (_breakpoints)
+        foreach (var at in Keys())
         {
-            foreach (var (staticVa, breakpoint) in _breakpoints)
+            Breakpoint? breakpoint;
+            lock (_breakpoints)
             {
-                ulong at = ToRuntime(staticVa);
-                if (breakpoint.Planted && at >= start && at < end)
-                {
-                    return $"a breakpoint at 0x{staticVa:X} is inside those bytes; clear it first";
-                }
+                _breakpoints.TryGetValue(at, out breakpoint);
+            }
+
+            ulong planted = RuntimeOf(at);
+            if (breakpoint is { Planted: true } && planted >= start && planted < end)
+            {
+                return $"a breakpoint at {Where(at)} is inside those bytes; clear it first";
             }
         }
 
@@ -727,59 +831,89 @@ public sealed class DebugSession : IDisposable
         }
     }
 
-    public bool AddBreakpoint(ulong staticVa)
+    public bool AddBreakpoint(ulong staticVa) => Add(new BreakpointAt(null, staticVa));
+
+    /// <summary>
+    /// Adds a breakpoint at an RVA in a named module, which is how one goes into a module other than
+    /// the one the listing is about.
+    ///
+    /// A name and an RVA rather than an address, for the reason <see cref="BreakpointAt"/> gives: an
+    /// address cannot name a module when modules share a preferred base, and they usually do. This is
+    /// what lets breakpoints sit in three different DLLs of one process at once.
+    /// </summary>
+    public bool AddBreakpoint(string module, uint rva)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        return Add(new BreakpointAt(System.IO.Path.GetFileName(module), rva));
+    }
+
+    private bool Add(BreakpointAt at)
     {
         lock (_breakpoints)
         {
-            if (_breakpoints.ContainsKey(staticVa))
+            if (_breakpoints.ContainsKey(at))
             {
                 return false;
             }
 
-            _breakpoints[staticVa] = new Breakpoint(staticVa, 0);
+            _breakpoints[at] = new Breakpoint(at.Address, 0) { Module = at.Module };
         }
 
-        // Only if the module is actually here. On a DLL that its host has not loaded yet there is
-        // no address to put it at; it goes in when the module arrives.
+        // Only if its module is actually here. On a DLL that its host has not loaded yet there is no
+        // address to put it at; it goes in when the module arrives. RuntimeOf answers zero for that,
+        // which is what PlantOne refuses on — so this no longer has to ask about the target module
+        // specifically, and a breakpoint in any loaded module goes in at once.
         //
         // Written straight in rather than posted. Post means "do this, then continue", so setting a
         // breakpoint while stopped let the program run on; and while it ran, one set did nothing
         // until something else happened to plant it. Writing a byte needs the process handle, not
         // the debug loop's thread.
-        if (TargetLoaded && _process != IntPtr.Zero)
+        if (_process != IntPtr.Zero)
         {
-            PlantStatic(staticVa);
+            PlantOne(at);
         }
 
         return true;
     }
 
-    public bool RemoveBreakpoint(ulong staticVa)
+    public bool RemoveBreakpoint(ulong staticVa) => Remove(new BreakpointAt(null, staticVa));
+
+    /// <summary>Removes a breakpoint named the way <see cref="AddBreakpoint(string, uint)"/> set it.</summary>
+    public bool RemoveBreakpoint(string module, uint rva)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        return Remove(new BreakpointAt(System.IO.Path.GetFileName(module), rva));
+    }
+
+    private bool Remove(BreakpointAt at)
     {
         Breakpoint? existing;
         lock (_breakpoints)
         {
-            if (!_breakpoints.TryGetValue(staticVa, out existing))
+            if (!_breakpoints.TryGetValue(at, out existing))
             {
                 return false;
             }
 
-            _breakpoints.Remove(staticVa);
+            _breakpoints.Remove(at);
         }
 
         // The byte goes back whenever there is one to put back, running or not, and without resuming
         // anything. Posted, removing a breakpoint while stopped let the program run; removed while it
         // ran, it only left the table - the int3 stayed in the code with nothing left that knew what
         // it had replaced.
-        if (existing.Planted && _process != IntPtr.Zero
-            && !WriteByte(ToRuntime(staticVa), existing.Original))
+        ulong runtime = RuntimeOf(at);
+        if (existing.Planted && _process != IntPtr.Zero && runtime != 0
+            && !WriteByte(runtime, existing.Original))
         {
             // Said, because this is exactly the failure the paragraph above is about. The table no
             // longer holds the breakpoint and the int3 is still in the code, so the program goes on
             // stopping at something that nothing can now explain, find or remove. The removal itself
             // still stands — it was asked for — but it does not get to be silent about this.
             Report("problem",
-                $"the breakpoint at 0x{staticVa:X} was removed, but its original byte could not be put "
+                $"the breakpoint at {Where(at)} was removed, but its original byte could not be put "
                 + "back — the int3 is still in the code");
         }
 
@@ -1155,6 +1289,16 @@ public sealed class DebugSession : IDisposable
             Report("started", $"running {name} {where}");
         }
 
+        // Any module arriving is the moment breakpoints naming it can go in, whether or not it is the
+        // one the listing is about. That is the whole of debugging several modules at once, and it
+        // happens here rather than at a stop because the loader announces the mapping before it runs
+        // the module's own code — so a breakpoint planted now is already standing in its entry point.
+        if (module.Name.Length > 0 && PlantNaming(module.Name) is var named and > 0)
+        {
+            Report("module", $"{name} loaded {where}; "
+                             + $"{named} breakpoint{(named == 1 ? string.Empty : "s")} in it armed");
+        }
+
         // The main image when nothing else was named, or whichever module was: under a host, the
         // process's own executable is not the thing being read.
         bool wanted = _target is null ? main : string.Equals(module.Name, _target, StringComparison.OrdinalIgnoreCase);
@@ -1197,13 +1341,20 @@ public sealed class DebugSession : IDisposable
             _modules.Remove(loadBase, out gone);
         }
 
+        // Breakpoints that named this module lose their place whether or not it was the target: its
+        // mapping is gone, and the bytes they saved belong to it.
+        if (gone?.Name is { Length: > 0 } left)
+        {
+            Unplant(left);
+        }
+
         if (loadBase != LoadedBase || LoadedBase == 0)
         {
             return;
         }
 
         LoadedBase = 0;
-        Unplant();
+        Unplant(null);
         Report("module", $"{(gone?.Name is { Length: > 0 } name ? name : "the target module")} was unloaded; "
                          + "its breakpoints go back in if it is loaded again");
     }
@@ -1279,11 +1430,7 @@ public sealed class DebugSession : IDisposable
                     // Only if it is still wanted. Removed while its thread was stepping off it, it came
                     // back anyway: an int3 nothing knew about, which the next pass through reported as
                     // not ours, and which had already cost the instruction its first byte.
-                    bool wanted;
-                    lock (_breakpoints)
-                    {
-                        wanted = _breakpoints.ContainsKey(ToStatic(armed.Address));
-                    }
+                    bool wanted = Find(armed.Address) is not null;
 
                     if (wanted)
                     {
@@ -1341,18 +1488,7 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>Whether the int3 at a runtime address is one of ours, planted or one-shot.</summary>
-    private bool Ours(ulong runtime)
-    {
-        if (_temporary == runtime)
-        {
-            return true;
-        }
-
-        lock (_breakpoints)
-        {
-            return _breakpoints.ContainsKey(ToStatic(runtime));
-        }
-    }
+    private bool Ours(ulong runtime) => _temporary == runtime || Find(runtime) is not null;
 
     /// <summary>An int3 we planted: put the byte back, wind RIP back onto it, and stop.</summary>
     private bool HitBreakpoint(ulong address)
@@ -1379,13 +1515,18 @@ public sealed class DebugSession : IDisposable
             return true;
         }
 
-        // Looked up by the address in the listing, which is how they are kept: the int3 is at a
-        // runtime address, and the same static address is a different runtime one every run.
-        ulong staticVa = ToStatic(address);
-        Breakpoint? hit;
-        lock (_breakpoints)
+        // Found by which breakpoint resolves to this runtime address, rather than by keying on the
+        // static one. The int3 is at a runtime address; what that translates back to is only unique
+        // when there is a single module in play, and the whole point of naming modules is that there
+        // is not.
+        BreakpointAt? found = Find(address);
+        Breakpoint? hit = null;
+        if (found is { } key)
         {
-            _breakpoints.TryGetValue(staticVa, out hit);
+            lock (_breakpoints)
+            {
+                _breakpoints.TryGetValue(key, out hit);
+            }
         }
 
         if (hit is null)
@@ -1422,7 +1563,7 @@ public sealed class DebugSession : IDisposable
         // however many times it is continued, which reads as stepping that refuses to move.
         if (!WriteByte(address, hit.Original))
         {
-            Report("problem", $"the breakpoint byte at 0x{ToStatic(address):X} could not be lifted to step off it");
+            Report("problem", $"the breakpoint byte at {Describe(address)} could not be lifted to step off it");
         }
 
         Rewind(address, thenStep: true);
@@ -1435,7 +1576,11 @@ public sealed class DebugSession : IDisposable
         // then nobody is waiting for it.
         _stepThread = null;
         CurrentAddress = address;
-        Report("stopped", $"breakpoint at 0x{ToStatic(address):X}", Reportable(address));
+
+        // Named as it was set. Reportable is still the listing's own address and still null outside
+        // the image, so a breakpoint in another module stops without pretending to be a place in the
+        // one being read.
+        Report("stopped", $"breakpoint at {Where(found!.Value)}", Reportable(address));
         return true;
     }
 
@@ -1478,37 +1623,75 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private void PlantAll()
     {
-        if (!TargetLoaded)
+        // Patches belong to the module the listing is about, so they still wait for that one.
+        if (TargetLoaded)
         {
-            return;
+            // Patches first, breakpoints on top: see WritePatches for why the order is the whole point.
+            WritePatches();
         }
 
-        // Patches first, breakpoints on top: see WritePatches for why the order is the whole point.
-        WritePatches();
-
-        foreach (var breakpoint in Breakpoints)
+        // Every breakpoint whose module is here, which is no longer the same question as whether the
+        // target is. One naming another module goes in when that module arrives; one naming the target
+        // still waits for the target; and RuntimeOf is what tells the two apart.
+        foreach (var at in Keys())
         {
-            PlantStatic(breakpoint.Address);
+            PlantOne(at);
         }
     }
 
-    /// <summary>Plants the breakpoint held for a static address, at wherever that is right now.</summary>
-    private bool PlantStatic(ulong staticVa) => Plant(ToRuntime(staticVa));
+    /// <summary>Plants one breakpoint wherever it is right now, if it is anywhere yet.</summary>
+    private bool PlantOne(BreakpointAt at)
+    {
+        ulong runtime = RuntimeOf(at);
+        return runtime != 0 && Plant(runtime);
+    }
 
     /// <summary>
-    /// Forgets where every breakpoint was, without forgetting the breakpoints.
+    /// Plants every breakpoint that names a module, for the moment it loads. Returns how many went in.
     ///
-    /// Used when the module goes away. The bytes they saved belong to a mapping that no longer
-    /// exists, and writing one back later would put a byte from the last load into whatever occupies
-    /// that address now.
+    /// This is what makes a breakpoint in a second or third DLL possible at all: the loader announces
+    /// each mapping before it runs any of that module's code, so a breakpoint planted here is already
+    /// standing in the module's entry point the first time it is entered.
     /// </summary>
-    private void Unplant()
+    private int PlantNaming(string module)
+    {
+        int armed = 0;
+        foreach (var at in Keys())
+        {
+            if (at.Module is not null
+                && string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase)
+                && PlantOne(at))
+            {
+                armed++;
+            }
+        }
+
+        return armed;
+    }
+
+    /// <summary>
+    /// Forgets where a module's breakpoints were, without forgetting the breakpoints.
+    ///
+    /// Used when that module goes away. The bytes they saved belong to a mapping that no longer
+    /// exists, and writing one back later would put a byte from the last load into whatever occupies
+    /// that address now. Only that module's: a breakpoint in another one is still exactly where it
+    /// was, and forgetting its byte would mean restoring a zero over a live instruction later.
+    /// </summary>
+    /// <param name="module">The module that went, or null for the one the listing is about.</param>
+    private void Unplant(string? module)
     {
         lock (_breakpoints)
         {
-            foreach (ulong address in _breakpoints.Keys.ToList())
+            foreach (var at in _breakpoints.Keys.ToList())
             {
-                _breakpoints[address] = _breakpoints[address] with { Original = 0, Planted = false };
+                bool theirs = module is null
+                    ? at.Module is null
+                    : string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase);
+
+                if (theirs)
+                {
+                    _breakpoints[at] = _breakpoints[at] with { Original = 0, Planted = false };
+                }
             }
         }
     }
@@ -1522,9 +1705,13 @@ public sealed class DebugSession : IDisposable
         byte[] existing = ReadMemory(address, 1);
         if (existing.Length != 1)
         {
-            Report("problem", $"could not read 0x{ToStatic(address):X} to put a breakpoint there");
+            Report("problem", $"could not read {Describe(address)} to put a breakpoint there");
             return false;
         }
+
+        // Which breakpoint this address belongs to, resolved once. A one-shot belongs to none of them,
+        // which is the whole difference between it and a breakpoint somebody set.
+        BreakpointAt? key = temporary ? null : Find(address);
 
         if (existing[0] == 0xCC)
         {
@@ -1533,14 +1720,13 @@ public sealed class DebugSession : IDisposable
             // 0xCC is genuinely what belongs here and is what has to go back when this is hit or
             // removed. Recording nothing left Original at zero, and restoring it wrote a zero byte
             // over the program's instruction — a debugger corrupting the thing it is watching.
-            if (!temporary)
+            if (key is { } already)
             {
-                ulong at = ToStatic(address);
                 lock (_breakpoints)
                 {
-                    if (_breakpoints.TryGetValue(at, out var already) && !already.Planted)
+                    if (_breakpoints.TryGetValue(already, out var had) && !had.Planted)
                     {
-                        _breakpoints[at] = already with { Original = 0xCC, Planted = true };
+                        _breakpoints[already] = had with { Original = 0xCC, Planted = true };
                     }
                 }
             }
@@ -1552,18 +1738,12 @@ public sealed class DebugSession : IDisposable
         {
             _temporaryOriginal = existing[0];
         }
-        else
+        else if (key is null)
         {
             // Asked before the write, not after. Nothing to record the byte against means nothing may
             // replace it: an int3 whose original is kept nowhere is a byte of the program lost for
             // good.
-            lock (_breakpoints)
-            {
-                if (!_breakpoints.ContainsKey(ToStatic(address)))
-                {
-                    return false;
-                }
-            }
+            return false;
         }
 
         // Said rather than assumed. This used to write and return true regardless, because WriteByte
@@ -1571,20 +1751,19 @@ public sealed class DebugSession : IDisposable
         // a breakpoint that listed as planted, never fired, and gave nobody a reason why.
         if (!WriteByte(address, 0xCC))
         {
-            Report("problem", $"could not put a breakpoint at 0x{ToStatic(address):X}: the write was refused");
+            Report("problem", $"could not put a breakpoint at {Describe(address)}: the write was refused");
             return false;
         }
 
         // Marked planted only now that the int3 is really there, and the byte it replaced recorded
         // beside it — which is what a removal puts back.
-        if (!temporary)
+        if (key is { } mine)
         {
-            ulong staticVa = ToStatic(address);
             lock (_breakpoints)
             {
-                if (_breakpoints.TryGetValue(staticVa, out var breakpoint))
+                if (_breakpoints.TryGetValue(mine, out var breakpoint))
                 {
-                    _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
+                    _breakpoints[mine] = breakpoint with { Original = existing[0], Planted = true };
                 }
             }
         }

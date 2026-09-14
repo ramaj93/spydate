@@ -10,8 +10,9 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: Phase 1 has started. The correctness fixes it opens with are in and the suite is green; the
-engine itself, and everything after it, is still planned.
+Status: Phase 1 is under way on the `mixed-mode-phase-1` branch. The correctness fixes it opens with
+are in, and breakpoints can now sit in several named modules at once; the managed side of the engine,
+and everything after it, is still planned.
 
 ## 1. The constraint that shapes everything
 
@@ -198,9 +199,21 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   purpose. What is covered is the unmapped case, a patch that cannot be written reporting instead of
   returning success, and the process id
 - ⬜ A managed binary may choose the native engine: the host wires `Debug` rather than `ManagedDebug`
-- ⬜ Breakpoints and patches in **several** named modules at once — per-module load bases instead of
-  one `_target`/`LoadedBase`
-- ⬜ Tests: a native breakpoint in a late-loading DLL's entry point, and the reason code at the stop
+- ✅ Breakpoints in **several** named modules at once. One is now kept under `(module, RVA)`, where a
+  null module means the one the listing is about and keeps its static address — which is what every
+  existing caller still passes, so the public API, the snapshot and the window were untouched. A name
+  is required for anything else because a static address cannot say which module is meant when they
+  share a preferred base. Any module loading plants the breakpoints that name it, the loader announces
+  that before the module runs its own code, and only that module's breakpoints are forgotten when it
+  unloads
+- ⬜ Patches in several modules. Still single-target: `WriteRange` works from `LoadedBase + rva`, so a
+  live patch can only go into the module the listing is about
+- ⬜ Tests: a native breakpoint in a **late**-loading DLL's entry point, and the reason code at the
+  stop. Covered so far: two modules at once with each byte restored to its own module, a
+  module-qualified breakpoint firing at an entry point and reported as `module+0xRVA`, and one naming
+  a module that never loads staying unplanted. All of those are modules present from the start, so the
+  loader-event path — the one the spike proved against a DLL arriving nine seconds in — is still
+  untested in the suite itself
 
 ### Phase 2 — the managed overlay
 
