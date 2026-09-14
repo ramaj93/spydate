@@ -1074,6 +1074,52 @@ public sealed class DebuggerTests
     }
 
     /// <summary>
+    /// A write onto a readable-but-unwritable page is refused, not faked — the other half of write
+    /// honesty from the unmapped case above.
+    ///
+    /// The unmapped test fails at the read: there is no byte to save, so <c>Plant</c> never reaches the
+    /// write. This one gets past the read and fails at the write, which is the branch that matters once
+    /// W^X made a protect-and-retry necessary — a page that can be read, cannot be written, and cannot
+    /// be made writable either. <c>KUSER_SHARED_DATA</c> at <c>0x7FFE0000</c> is exactly that: mapped
+    /// read-only into every process and refused by <c>VirtualProtectEx</c>. So the int3 cannot go in,
+    /// even after the retry, and the breakpoint must say so rather than list as planted.
+    /// </summary>
+    [Fact]
+    public void AWriteOntoAReadableButUnwritablePageIsRefusedNotFakedAsPlanted()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        var problems = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "problem")
+            {
+                lock (problems) { problems.Add(e.Text); }
+            }
+        };
+
+        const ulong ReadOnlyShared = 0x7FFE0000;
+        Assert.True(session.AddBreakpoint(ReadOnlyShared));
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        var breakpoint = Assert.Single(session.Breakpoints);
+        Assert.False(breakpoint.Planted, "it claims to be planted where the write is refused");
+
+        lock (problems)
+        {
+            Assert.Contains(problems, p => p.Contains("the write was refused", StringComparison.Ordinal));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
     /// A live patch that could not be written reports that, instead of reporting success.
     ///
     /// This one used to come back null. The write went out through a helper that looked at the result

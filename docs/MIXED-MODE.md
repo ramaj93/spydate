@@ -209,10 +209,13 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   in one case permanently and with no record left of what it replaced
 - ✅ `VirtualProtectEx` to `execute-readwrite` around a write the page would otherwise refuse, with the
   protection put straight back rather than left open
-- ⬜ A test for a genuine write *failure* is still missing, and may not be gettable: now that a refusal
-  is retried with the page unprotected, a readable-but-unwritable address is hard to construct on
-  purpose. What is covered is the unmapped case, a patch that cannot be written reporting instead of
-  returning success, and the process id
+- ✅ A test for a genuine write *failure* on a readable page — the branch the protect-and-retry made
+  matter, as against the unmapped case which fails at the read. It was thought maybe-ungettable, and
+  was not: `KUSER_SHARED_DATA` at `0x7FFE0000` is readable in every process but refused by
+  `VirtualProtectEx`, so the int3 cannot go in even after the retry.
+  `AWriteOntoAReadableButUnwritablePageIsRefusedNotFakedAsPlanted` asserts the breakpoint is not listed
+  as planted and reports "the write was refused". Also covered: the unmapped case (fails at the read),
+  a patch that cannot be written reporting instead of returning success, and the process id
 - ✅ The choice is made in the run configuration, not on a toggle of its own. `Start Debugging…`
   opens the Debug Program dialog — engine, executable, arguments, folder, break-at — filled in with
   whatever was used for this binary last time, because all of it is remembered per binary in
