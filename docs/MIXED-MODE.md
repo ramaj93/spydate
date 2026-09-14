@@ -10,7 +10,8 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: **Phases 1–4 are complete, Phase 5 is partial** on the `mixed-mode` branch. Phase 1 is the native engine: the
+Status: **Phases 1–4 and 6 are complete, Phase 5 is complete to the ceiling a read-only DAC allows** on the
+`mixed-mode` branch. Phase 1 is the native engine: the
 correctness fixes are in, breakpoints and patches can both sit in several named modules at once, a .NET
 target can be told to use the native engine, and all four break-at choices are wired on both engines.
 Both engines have been run end to end **through the Debug Program dialog** — not just the choosing, the
@@ -27,8 +28,11 @@ built — but that catch cannot be reached from a read-only DAC. The plan called
 not work", and a symbol-backed second pass turned that from a suspicion into a proof: the JIT
 notification is armed only by writing the CLR through a *writable* DAC, which is exactly the mechanism
 this design excludes, so the first-call catch is incompatible with the premise rather than merely
-unbuilt (the evidence is in §4 and Phase 5 below). What remains is Phase 6 (the surfaces — the panel
-showing both worlds at one stop, and the MCP tools), now in progress.
+unbuilt (the evidence is in §4 and Phase 5 below). Phase 6 is the surfaces, and is done: a managed
+breakpoint can be marked in the gutter of a natively debugged .NET program and plants over the native
+loop, a mixed stop shows the managed call stack and location beside the native registers, and the
+agent's `debug_break` reaches the same path. Every mixed-mode phase is now complete to the extent the
+read-only design allows; what a merge to master waits on is review and a run in anger, not another phase.
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -438,10 +442,36 @@ here is honest about that.
 
 ### Phase 6 — the surfaces
 
-- ⬜ MCP tools for native mode on a .NET target, within the manifest budget (see `MCP.md`)
-- ⬜ Tool descriptions that steer an agent to native addresses for native code
-- ⬜ Panel: both worlds in one stop
-- ⬜ An ADR extending "Managed debugging goes through dbgshim…" with the third option it did not weigh
+**Phase 6 is complete.** The mixed-mode engine is reachable from the window and the agent, and a stop
+shows both worlds at once.
+
+- ✅ Panel: a managed breakpoint in native mode. A line clicked in the C# of a .NET program debugged
+  natively is a managed breakpoint, not a native int3 at the IL's static address (which is not code
+  that runs): `DebuggerViewModel.ToggleBreakpoint` routes a mixed-mode click to `MixedTarget` — the
+  declaring type, the method's metadata token, the IL offset — and `DebugSession.AddManagedBreakpoint`
+  resolves it through the DAC and plants a native int3 where the JIT put it. A mark set before the run
+  is held (through "no CLR yet" and "type not loaded yet" as well as "not compiled yet", since a token
+  from the opened assembly is a real method that will arrive) and planted by a pump as its method JITs
+  — polling being inherent to the read-only DAC. `ManagedOverlay` resolves by token as well as by name;
+  a new engine test sets a breakpoint by token before the CLR is up and watches it planted and fired.
+- ✅ Panel: both worlds in one stop. At a mixed stop the DAC walks the managed stack of the thread that
+  stopped and fills the Call stack pane beside the native registers, and the status names the stop in
+  managed terms — `Stopped at 0x… — Namespace.Type.Method at IL_XXXX`. Locals and the managed Threads
+  pane stay hidden there: those are ICorDebug's, which mixed mode does not use. Driven by a panel probe
+  reading `Step <- Spin <- Main` back out of the pane at a managed breakpoint it set.
+- ✅ MCP tools for native mode on a .NET target, within the manifest budget. No new tool: `debug_break`
+  already routes by address, and in mixed mode the address of a managed method becomes a managed
+  breakpoint over the native loop — the App wires the agent's native control to the same
+  `ToggleBreakpoint` the panel uses. The agent reads the managed location at the stop through the
+  status line the snapshot already carries. The one cost is a sentence in `debug_break`'s description,
+  which moved the manifest guard from 6,400 to 6,600 on purpose (see `McpContractTests`), the third
+  capability earning a sentence rather than a shaved description elsewhere.
+- ✅ Tool descriptions that steer an agent to native addresses for native code. `debug_break` now says
+  a .NET program debugged natively takes a managed breakpoint at a managed address and a native one
+  elsewhere, so the agent aims each kind of address where it belongs.
+- ✅ An ADR extending "Managed debugging goes through dbgshim…" with the third option it did not weigh —
+  "Mixed mode puts the native loop in charge, and the DAC rides along without a debug port" in
+  `DECISIONS.md`, its cold-method limit now stated as the settled read-only-DAC ceiling.
 
 ## 7. Relationship to the existing record
 

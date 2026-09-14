@@ -28,8 +28,15 @@ public class McpContractTests
     /// chose for this reason. It bought a mention of C#/IL in two tools and nothing else: Phase 5
     /// deliberately adds no new tool, because a schema only the .NET sessions use is still sent to
     /// every session that never opens one.
+    ///
+    /// Raised again to 6,600 for mixed mode — debugging a .NET program with the native loop, so a
+    /// breakpoint can go into one of its own managed methods or a native DLL it loads. That is a third
+    /// thing a binary can be to this server, and by the same argument it earns one sentence in
+    /// debug_break — a managed address becomes a managed breakpoint over the native loop — rather than
+    /// a shaved description elsewhere. Still no new tool: debug_break already routes by address, and
+    /// mixed mode only changes what a managed address there means.
     /// </summary>
-    private const int MaxManifestChars = 6_400;
+    private const int MaxManifestChars = 6_600;
 
     private const int MaxDescriptionChars = 400;
 
