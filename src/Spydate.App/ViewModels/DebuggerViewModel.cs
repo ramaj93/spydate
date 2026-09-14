@@ -116,6 +116,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(UsesManagedDebugger));
         OnPropertyChanged(nameof(CanChooseDebugger));
         OnPropertyChanged(nameof(ShowsRegisters));
+        OnPropertyChanged(nameof(ShowsManagedContext));
+        OnPropertyChanged(nameof(IsMixedMode));
         OnPropertyChanged(nameof(CanPause));
         OnPropertyChanged(nameof(CanPauseNow));
         OnPropertyChanged(nameof(CanEditHost));
@@ -322,6 +324,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(UsesManagedDebugger))]
     [NotifyPropertyChangedFor(nameof(ShowsRegisters))]
+    [NotifyPropertyChangedFor(nameof(ShowsManagedContext))]
+    [NotifyPropertyChangedFor(nameof(IsMixedMode))]
     [NotifyPropertyChangedFor(nameof(CanPause))]
     [NotifyPropertyChangedFor(nameof(CanPauseNow))]
     private bool _debugNatively;
@@ -410,6 +414,14 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>Registers and stack words are worth showing only when there is native code.</summary>
     public bool ShowsRegisters => !UsesManagedDebugger;
+
+    /// <summary>
+    /// Whether to show a managed call stack beside the rest. True on the CLR's own engine, and also in
+    /// mixed mode — a managed program driven by the native loop — where the DAC can walk the managed
+    /// stack at a native stop. That is the display half of "both worlds at one stop": native registers
+    /// and a managed call stack for the same pause.
+    /// </summary>
+    public bool ShowsManagedContext => UsesManagedDebugger || IsMixedMode;
 
     /// <summary>Pausing and running to a cursor are native-only, so far.</summary>
     public bool CanPause => !UsesManagedDebugger;
@@ -986,6 +998,49 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         BreakpointsVersion++;
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// At a mixed stop, walk the managed stack with the DAC and show it beside the native registers —
+    /// and name the stop in managed terms. Only in mixed mode; the CLR's own engine fills these panes
+    /// through its own path, and a native program has no managed stack to walk.
+    /// </summary>
+    private void RefreshMixedContext()
+    {
+        if (!IsMixedMode)
+        {
+            return;
+        }
+
+        CallStack.Clear();
+        if (_session is not { } session || session.Managed is not { } overlay)
+        {
+            return;
+        }
+
+        // The managed frames of the thread that stopped, innermost first. A stop reports a native
+        // thread id; the overlay names its threads by OS id, so they line up.
+        var thread = overlay.Threads().FirstOrDefault(t => t.OsId == session.CurrentThreadId)
+                     ?? overlay.Threads().FirstOrDefault();
+
+        int index = 0;
+        bool current = true;
+        foreach (var frame in thread?.Frames ?? [])
+        {
+            bool managed = frame.Method is { Length: > 0 };
+            CallStack.Add(new ManagedFrameRow(index++, frame.Method ?? frame.Kind, managed, managed && current));
+            if (managed)
+            {
+                current = false;   // the innermost managed frame is the one stopped in
+            }
+        }
+
+        // Name the stop in managed terms beside its native address, so a native pause reads as a place
+        // in the C#: "Stopped at 0x… — Namespace.Type.Method at IL_XXXX".
+        if (overlay.LocationOf(session.CurrentAddress) is { } location)
+        {
+            Status = $"{Status.TrimEnd('.')}  —  {location.Method} at IL_{location.IlOffset:X4}";
+        }
     }
 
     /// <summary>Managed marks already handed to the current native session, so the pump does not re-add them.</summary>
@@ -1618,6 +1673,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     RefreshModules();
                     RefreshThreads();
                     RefreshRegisters();
+                    RefreshMixedContext();
                     if (e.Address is { } address)
                     {
                         StoppedAt?.Invoke(this, address);

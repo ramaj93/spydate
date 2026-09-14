@@ -502,8 +502,8 @@
                                                          AutomationProperties.Name="Locals pane" />
                                             <RadioButton x:Name="PaneCallStack" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Call stack"
-                                                         Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
-                                                         ToolTip="The frames of the thread being looked at. Pick one to read its locals."
+                                                         Visibility="{Binding ShowsManagedContext, Converter={StaticResource BoolToVisibility}}"
+                                                         ToolTip="The managed frames of the thread being looked at — walked by the DAC in mixed mode, beside the native registers."
                                                          AutomationProperties.Name="Call stack pane" />
                                             <RadioButton x:Name="PaneManagedThreads" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Threads"
