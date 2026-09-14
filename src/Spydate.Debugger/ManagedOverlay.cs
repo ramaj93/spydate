@@ -26,6 +26,19 @@ public sealed record OverlayField(string Name, string Type, string Value, ulong 
 public sealed record OverlayObject(ulong Address, string Type, IReadOnlyList<OverlayField> Fields);
 
 /// <summary>
+/// The native address to break at for a managed method and IL offset, or the reason there is none.
+///
+/// <see cref="Ok"/> is the whole question a caller asks: a real address it can plant an int3 at, or a
+/// <see cref="Problem"/> to report — a cold method that has not been JITted, a name that does not
+/// resolve, an offset that maps to no code. The refusal is as much the point as the address: a managed
+/// breakpoint that fails quietly is worse than one that says it cannot be set yet.
+/// </summary>
+public sealed record OverlayResolution(ulong Address, int MethodToken, string? Method, string? Problem)
+{
+    public bool Ok => Problem is null && Address != 0;
+}
+
+/// <summary>
 /// The managed overlay: ClrMD attached to the debuggee <em>passively</em>, layered on the native loop
 /// that owns the one OS debug port.
 ///
@@ -46,13 +59,25 @@ public sealed record OverlayObject(ulong Address, string Type, IReadOnlyList<Ove
 public sealed class ManagedOverlay : IDisposable
 {
     private readonly int _pid;
+    private readonly Func<bool>? _running;
     private readonly object _gate = new();
     private DataTarget? _target;
     private ClrRuntime? _runtime;
     private volatile bool _moved;
     private bool _disposed;
 
-    public ManagedOverlay(uint pid) => _pid = (int)pid;
+    /// <param name="pid">The process to attach to.</param>
+    /// <param name="running">
+    /// Whether the debuggee is running rather than stopped, if the owner can say. A read of a running
+    /// process is always of live, moving state — a method may have JITted since the last read with no
+    /// stop in between to announce it — so every such read flushes. A read at a stop is consistent and
+    /// is cached until <see cref="MarkMoved"/>. Null means treat every read as a stopped read.
+    /// </param>
+    public ManagedOverlay(uint pid, Func<bool>? running = null)
+    {
+        _pid = (int)pid;
+        _running = running;
+    }
 
     /// <summary>
     /// The debuggee has run since the last read, so the DAC's cached view is stale. Set by the loop
@@ -78,7 +103,10 @@ public sealed class ManagedOverlay : IDisposable
 
             if (_runtime is not null)
             {
-                if (_moved)
+                // Flush when the loop said the process moved, or whenever it is running: a running
+                // process's DAC view is live and changing, so anything cached from a previous read
+                // may already be wrong — a method that has JITted since, most of all.
+                if (_moved || (_running?.Invoke() ?? false))
                 {
                     _moved = false;
                     try { _runtime.FlushCachedData(); }
@@ -187,6 +215,124 @@ public sealed class ManagedOverlay : IDisposable
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// The native address to break at for a method and IL offset — the whole of what a managed
+    /// breakpoint needs from the DAC, since the native loop does the planting.
+    ///
+    /// A method that has not been JITted has no address: <c>NativeCode</c> is a sentinel and the IL
+    /// map is empty, and that is refused with a reason rather than a zero the caller has to guess at.
+    /// A compiled method's IL offset is turned into a native address through its own map, exact where
+    /// the offset is a mapped boundary and otherwise the start of the statement that contains it.
+    /// </summary>
+    public OverlayResolution Resolve(string typeName, string methodName, int ilOffset)
+    {
+        if (Runtime() is not { } runtime)
+        {
+            return new OverlayResolution(0, 0, null, "there is no CLR in the process yet");
+        }
+
+        try
+        {
+            var type = FindType(runtime, typeName);
+            if (type is null)
+            {
+                return new OverlayResolution(0, 0, null, $"no type {typeName} is loaded");
+            }
+
+            var method = type.Methods.FirstOrDefault(m => m.Name == methodName);
+            if (method is null)
+            {
+                return new OverlayResolution(0, 0, null, $"{typeName} has no method {methodName}");
+            }
+
+            int token = (int)method.MetadataToken;
+            var map = method.ILOffsetMap;
+            if (!IsCompiled(method.NativeCode) || map.Length == 0)
+            {
+                return new OverlayResolution(0, token, method.Signature,
+                    $"{methodName} is not compiled yet, so there is no native code to break in; it JITs on its first call");
+            }
+
+            ulong address = NativeForIl(map, ilOffset);
+            if (address == 0)
+            {
+                return new OverlayResolution(0, token, method.Signature,
+                    $"IL offset {ilOffset} of {methodName} maps to no native code");
+            }
+
+            return new OverlayResolution(address, token, method.Signature, null);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return new OverlayResolution(0, 0, null, "the DAC could not resolve the method");
+        }
+    }
+
+    /// <summary>
+    /// The IL offsets a method's JIT map has code for, sorted and distinct — the offsets a breakpoint
+    /// can actually be put at. Empty for a method that is not compiled. Lets a caller pick an interior
+    /// offset without knowing the method's IL layout in advance.
+    /// </summary>
+    public IReadOnlyList<int> IlOffsets(string typeName, string methodName)
+    {
+        if (Runtime() is not { } runtime)
+        {
+            return Array.Empty<int>();
+        }
+
+        try
+        {
+            var method = FindType(runtime, typeName)?.Methods.FirstOrDefault(m => m.Name == methodName);
+            if (method is null)
+            {
+                return Array.Empty<int>();
+            }
+
+            return method.ILOffsetMap
+                .Where(e => e.ILOffset >= 0 && e.StartAddress != 0)
+                .Select(e => e.ILOffset)
+                .Distinct()
+                .OrderBy(o => o)
+                .ToList();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return Array.Empty<int>();
+        }
+    }
+
+    /// <summary>Whether a <c>NativeCode</c> is a real address rather than the not-jitted sentinel.</summary>
+    private static bool IsCompiled(ulong nativeCode) => nativeCode is not 0 and not 0xFFFFFFFFFFFFFFFF;
+
+    /// <summary>
+    /// The native address for an IL offset: the exact map entry when the offset is a boundary,
+    /// otherwise the start of the statement that contains it — the greatest mapped offset at or below
+    /// it. Zero when nothing maps at or below the offset.
+    /// </summary>
+    private static ulong NativeForIl(System.Collections.Immutable.ImmutableArray<ILToNativeMap> map, int ilOffset)
+    {
+        foreach (var entry in map)
+        {
+            if (entry.ILOffset == ilOffset && entry.StartAddress != 0)
+            {
+                return entry.StartAddress;
+            }
+        }
+
+        ulong address = 0;
+        int best = -1;
+        foreach (var entry in map)
+        {
+            if (entry.ILOffset >= 0 && entry.ILOffset <= ilOffset && entry.StartAddress != 0 && entry.ILOffset > best)
+            {
+                best = entry.ILOffset;
+                address = entry.StartAddress;
+            }
+        }
+
+        return address;
     }
 
     /// <summary>

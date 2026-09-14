@@ -10,15 +10,16 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: **Phases 1 and 2 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
+Status: **Phases 1, 2 and 3 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
 correctness fixes are in, breakpoints and patches can both sit in several named modules at once, a .NET
 target can be told to use the native engine, and all four break-at choices are wired on both engines.
 Both engines have been run end to end **through the Debug Program dialog** — not just the choosing, the
 running. Phase 2 is the managed overlay: `ManagedOverlay` attaches ClrMD passively over the process the
 native loop owns and reads managed threads, stacks, objects, fields, statics and the IL-to-native map
-at a native stop, without a debug port of its own — proven by `ManagedOverlayTests` walking a managed
-stack while `DebugSession` holds the port. Next is Phase 3, managed breakpoints over the native loop:
-resolve method + IL offset to a native address through the overlay, and plant a native int3 there.
+at a native stop, without a debug port of its own. Phase 3 is managed breakpoints over that loop:
+`AddManagedBreakpoint` resolves a method + IL offset to a JIT address through the overlay and plants a
+native int3 there, which re-arms and fires like any other and refuses a not-yet-compiled method with a
+reason. Next is Phase 4, managed stepping: native single-steps until the DAC says the IL offset changed.
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -320,10 +321,31 @@ managed world at a native stop without a port of its own.
 
 ### Phase 3 — managed breakpoints over the native loop
 
-- ⬜ Resolve `Type::Method` + IL offset → native address through the DAC's map, own half-open lookup
-- ⬜ Plant as a native `int3`; confirm re-arm on a JIT page
-- ⬜ A method that is not compiled yet is refused *and says so*, rather than failing quietly
-- ⬜ Tests: break at an interior IL offset; hit it twice
+**Phase 3 is complete.** A managed breakpoint is a native int3 at an address the DAC resolved — which
+is the whole mixed-mode payoff, and needs nothing from ICorDebug.
+
+- ✅ Resolve `Type::Method` + IL offset → native address through the DAC's map. `ManagedOverlay.Resolve`
+  finds the method, then `NativeForIl` turns the IL offset into a native address: exact where the offset
+  is a mapped boundary, otherwise the start of the statement that contains it (the greatest mapped
+  offset at or below it). `IlOffsets` lists a method's mapped offsets so a caller can pick an interior
+  one without knowing the IL layout.
+- ✅ Plant as a native int3; re-arm on a JIT page confirmed. `DebugSession.AddManagedBreakpoint`
+  resolves through the overlay and plants an ordinary int3 at the JIT address with `AddBreakpoint` — a
+  JIT address is outside every module image, so `ToRuntime`/`ToStatic` carry it unchanged and it re-arms
+  and fires exactly like any other breakpoint. The write goes through the W^X `VirtualProtectEx` path
+  Phase 1 already built.
+- ✅ A method not compiled yet is refused and says so. A cold method's `NativeCode` is the
+  `0xFFFFFFFFFFFFFFFF` sentinel and its IL map is empty, so `Resolve` refuses with "not compiled yet …
+  it JITs on its first call" rather than a zero the caller has to guess at. (ClrMD only surfaces a
+  method once it has a method descriptor, so the fixture references its cold method through a delegate
+  to give it one without a call — which is how the refusal is told apart from a name that does not
+  exist.)
+- ✅ Tests: `ManagedOverlayTests`. A breakpoint at an interior IL offset of a repeatedly-called method
+  fires, is reported in that method by `LocationOf`, and — continued — fires again at the same address,
+  which is the re-arm. A cold method is refused with a reason. A real bug was found on the way: a read
+  of a *running* process returned stale DAC state (a method that JITted after the attach was never
+  seen, because nothing had called `MarkMoved`), so the overlay now flushes on every read while the
+  process runs, and caches only at a stop.
 
 ### Phase 4 — managed stepping
 

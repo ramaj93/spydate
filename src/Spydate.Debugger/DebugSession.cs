@@ -991,6 +991,59 @@ public sealed class DebugSession : IDisposable
         return Add(new BreakpointAt(System.IO.Path.GetFileName(module), rva));
     }
 
+    /// <summary>
+    /// Sets a breakpoint at a managed method and IL offset — a managed breakpoint over the native loop.
+    ///
+    /// The overlay resolves it to the native address the JIT put that code at, and this plants an
+    /// ordinary native int3 there. That is the whole trick: a managed breakpoint <em>is</em> a native
+    /// breakpoint at an address the DAC found, so it re-arms and fires like any other, and needs
+    /// nothing from ICorDebug. The address is a JIT address, outside every module image, so it goes in
+    /// as a plain runtime address rather than a module and RVA.
+    ///
+    /// Returns null when it went in, or why it could not — a method not yet compiled (it JITs on its
+    /// first call, and there is no address before then), a name that does not resolve, an offset with
+    /// no code. The refusal is deliberate: a managed breakpoint that failed quietly would read as a
+    /// method that was never reached.
+    /// </summary>
+    public string? AddManagedBreakpoint(string type, string method, int ilOffset)
+    {
+        if (_overlay is not { } overlay)
+        {
+            return "nothing is running";
+        }
+
+        var resolved = overlay.Resolve(type, method, ilOffset);
+        if (!resolved.Ok)
+        {
+            return resolved.Problem ?? "the managed breakpoint could not be resolved";
+        }
+
+        return AddBreakpoint(resolved.Address)
+            ? null
+            : $"a breakpoint is already set at 0x{resolved.Address:X}";
+    }
+
+    /// <summary>
+    /// Clears a managed breakpoint set by <see cref="AddManagedBreakpoint"/>. Resolution is stable
+    /// while the method stays compiled — the same method and offset give the same address — so
+    /// re-resolving finds exactly what was planted.
+    /// </summary>
+    public string? RemoveManagedBreakpoint(string type, string method, int ilOffset)
+    {
+        if (_overlay is not { } overlay)
+        {
+            return "nothing is running";
+        }
+
+        var resolved = overlay.Resolve(type, method, ilOffset);
+        if (!resolved.Ok)
+        {
+            return resolved.Problem ?? "the managed breakpoint could not be resolved";
+        }
+
+        return RemoveBreakpoint(resolved.Address) ? null : "there was no such breakpoint";
+    }
+
     private bool Add(BreakpointAt at)
     {
         lock (_breakpoints)
@@ -1225,7 +1278,7 @@ public sealed class DebugSession : IDisposable
 
         _process = info.hProcess;
         _processId = info.dwProcessId;
-        _overlay = new ManagedOverlay(_processId);
+        _overlay = new ManagedOverlay(_processId, () => State == DebugState.Running);
 
         // Asked of the running process rather than taken from the file being read: under a host the
         // two are different programs, and it is the host's width that decides how a thread is read.

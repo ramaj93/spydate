@@ -30,6 +30,7 @@ public sealed class ManagedOverlayTests
     }
 
     private const string SpinFrame = "ManagedDebuggee.Program.Spin";
+    private const string FixtureType = "ManagedDebuggee.Program";
 
     private static bool Wait(Func<bool> until, int seconds = 20)
     {
@@ -158,6 +159,80 @@ public sealed class ManagedOverlayTests
         var overlay = session.Managed!;
         Assert.False(overlay.HasClr);
         Assert.Empty(overlay.Threads());
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedBreakpointAtAnInteriorIlOffsetFiresTwice()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+
+        // Count the stops rather than watch the state: Step is called every ~50ms, so after a continue
+        // the re-armed int3 fires again almost at once, and the momentary Running state can be shorter
+        // than a poll interval. The stop count cannot be missed. With Don't break and no pause, the only
+        // stops are this breakpoint's hits.
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+
+        // An interior IL offset of Step, once it has been JITted — the first offset past zero, so the
+        // breakpoint is inside the method body rather than at its entry.
+        var offsets = new List<int>();
+        Assert.True(Wait(() => (offsets = session.Managed!.IlOffsets(FixtureType, "Step").ToList()).Count > 1),
+            "Step never compiled");
+        int interior = offsets.First(o => o > 0);
+
+        // The managed breakpoint: the overlay resolves Step + interior offset to a JIT address, and the
+        // native loop plants an int3 there. Polled because HasClr can precede Step's first call.
+        string? planted = "pending";
+        Assert.True(Wait(() => (planted = session.AddManagedBreakpoint(FixtureType, "Step", interior)) is null),
+            $"could not set the managed breakpoint: {planted}");
+
+        // It fires, in Step, at the offset asked for.
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the managed breakpoint never fired");
+        ulong first = session.CurrentAddress;
+        var location = session.Managed!.LocationOf(first);
+        Assert.NotNull(location);
+        Assert.Contains("Step", location!.Method, StringComparison.Ordinal);
+
+        // And re-arms on the JIT page: continued, Step is called again and it stops in the same place.
+        // This is the whole of "a managed breakpoint is a native int3 that behaves like any other".
+        session.Continue();
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 2, 15), "the managed breakpoint did not re-arm");
+        Assert.Equal(first, session.CurrentAddress);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void ABreakpointInAMethodThatIsNotCompiledIsRefusedWithAReason()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+
+        // Cold has a method descriptor — the fixture references it through a delegate — but is never
+        // invoked, so it is never JITted. A breakpoint there is refused, and the refusal says why:
+        // there is no native code to break in until its first call. Polled because the type's static
+        // constructor, which makes the descriptor, runs a moment after the CLR appears.
+        string? refusal = null;
+        Assert.True(
+            Wait(() => (refusal = session.AddManagedBreakpoint(FixtureType, "Cold", 0)) is { } r
+                       && r.Contains("compiled", StringComparison.OrdinalIgnoreCase), 15),
+            $"the cold method was not refused with a clear reason: {refusal}");
 
         session.Stop();
     }
