@@ -15,6 +15,7 @@ public partial class RunConfigWindow : Window
     public RunConfigWindow(object debugger)
     {
         InitializeComponent();
+        DarkChrome.Apply(this);
         DataContext = debugger;
     }
 

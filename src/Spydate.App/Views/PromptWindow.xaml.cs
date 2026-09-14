@@ -8,6 +8,7 @@ public partial class PromptWindow : Window
     public PromptWindow(string title, string label, string? hint, string? initial)
     {
         InitializeComponent();
+        DarkChrome.Apply(this);
         Title = title;
         LabelText.Text = label;
         HintText.Text = hint ?? string.Empty;
