@@ -165,6 +165,16 @@ public sealed class DebugSession : IDisposable
     public uint CurrentThreadId => _threadId;
 
     /// <summary>
+    /// The operating system id of the debuggee, or zero before there is one.
+    ///
+    /// Set while the process is being created and before <see cref="Start"/> returns, so a caller that
+    /// has started a session can rely on it. Anything wanting to read the debuggee by another route
+    /// than this loop needs it — the CLR data access layer attaches by process id — and without it
+    /// such a caller has to guess which process was just launched.
+    /// </summary>
+    public uint ProcessId => _processId;
+
+    /// <summary>
     /// The thread being looked at and stepped. Defaults to whichever one stopped.
     ///
     /// Windows decides which thread reports an event; it does not decide which one an analyst is
@@ -675,7 +685,16 @@ public sealed class DebugSession : IDisposable
             }
         }
 
-        WriteBytes(start, bytes);
+        // The last thing that can refuse it, and it used to be the one thing that could not: the write
+        // went out with its result discarded, so a patch onto bytes the process would not take was
+        // reported as applied. SetPatch and ClearPatch both come through here, which means a failed
+        // removal is now reported too — a patch that could not be taken back out is worth knowing
+        // about, because the caller is about to believe the program is back to normal.
+        if (!WriteBytes(start, bytes))
+        {
+            return $"the {bytes.Count} byte(s) at 0x{ToStatic(start):X} could not be written";
+        }
+
         return null;
     }
 
@@ -694,7 +713,17 @@ public sealed class DebugSession : IDisposable
 
         foreach (var patch in patches)
         {
-            WriteBytes(LoadedBase + patch.Rva, patch.Bytes);
+            // Reported per patch rather than in the aggregate. This runs at the loader break and every
+            // time the module loads, with nobody waiting on a return value, so a patch that does not
+            // go in has the log as its only way of saying so — and "the program behaved as though it
+            // were unpatched" is otherwise a mystery with no evidence attached to it.
+            if (!WriteBytes(LoadedBase + patch.Rva, patch.Bytes))
+            {
+                // Null means the process's own executable, which is the case whenever the thing being
+                // run is also the thing being read.
+                string where = _target ?? "the image";
+                Report("problem", $"the patch at RVA 0x{patch.Rva:X} could not be written into {where}");
+            }
         }
     }
 
@@ -742,9 +771,16 @@ public sealed class DebugSession : IDisposable
         // anything. Posted, removing a breakpoint while stopped let the program run; removed while it
         // ran, it only left the table - the int3 stayed in the code with nothing left that knew what
         // it had replaced.
-        if (existing.Planted && _process != IntPtr.Zero)
+        if (existing.Planted && _process != IntPtr.Zero
+            && !WriteByte(ToRuntime(staticVa), existing.Original))
         {
-            WriteByte(ToRuntime(staticVa), existing.Original);
+            // Said, because this is exactly the failure the paragraph above is about. The table no
+            // longer holds the breakpoint and the int3 is still in the code, so the program goes on
+            // stopping at something that nothing can now explain, find or remove. The removal itself
+            // still stands — it was asked for — but it does not get to be silent about this.
+            Report("problem",
+                $"the breakpoint at 0x{staticVa:X} was removed, but its original byte could not be put "
+                + "back — the int3 is still in the code");
         }
 
         return true;
@@ -1326,7 +1362,15 @@ public sealed class DebugSession : IDisposable
         if (_temporary == address)
         {
             _temporary = null;
-            WriteByte(address, _temporaryOriginal);
+
+            // Nothing tracks this byte any more — the one-shot has just been forgotten — so a restore
+            // that fails leaves an int3 in the program for the rest of the run, with no record left of
+            // what it replaced and nothing that could put it back.
+            if (!WriteByte(address, _temporaryOriginal))
+            {
+                Report("problem", $"the one-shot breakpoint at 0x{ToStatic(address):X} could not be taken back out");
+            }
+
             Rewind(address, thenStep: false);
 
             // Not re-armed — that is the whole difference from a breakpoint someone set.
@@ -1373,7 +1417,14 @@ public sealed class DebugSession : IDisposable
             return true;
         }
 
-        WriteByte(address, hit.Original);
+        // Lifted so the step below carries execution off this address. If the byte will not go back the
+        // int3 is still there, so the step lands on it again: the program stops in the same place
+        // however many times it is continued, which reads as stepping that refuses to move.
+        if (!WriteByte(address, hit.Original))
+        {
+            Report("problem", $"the breakpoint byte at 0x{ToStatic(address):X} could not be lifted to step off it");
+        }
+
         Rewind(address, thenStep: true);
 
         // Re-planted after the single step that carries execution off this address; planting it now
@@ -1503,49 +1554,112 @@ public sealed class DebugSession : IDisposable
         }
         else
         {
-            // Recorded against the address in the listing, which is the key they are kept under;
-            // what was read is the byte at wherever that address is in this particular run.
-            ulong staticVa = ToStatic(address);
+            // Asked before the write, not after. Nothing to record the byte against means nothing may
+            // replace it: an int3 whose original is kept nowhere is a byte of the program lost for
+            // good.
             lock (_breakpoints)
             {
-                if (!_breakpoints.TryGetValue(staticVa, out var breakpoint))
+                if (!_breakpoints.ContainsKey(ToStatic(address)))
                 {
-                    // Nothing to record the byte against, so nothing may replace it. An int3 whose
-                    // original is kept nowhere is a byte of the program lost for good.
                     return false;
                 }
-
-                _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
             }
         }
 
-        WriteByte(address, 0xCC);
+        // Said rather than assumed. This used to write and return true regardless, because WriteByte
+        // discarded the result of WriteProcessMemory — so a page that would not take the byte produced
+        // a breakpoint that listed as planted, never fired, and gave nobody a reason why.
+        if (!WriteByte(address, 0xCC))
+        {
+            Report("problem", $"could not put a breakpoint at 0x{ToStatic(address):X}: the write was refused");
+            return false;
+        }
+
+        // Marked planted only now that the int3 is really there, and the byte it replaced recorded
+        // beside it — which is what a removal puts back.
+        if (!temporary)
+        {
+            ulong staticVa = ToStatic(address);
+            lock (_breakpoints)
+            {
+                if (_breakpoints.TryGetValue(staticVa, out var breakpoint))
+                {
+                    _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
+                }
+            }
+        }
+
         return true;
     }
 
-    private void WriteByte(ulong address, byte value)
+    /// <summary>
+    /// Writes bytes into the debuggee, lifting the page's protection if it will not take them
+    /// otherwise. False when they did not all go in.
+    ///
+    /// A plain <c>WriteProcessMemory</c> is enough for an ordinary code section — mapped
+    /// execute-read, and the kernel writes through it — which is why this was never needed before.
+    /// It is not enough everywhere. A JIT's code pages are execute-read through a shared double
+    /// mapping under W^X, and read-only data is read-only, and both refuse the write with
+    /// ERROR_NOACCESS. So a refusal is retried with the page made execute-readwrite, and the
+    /// protection is put straight back: leaving it open would quietly undo the runtime's own
+    /// guarantees about its code for the rest of the run.
+    ///
+    /// Every caller has to look at the answer. A write that silently did nothing is a breakpoint
+    /// reported as planted that never fires, or a patch reported as applied that is not there.
+    /// </summary>
+    private unsafe bool Write(ulong address, byte* bytes, nuint length)
+    {
+        if (_process == IntPtr.Zero || length == 0)
+        {
+            return false;
+        }
+
+        if (Native.WriteProcessMemory(_process, address, bytes, length, out nuint wrote) && wrote == length)
+        {
+            Native.FlushInstructionCache(_process, address, length);
+            return true;
+        }
+
+        if (!Native.VirtualProtectEx(_process, address, length, Native.PageExecuteReadWrite, out uint previous))
+        {
+            return false;
+        }
+
+        bool written;
+        try
+        {
+            written = Native.WriteProcessMemory(_process, address, bytes, length, out wrote) && wrote == length;
+        }
+        finally
+        {
+            Native.VirtualProtectEx(_process, address, length, previous, out _);
+        }
+
+        if (written)
+        {
+            Native.FlushInstructionCache(_process, address, length);
+        }
+
+        return written;
+    }
+
+    private bool WriteByte(ulong address, byte value)
     {
         unsafe
         {
             byte b = value;
-            if (Native.WriteProcessMemory(_process, address, &b, 1, out _))
-            {
-                Native.FlushInstructionCache(_process, address, 1);
-            }
+            return Write(address, &b, 1);
         }
     }
 
-    private void WriteBytes(ulong address, IReadOnlyList<byte> bytes)
+    private bool WriteBytes(ulong address, IReadOnlyList<byte> bytes)
     {
         byte[] buffer = bytes as byte[] ?? bytes.ToArray();
         unsafe
         {
             fixed (byte* p = buffer)
             {
-                if (Native.WriteProcessMemory(_process, address, p, (nuint)buffer.Length, out _))
-                {
-                    Native.FlushInstructionCache(_process, address, (nuint)buffer.Length);
-                }
+                return Write(address, p, (nuint)buffer.Length);
             }
         }
     }

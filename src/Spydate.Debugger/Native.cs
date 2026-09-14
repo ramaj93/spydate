@@ -293,6 +293,13 @@ internal static partial class Native
     /// <summary>Page protection constants for <see cref="VirtualProtectEx"/>.</summary>
     internal const uint PageReadWrite = 0x04;
 
+    /// <summary>
+    /// Writable and still executable, which is what code has to be made before it can be patched.
+    /// <see cref="PageReadWrite"/> would do for data and is wrong here: the thread is about to run
+    /// these bytes, and a page it may no longer execute is a crash rather than a breakpoint.
+    /// </summary>
+    internal const uint PageExecuteReadWrite = 0x40;
+
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool VirtualProtectEx(

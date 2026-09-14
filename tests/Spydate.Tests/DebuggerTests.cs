@@ -993,5 +993,116 @@ public sealed class DebuggerTests
         Assert.True(stops > 0, "it never stopped at all");
     }
 
+    /// <summary>
+    /// The process id is available as soon as the session is.
+    ///
+    /// Something other than this loop may need to read the debuggee — the CLR data access layer
+    /// attaches by process id, which is how managed state is read while this loop holds the debug
+    /// port — and a caller that has to work out for itself which process was just launched is a
+    /// caller that will eventually pick the wrong one.
+    /// </summary>
+    [Fact]
+    public void TheProcessIdIsKnownAsSoonAsItHasStarted()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        Assert.Equal(0u, session.ProcessId);
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        Assert.NotEqual(0u, session.ProcessId);
+
+        // The id of the thing that was actually started, rather than merely a number that is not zero.
+        // It is stopped at the loader break, so it is certainly still there to be asked.
+        using var running = System.Diagnostics.Process.GetProcessById((int)session.ProcessId);
+        Assert.Equal("where", running.ProcessName, ignoreCase: true);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A breakpoint that could not be put into the process does not claim to be planted, and says why.
+    ///
+    /// The failure this guards against is the quiet one: a breakpoint that lists as planted, never
+    /// fires, and offers no reason for it. Whoever set it then reads the absence of a stop as a fact
+    /// about the program — that the code was never reached — when it is a fact about the debugger.
+    /// </summary>
+    [Fact]
+    public void ABreakpointThatCouldNotBeWrittenIsNotReportedAsPlanted()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        var problems = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "problem")
+            {
+                lock (problems)
+                {
+                    problems.Add(e.Text);
+                }
+            }
+        };
+
+        // The lowest 64KB of a process is never mapped, so no byte can be put here. With no image base
+        // given the translation is the identity, so the address is tried exactly as written.
+        const ulong Nowhere = 0x1000;
+        Assert.True(session.AddBreakpoint(Nowhere));
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        // Still held, because it was asked for — but not pretending to be in the process.
+        var breakpoint = Assert.Single(session.Breakpoints);
+        Assert.False(breakpoint.Planted, "it claims to be planted where nothing can be written");
+
+        lock (problems)
+        {
+            Assert.Contains(problems, p => p.Contains("1000", StringComparison.Ordinal));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A live patch that could not be written reports that, instead of reporting success.
+    ///
+    /// This one used to come back null. The write went out through a helper that looked at the result
+    /// of <c>WriteProcessMemory</c> only to decide whether to flush the instruction cache, and threw
+    /// it away otherwise — so a patch onto memory that does not exist was indistinguishable from one
+    /// that had been applied, and the caller went on to believe the program had been changed.
+    /// </summary>
+    [Fact]
+    public void APatchThatCouldNotBeWrittenSaysSoInsteadOfReportingSuccess()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+
+        using var session = Headless();
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        // Far past the end of the image, so whatever address this works out to is mapped by nothing.
+        uint beyond = image.OptionalHeader.SizeOfImage + 0x100000;
+        string? refused = session.SetPatch(new LivePatch(beyond, [0x90], [0x00]));
+
+        Assert.NotNull(refused);
+        Assert.Contains("could not be written", refused, StringComparison.Ordinal);
+
+        session.Stop();
+    }
 }
 

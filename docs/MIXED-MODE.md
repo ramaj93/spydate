@@ -10,7 +10,8 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: planned. Nothing in this document is implemented yet.
+Status: Phase 1 has started. The correctness fixes it opens with are in and the suite is green; the
+engine itself, and everything after it, is still planned.
 
 ## 1. The constraint that shapes everything
 
@@ -181,9 +182,21 @@ Things the spike turned up in existing code, each worth fixing regardless of mix
 
 The smallest change that delivers native breakpoints and patches in a .NET process.
 
-- ⬜ `DebugSession.ProcessId`, public, from the launch
-- ⬜ `WriteByte` returns success; `Plant` refuses to record a breakpoint whose byte was not written
-- ⬜ `VirtualProtectEx` to `execute-readwrite` around writes into executable pages, protection restored
+- ✅ `DebugSession.ProcessId`, public, assigned while the process is created and so readable as soon
+  as `Start` has returned
+- ✅ Writes say whether they happened. `WriteByte` and `WriteBytes` return success; `Plant` refuses to
+  mark a breakpoint planted whose byte did not go in, and reports it; `SetPatch` and `ClearPatch`
+  report a refused write through `WriteRange`; and the three *restore* paths — removing a breakpoint,
+  lifting a one-shot, and lifting an int3 to step off it — say so when the byte will not go back.
+  Those three were not in this list when it was written and matter more than the plant path did: a
+  failed plant only fails to add a breakpoint, where a failed restore leaves an int3 in the program,
+  in one case permanently and with no record left of what it replaced
+- ✅ `VirtualProtectEx` to `execute-readwrite` around a write the page would otherwise refuse, with the
+  protection put straight back rather than left open
+- ⬜ A test for a genuine write *failure* is still missing, and may not be gettable: now that a refusal
+  is retried with the page unprotected, a readable-but-unwritable address is hard to construct on
+  purpose. What is covered is the unmapped case, a patch that cannot be written reporting instead of
+  returning success, and the process id
 - ⬜ A managed binary may choose the native engine: the host wires `Debug` rather than `ManagedDebug`
 - ⬜ Breakpoints and patches in **several** named modules at once — per-module load bases instead of
   one `_target`/`LoadedBase`
