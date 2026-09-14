@@ -113,6 +113,27 @@ internal static partial class Native
             get { fixed (byte* p = Payload) { return *(uint*)(p + 152) != 0; } }
         }
 
+        /// <summary>
+        /// EXCEPTION_RECORD.NumberParameters — how many of <see cref="ExceptionInformation"/> are set.
+        ///
+        /// The parameters are the whole content of a CLR DAC notification (<c>0x04242420</c>): the JIT
+        /// one is three of them — a type tag, the MethodDesc, and the native code the JIT just produced.
+        /// </summary>
+        public uint NumberParameters
+        {
+            get { fixed (byte* p = Payload) { return *(uint*)(p + 24); } }
+        }
+
+        /// <summary>
+        /// EXCEPTION_RECORD.ExceptionInformation[i], the exception's own parameters. On x64 the array
+        /// begins at offset 32 (after code, flags, the chained-record pointer, address, the count and
+        /// its padding), each entry a pointer-width value.
+        /// </summary>
+        public ulong ExceptionInformation(int index)
+        {
+            fixed (byte* p = Payload) { return *(ulong*)(p + 32 + index * 8); }
+        }
+
         /// <summary>CREATE_PROCESS_DEBUG_INFO.lpBaseOfImage — after hFile, hProcess, hThread.</summary>
         public ulong CreateProcessImageBase
         {

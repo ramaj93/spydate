@@ -357,4 +357,42 @@ public sealed class ManagedOverlayTests
 
         session.Stop();
     }
+
+    [Fact]
+    public void AManagedBreakpointOnAColdMethodIsHeldAndPlantedWhenItCompiles()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+
+        // Wait until the fixture's own type is loaded (Step has compiled), not merely until a CLR is
+        // present — the type arrives a moment after the runtime. LateJit stays cold for seconds, so it
+        // is still uncompiled at this point.
+        Assert.True(Wait(() => session.Managed?.IlOffsets(FixtureType, "Step").Count > 0), "the fixture type never loaded");
+
+        // Set the breakpoint while LateJit is still cold — there is no native code to break in yet.
+        string? held = session.AddManagedBreakpoint(FixtureType, "LateJit", 0);
+        Assert.NotNull(held);
+        Assert.Contains("not compiled", held!, StringComparison.OrdinalIgnoreCase);
+
+        // Once the method is called it JITs; a poll of PlantPending finds it has native code and plants
+        // the held breakpoint. (The deterministic first-call catch needs DAC JIT notifications, which
+        // are not enabled — see MIXED-MODE.md — so this fallback catches a later call.)
+        Assert.True(Wait(() => session.PlantPending() > 0, 30), "the held breakpoint was never planted");
+
+        // And then it fires, in LateJit.
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the planted breakpoint never fired");
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("LateJit", where!.Method, StringComparison.Ordinal);
+
+        session.Stop();
+    }
 }

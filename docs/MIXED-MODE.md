@@ -10,7 +10,7 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: **Phases 1–4 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
+Status: **Phases 1–4 are complete, Phase 5 is partial** on the `mixed-mode` branch. Phase 1 is the native engine: the
 correctness fixes are in, breakpoints and patches can both sit in several named modules at once, a .NET
 target can be told to use the native engine, and all four break-at choices are wired on both engines.
 Both engines have been run end to end **through the Debug Program dialog** — not just the choosing, the
@@ -20,9 +20,12 @@ at a native stop, without a debug port of its own. Phase 3 is managed breakpoint
 `AddManagedBreakpoint` resolves a method + IL offset to a JIT address through the overlay and plants a
 native int3 there, which re-arms and fires like any other and refuses a not-yet-compiled method with a
 reason. Phase 4 is managed stepping: `StepManaged` runs native single-steps until the overlay's IL
-offset changes — step into, over and out, each landing on a real IL boundary. What remains is the two
-optional/edge pieces: Phase 5 (catching a cold method's first call, via DAC notifications) and Phase 6
-(the surfaces — the panel showing both worlds at one stop, and the MCP tools).
+offset changes — step into, over and out, each landing on a real IL boundary. Phase 5 is partial and
+honest about it: a breakpoint on a not-yet-compiled method is held and planted once it has native code
+(catching a later call), and the notification machinery for the deterministic first-call catch is
+built — but enabling the CLR's JIT notifications, which that catch needs, could not be done reliably on
+this runtime, exactly the "may not work" outcome the plan predicted. What remains is Phase 6 (the
+surfaces — the panel showing both worlds at one stop, and the MCP tools).
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -372,14 +375,39 @@ ICorDebug.
   same on desktop CLR 4.8, so "both runtimes" holds — a .NET Framework build is not something the test
   project produces, so that half stays the spike's evidence rather than a suite test.
 
-### Phase 5 — catching a cold method's first call (optional)
+### Phase 5 — catching a cold method's first call (partial; the unprovable part is unproven)
 
-The only part that may not work. Nothing in phases 1–4 depends on it, so it can land late or never.
+The plan called this "the only part that may not work", and on this runtime the deterministic
+first-call catch does not: the machinery is built and correct, but the one thing it depends on —
+enabling the CLR's JIT notifications — could not be done reliably. So a breakpoint on a cold method is
+**held and planted the moment it has native code, catching a later call**, not the first. Everything
+here is honest about that.
 
-- ⬜ `ExceptionInformation` accessors on `Native.DEBUG_EVENT`
-- ⬜ Locate and set the CLR's DAC JIT-notification flag in the target
-- ⬜ Decode notification → `ClrRuntime.GetMethodByHandle(methodDesc)` → plant at the new code
-- ⬜ Tests: a breakpoint asked for before first call stops *at* that first call
+- ✅ `ExceptionInformation` accessors on `Native.DEBUG_EVENT`: `NumberParameters` and
+  `ExceptionInformation(i)`, reading the EXCEPTION_RECORD parameters at the x64 offsets. Verified
+  against the real DAC notification that fires at startup — three parameters, the first the magic
+  `0x31415927` that marks a genuine CLR notification.
+- ⬜ **Locate and set the CLR's DAC JIT-notification flag — attempted, not achieved.** The JIT
+  notification (`0x04242420`, `DACNotify::DoJITNotification`) is raised only when
+  `g_dacNotificationFlags` has its JIT bit set, and it is off by default even with a debugger attached
+  (confirmed: one notification at +100ms during startup, none when a cold method JITted). Enabling it
+  means writing that global in the target, which needs its address. A signature scan located the
+  RaiseException(`0x04242420`) site and its `IsDebuggerPresent` gate, but the flag itself is read in an
+  uninlined caller the scan could not pin down; six `.data` candidates were set to 1 and none turned
+  notifications on; no coreclr PDB is present locally to resolve the symbol. This is exactly the
+  "genuinely unproven, most expensive" outcome the plan flagged, and it is version-specific besides.
+  Left for a later pass with a symbol source (the public coreclr PDB) or the DAC's own globals table.
+- ✅ Decode notification → plant. `DebugSession.OnClrNotification` recognises a real notification by its
+  magic and, on a JIT one, re-resolves and plants every held breakpoint whose method now has native
+  code. Correct and ready — it fires as the deterministic first-call catch the instant JIT
+  notifications can be turned on.
+- ✅ Pending managed breakpoints. `AddManagedBreakpoint` on a not-yet-compiled method holds it rather
+  than refusing it, and `PlantPending` (which a caller polls, and which the notification handler calls)
+  plants it once its method compiles.
+- ◑ Tests: `AManagedBreakpointOnAColdMethodIsHeldAndPlantedWhenItCompiles` — a breakpoint set on a cold
+  method is held, planted once the method JITs, and fires in it. It catches a *later* call, not the
+  first, because the first-call catch needs the notification flag above; the wording says so. The
+  "stops at the first call" test the plan asked for waits on that flag.
 
 ### Phase 6 — the surfaces
 

@@ -1204,14 +1204,102 @@ public sealed class DebugSession : IDisposable
         }
 
         var resolved = overlay.Resolve(type, method, ilOffset);
-        if (!resolved.Ok)
+        if (resolved.Ok)
         {
-            return resolved.Problem ?? "the managed breakpoint could not be resolved";
+            return AddBreakpoint(resolved.Address)
+                ? null
+                : $"a breakpoint is already set at 0x{resolved.Address:X}";
         }
 
-        return AddBreakpoint(resolved.Address)
-            ? null
-            : $"a breakpoint is already set at 0x{resolved.Address:X}";
+        // Not compiled yet: hold it, rather than refuse it outright. The plan's Phase 5 — it is
+        // planted the moment the method has native code, either when a JIT notification announces it
+        // (the deterministic first-call catch) or when PlantPending next re-resolves it (the fallback,
+        // which catches a later call). A method that genuinely does not exist is not held.
+        if (resolved.NotCompiled)
+        {
+            var pending = new ColdBreakpoint(type, method, ilOffset);
+            lock (_pendingCold)
+            {
+                if (!_pendingCold.Contains(pending))
+                {
+                    _pendingCold.Add(pending);
+                }
+            }
+
+            return $"{method} is not compiled yet; held and planted on its first call once it JITs";
+        }
+
+        return resolved.Problem ?? "the managed breakpoint could not be resolved";
+    }
+
+    /// <summary>A managed breakpoint waiting for its method to be compiled before it can be planted.</summary>
+    private sealed record ColdBreakpoint(string Type, string Method, int IlOffset);
+
+    private readonly List<ColdBreakpoint> _pendingCold = new();
+
+    private const uint ClrDataNotifyException = 0x04242420;
+
+    /// <summary>The first parameter of every CLR DAC notification — a magic marker, so a stray exception
+    /// with the same code is not mistaken for one.</summary>
+    private const ulong ClrNotifyMagic = 0x31415927;
+
+    /// <summary>
+    /// Plants every held managed breakpoint whose method has since been compiled, and returns how many
+    /// went in. The fallback to a JIT notification: a caller can poll this, and each pending breakpoint
+    /// is planted the first time its method has native code — which catches a later call even when JIT
+    /// notifications are not enabled.
+    /// </summary>
+    public int PlantPending()
+    {
+        if (_overlay is not { } overlay)
+        {
+            return 0;
+        }
+
+        List<ColdBreakpoint> waiting;
+        lock (_pendingCold)
+        {
+            waiting = _pendingCold.ToList();
+        }
+
+        int planted = 0;
+        foreach (var cold in waiting)
+        {
+            var resolved = overlay.Resolve(cold.Type, cold.Method, cold.IlOffset);
+            if (resolved.Ok && AddBreakpoint(resolved.Address))
+            {
+                planted++;
+                lock (_pendingCold)
+                {
+                    _pendingCold.Remove(cold);
+                }
+
+                Report("module", $"{cold.Method} compiled; its held breakpoint is planted at 0x{ToStatic(resolved.Address):X}");
+            }
+        }
+
+        return planted;
+    }
+
+    /// <summary>
+    /// A CLR DAC notification arrived — a method was jitted, or a module loaded. When it is a JIT
+    /// notification, this is the deterministic moment a cold method first has native code, so every
+    /// held breakpoint whose method is now compiled is planted before the call that caused the JIT
+    /// continues. Runs on the loop thread while the process is stopped on the notification.
+    /// </summary>
+    private void OnClrNotification(Native.DEBUG_EVENT e)
+    {
+        // Only a real notification, told by its magic marker; and only a JIT one, which carries three
+        // parameters (magic, MethodDesc, native code) as against the two of a module notification.
+        if (e.NumberParameters < 3 || e.ExceptionInformation(0) != ClrNotifyMagic)
+        {
+            return;
+        }
+
+        // The MethodDesc and its fresh native code are in the notification, but the simplest and most
+        // robust use of it is as the trigger to re-resolve every held breakpoint: the method is
+        // compiled as of this instant, so PlantPending finds and plants it.
+        PlantPending();
     }
 
     /// <summary>
@@ -1375,6 +1463,10 @@ public sealed class DebugSession : IDisposable
         _stopping.Cancel();
 
         _managedStep = null;
+        lock (_pendingCold)
+        {
+            _pendingCold.Clear();
+        }
 
         // The DAC's read handle on the process goes before the process does. Disposed here rather than
         // only in Dispose so a session stopped and left around does not hold the debuggee's handle open.
@@ -1882,6 +1974,16 @@ public sealed class DebugSession : IDisposable
                 // Continue greyed out and no way to do anything but stop. An access violation is
                 // the single most interesting place a debugger ever pauses, and it was the one
                 // place the panel could not tell you it had.
+                // A CLR DAC notification (a method was jitted, a module loaded). It carries a magic
+                // first parameter and, for a JIT notification, the MethodDesc and the fresh native code
+                // — the deterministic way to catch a method that had no address until it compiled. It is
+                // first-chance and belongs to the runtime, so it is taken silently after being acted on.
+                if (e.ExceptionCode == ClrDataNotifyException && e.FirstChance)
+                {
+                    OnClrNotification(e);
+                    return (false, Native.DBG_CONTINUE);
+                }
+
                 bool fatal = !e.FirstChance;
                 if (fatal)
                 {

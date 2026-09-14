@@ -43,6 +43,12 @@ public sealed record OverlayStep(int IlOffset, ulong RangeStart, ulong RangeEnd,
 public sealed record OverlayResolution(ulong Address, int MethodToken, string? Method, string? Problem)
 {
     public bool Ok => Problem is null && Address != 0;
+
+    /// <summary>
+    /// Whether the refusal is specifically "the method exists but has not been JITted" — the case a
+    /// pending breakpoint holds for, as against a name that does not resolve at all.
+    /// </summary>
+    public bool NotCompiled { get; init; }
 }
 
 /// <summary>
@@ -259,7 +265,10 @@ public sealed class ManagedOverlay : IDisposable
             if (!IsCompiled(method.NativeCode) || map.Length == 0)
             {
                 return new OverlayResolution(0, token, method.Signature,
-                    $"{methodName} is not compiled yet, so there is no native code to break in; it JITs on its first call");
+                    $"{methodName} is not compiled yet, so there is no native code to break in; it JITs on its first call")
+                {
+                    NotCompiled = true,
+                };
             }
 
             ulong address = NativeForIl(map, ilOffset);

@@ -24,19 +24,48 @@ internal static class Program
     /// <summary>Accumulates <see cref="Step"/>'s result, so its statements are not optimised away.</summary>
     public static long Sum;
 
+    /// <summary>Accumulates <see cref="LateJit"/>'s result, so its JIT is not elided.</summary>
+    public static long LateSum;
+
     private static void Main()
     {
         Console.WriteLine($"managed debuggee up, pid {Environment.ProcessId}");
         Spin();
     }
 
+    /// <summary>
+    /// Cold at startup: never called until the loop has turned enough times, then called every turn.
+    /// So it JITs on a late first call — the pending-breakpoint case — and is called again after, so a
+    /// breakpoint planted once it has native code catches a subsequent call. Shaped like Step so a
+    /// breakpoint has interior offsets to aim at.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static int LateJit(int value)
+    {
+        int doubled = value * 2;
+        int plusOne = doubled + 1;
+        int mixed = plusOne ^ value;
+        return mixed;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Spin()
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         while (true)
         {
             Ticks++;
             Sum += Step(Ticks);
+
+            // LateJit stays cold for a few seconds, then is called every turn — so its first JIT is
+            // late (long after a debugger has had time to see the CLR and set a breakpoint on it), and
+            // it is called again after, so a breakpoint planted once it has native code catches a later
+            // call. Wall-clock, not a tick count, so the cold window does not shrink on a slow machine.
+            if (clock.Elapsed.TotalSeconds > 4)
+            {
+                LateSum += LateJit(Ticks);
+            }
+
             Wait();
         }
     }
