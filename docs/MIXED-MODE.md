@@ -12,9 +12,12 @@ is written down here rather than left in a scratch directory.
 
 Status: Phase 1 is all but done on the `mixed-mode-phase-1` branch. The correctness fixes are in,
 breakpoints and patches can both sit in several named modules at once, and a .NET target can now be
-told to use the native engine — which together are the native half of what this was for. What is left
-of Phase 1 is one test that needs a fixture. The managed side of the engine, phases 2 onwards, is
-still planned.
+told to use the native engine — which together are the native half of what this was for. Both engines
+have now been run end to end **through the Debug Program dialog** — not just the choosing, the running:
+the native engine launches, stops at Create Process, hits a user breakpoint reported at its static
+listing address, and reports its exit code; the managed engine launches under the CLR and holds before
+running anything. What is left of Phase 1 is one test that needs a fixture. The managed side of the
+engine, phases 2 onwards, is still planned.
 
 One thing worth knowing before touching the debugger panel again: it publishes **nothing** to UI
 Automation. A dump of the whole window found 174 named elements — menus, toolbar, explorer tree,
@@ -241,6 +244,19 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   a module that never loads staying unplanted. All of those are modules present from the start, so the
   loader-event path — the one the spike proved against a DLL arriving nine seconds in — is still
   untested in the suite itself
+- ✅ Run end to end from the dialog, both engines, through the real `DebuggerViewModel` and the real
+  `RunConfigWindow`. The dialog work had proved the *choosing* and never the *running*; this closes
+  that. A scratchpad panel probe (see `docs/DECISIONS.md` on why the App is untestable, and the
+  throwaway-console pattern) opens a binary, sets a breakpoint, drives `StartCommand` — which opens
+  and accepts the actual modal dialog — and follows the run. Native (`where.exe`): stops at Create
+  Process with registers and modules, continues to a user breakpoint at the entry point that reports
+  as the *static* VA though the module was ASLR-rebased (the `(module, RVA)` planting and the
+  runtime→static round-trip both work through the whole stack), continues to `Exited with code 2`.
+  Managed (`spydate-mcp.dll` under its apphost as the executable): launches under the CLR, reaches
+  "Held before it ran anything" with `ShowsRegisters` false — the panel rearranged for managed — and
+  is terminated cleanly. What is *not* covered this way: the native-engine-on-a-.NET-program path (a
+  breakpoint in a native DLL a managed process loads), which needs a managed target that loads a known
+  native DLL to exercise deterministically
 
 ### Phase 2 — the managed overlay
 
