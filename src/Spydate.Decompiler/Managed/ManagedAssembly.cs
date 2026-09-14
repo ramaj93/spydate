@@ -350,6 +350,23 @@ public sealed class ManagedAssembly : IDisposable
         }
     }
 
+    /// <summary>
+    /// The module initializer — the static constructor of the global <c>&lt;Module&gt;</c> type — if
+    /// this assembly has one. Most do not; it is what runs before anything else in the module when it
+    /// does, which is why "Module cctor or Entry Point" names it first.
+    /// </summary>
+    public ManagedMember? ModuleInitializer
+    {
+        get
+        {
+            var ts = CSharpDecompiler.TypeSystem;
+            var moduleType = ts.MainModule.TopLevelTypeDefinitions
+                .FirstOrDefault(t => t.Name == "<Module>" && t.Namespace.Length == 0);
+            var cctor = moduleType?.Methods.FirstOrDefault(m => m.IsStatic && m.IsConstructor);
+            return cctor is null ? null : ToMember(cctor);
+        }
+    }
+
     private IReadOnlyList<ManagedNamespace> BuildNamespaces()
     {
         var ts = CSharpDecompiler.TypeSystem;

@@ -7,6 +7,44 @@ public class ManagedDecompilerTests
 {
     private static string CoreAssemblyPath => typeof(PeImage).Assembly.Location;
 
+    /// <summary>The entry-point assembly copied next to the tests — a real program with a Main.</summary>
+    private static string McpAssemblyPath => Path.Combine(AppContext.BaseDirectory, "spydate-mcp.dll");
+
+    [Fact]
+    public void TheEntryPointResolvesToTheMainMethod()
+    {
+        if (!File.Exists(McpAssemblyPath))
+        {
+            return;
+        }
+
+        using var asm = ManagedAssembly.Load(McpAssemblyPath);
+        var entry = asm.EntryPoint;
+
+        Assert.NotNull(entry);
+        Assert.Equal(ManagedMemberKind.Method, entry!.Kind);
+        Assert.Contains("Main", entry.Name, StringComparison.Ordinal);
+
+        // A real MethodDef token, which is what a break-at at the entry point is set from.
+        int token = System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(entry.Handle);
+        Assert.Equal(System.Reflection.Metadata.HandleKind.MethodDefinition, entry.Handle.Kind);
+        Assert.NotEqual(0, token);
+    }
+
+    [Fact]
+    public void AnAssemblyWithNoModuleInitializerReportsNone()
+    {
+        // spydate-mcp has no [ModuleInitializer], so "Module cctor or Entry Point" falls back to the
+        // entry point — this is the accessor saying there is nothing to fall back from.
+        if (!File.Exists(McpAssemblyPath))
+        {
+            return;
+        }
+
+        using var asm = ManagedAssembly.Load(McpAssemblyPath);
+        Assert.Null(asm.ModuleInitializer);
+    }
+
     [Fact]
     public void LoadsNamespacesAndTypes()
     {

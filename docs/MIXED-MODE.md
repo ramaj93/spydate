@@ -257,6 +257,22 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   is terminated cleanly. What is *not* covered this way: the native-engine-on-a-.NET-program path (a
   breakpoint in a native DLL a managed process loads), which needs a managed target that loads a known
   native DLL to exercise deterministically
+- ✅ All four break-at choices wired, both engines. The native loop decides at the loader break — the
+  one moment the timing is not a race — whether to report it, let go, or run on to a one-shot at an
+  entry: the launched process's own entry ("Entry Point"), or the opened module's entry ("Module cctor
+  or Entry Point", which for native code with no static constructor is the entry point), the latter
+  planted when the module lands under a host, which is the mixed-mode case. The decision moved out of a
+  `_skipFirstStop` flag in the view model, which could only express "Don't break", into
+  `DebugSession.Start`. The managed engine holds at the start, plants a breakpoint at the entry-point
+  token — or the module initializer's, from a new `ManagedAssembly.ModuleInitializer`, when the
+  assembly has one — and continues to it; both those methods run once, so the breakpoint is a one-shot
+  in all but name. Verified: three new `DebuggerTests` (Entry Point stops at `exe+EntryPointRva` with
+  no loader break reported; module entry standalone likewise; Don't break runs to exit with zero
+  stops), two new `ManagedDecompilerTests` (the entry point resolves to Main with a real MethodDef
+  token; an assembly with no module initializer reports none), and the panel probe driving all four
+  through the dialog on both engines — the managed entry stop landing on `Program.<Main>` at IL_0000.
+  Not verified: the managed module-initializer branch against a real assembly that has one (spydate-mcp
+  does not), and the host-loaded-DLL module-entry stop end to end
 
 ### Phase 2 — the managed overlay
 

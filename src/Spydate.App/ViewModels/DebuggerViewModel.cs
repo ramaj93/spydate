@@ -346,15 +346,16 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     ];
 
     /// <summary>
-    /// Where to stop, named as dnSpy names them. The last two are not wired yet and say so: a
-    /// dropdown entry that silently does nothing is worse than one that admits it.
+    /// Where to stop, named as dnSpy names them. All four are wired now: the native loop runs on to
+    /// an entry point past the loader break, and the managed engine holds, plants the entry-point or
+    /// module-cctor breakpoint, and continues to it.
     /// </summary>
     public IReadOnlyList<BreakAtChoice> BreakAtChoices { get; } =
     [
         new BreakAtChoice(DebugBreakAt.None, "Don't break"),
         new BreakAtChoice(DebugBreakAt.CreateProcess, "Create Process"),
-        new BreakAtChoice(DebugBreakAt.EntryPoint, "Entry Point (not yet)"),
-        new BreakAtChoice(DebugBreakAt.ModuleCctorOrEntryPoint, "Module cctor or Entry Point (not yet)"),
+        new BreakAtChoice(DebugBreakAt.EntryPoint, "Entry Point"),
+        new BreakAtChoice(DebugBreakAt.ModuleCctorOrEntryPoint, "Module cctor or Entry Point"),
     ];
 
     /// <summary>
@@ -663,11 +664,63 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             }
         }
 
+        // Break-at, the managed way: hold at the start (which is why holdAtStart followed the same
+        // "anything but Don't break" rule), plant the entry-point or module-cctor breakpoint while
+        // held, and continue to it — so the panel comes up stopped where the program first runs its
+        // own code, not at the runtime's own initial hold. Both of those methods run once, so an
+        // ordinary breakpoint there is a one-shot in all but name.
+        if (BreakAt is DebugBreakAt.EntryPoint or DebugBreakAt.ModuleCctorOrEntryPoint
+            && PlantManagedEntryBreak(binary, session))
+        {
+            session.Continue();
+            State = DebugState.Running;
+            Status = "Running to the entry point.";
+            Add("continuing to the entry point");
+            SyncManaged();
+            NotifyCommands();
+            return;
+        }
+
         State = DebugState.Stopped;
         Status = "Held before it ran anything.";
         Add($"started {run} under the .NET debugger, held before it ran anything");
         SyncManaged();
         NotifyCommands();
+    }
+
+    /// <summary>
+    /// Sets the breakpoint a managed break-at continues to: the module initializer when the choice is
+    /// "Module cctor or Entry Point" and the assembly has one — it runs before the entry point —
+    /// otherwise the entry point. Returns whether there is something to continue to; a false answer
+    /// means hold at the start rather than run on to a stop that will never come.
+    /// </summary>
+    private bool PlantManagedEntryBreak(OpenedBinary binary, ManagedDebugSession session)
+    {
+        if (binary.Managed is not { } managed)
+        {
+            return false;
+        }
+
+        var target = BreakAt == DebugBreakAt.ModuleCctorOrEntryPoint
+            ? managed.ModuleInitializer ?? managed.EntryPoint
+            : managed.EntryPoint;
+
+        if (target is null)
+        {
+            Add("there is no entry point to break at; holding at the start instead");
+            return false;
+        }
+
+        string module = binary.Image.FileName;
+        uint token = (uint)MetadataTokens.GetToken(target.Handle);
+        if (session.SetBreakpoint(module, token, 0) is { } refused)
+        {
+            Add($"could not set the entry-point breakpoint: {refused}; holding at the start instead");
+            return false;
+        }
+
+        Add($"break at {target.Name} in {module}; continuing to it");
+        return true;
     }
 
     [RelayCommand(CanExecute = nameof(IsDebugging))]

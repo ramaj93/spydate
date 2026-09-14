@@ -373,8 +373,10 @@ native side already reads it, because native is what it is.
   not the call but what a listing means afterwards — the modules are already mapped, their bases are
   known rather than waited for, and the binary being read may be any one of them or none. The Debug
   menu carries a disabled "Attach to Process…" so the gap is visible rather than missing
-- ⬜ **Break at an entry point.** The run configuration offers dnSpy's four choices, and two of them
-  work: "Don't break" and "Create Process". "Entry Point" and "Module cctor or Entry Point" need a
-  breakpoint planted before the first instruction runs — for a native target at
-  `ImageBase + EntryPointRva`, and for a managed one at the entry point's own token, with the module
-  static constructor found from metadata where there is one. See `MIXED-MODE.md`
+- ✅ **Break at an entry point.** All four of dnSpy's choices work now. The native loop decides at the
+  loader break whether to report it ("Create Process"), let go of it ("Don't break"), or run on to a
+  one-shot at the launched process's entry ("Entry Point") or the opened module's own entry ("Module
+  cctor or Entry Point" — the entry point, since native code has no static constructor), which under a
+  host is the DLL's entry when it loads. The managed engine holds at the start, plants a breakpoint at
+  the entry-point token — or the module initializer's, when the assembly has one — and continues to
+  it. See `MIXED-MODE.md`
