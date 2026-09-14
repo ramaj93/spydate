@@ -611,3 +611,42 @@ The catch is telling a framework name from a typo of an opened one. `PeImagg::Lo
 with "did you mean PeImage", not sent off to wait for an assembly that never comes. So a name is only
 deferred when the opened assembly does not recognise it at all: if the resolver would suggest a fix, or
 found the type and only missed the method, the name was aimed at the opened assembly and stays there.
+
+## Mixed mode puts the native loop in charge, and the DAC rides along without a debug port
+
+"Managed debugging goes through dbgshim, and is a second debugger rather than a branch" says ICorDebug
+cannot extend `DebugSession`, because it takes the process's native debug port and means to be the only
+debugger attached. That is true and it stays true. What it did not weigh is a third engine that takes
+no port at all.
+
+A process has one debug port, so it can have one *debugger* — but not, as that was read to mean, one
+*engine*. Visual Studio has run a managed, a native and a script engine over a single connection since
+2012: one component owns the OS side and the engines are interpreters layered on its event stream. The
+two sessions here are exclusive for a narrower reason — each of them calls the OS attach itself.
+`ManagedDebugSession` reaches `DebugActiveProcess` during runtime startup and `DebugSession` owns its
+own `WaitForDebugEvent`. Two attachers, so the second one loses.
+
+Interop debugging is not the way out, because it is not everywhere. .NET Framework's ICorDebug can own
+the native loop and forward native events to an unmanaged callback; CoreCLR removed that outright, and
+under it a native int3 arrives as an event ICorDebug will not forward, goes unhandled second-chance,
+and kills the debuggee. Spydate has to work on both, so interop is out on both.
+
+So the native loop keeps the port, and managed meaning comes from the DAC through ClrMD, which attaches
+*passively*: `OpenProcess` and `ReadProcessMemory`, no debug port. The part that makes this work rather
+than merely coexist is that ClrMD never writes anything and never needs to. It answers "where did the
+JIT put IL offset 1 of this method", and the native loop writes the int3 there. A managed breakpoint is
+a native breakpoint at an address the DAC resolved; a managed step is native single-steps until the DAC
+says the IL offset changed. Read-only is enough when the control comes from the other side.
+
+A spike settled this before anything was built, on CoreCLR 10 and desktop CLR 4.8 alike: the DAC walked
+managed stacks while the loop held the port, an int3 at a DAC-resolved address fired and re-armed, and
+the managed frame and the native registers were both readable at that stop — a managed argument read
+out of `rcx`. `MIXED-MODE.md` carries the measurements and the plan.
+
+Two things are given up or left open. `funceval` does not come along: running a property getter inside
+the debuggee is an ICorDebug feature with no DAC equivalent, so fields are read out of memory instead,
+which for an obfuscated target is the more truthful answer anyway. And a cold method's first call
+cannot be caught — before the JIT has run there is no address to break at, and the CLR's DAC
+notifications, which is how SOS's `!bpmd` manages it, stay off unless a debugger turns them on. Native
+code has no such gap: it has a static address the moment its module maps, and a breakpoint planted on
+`LOAD_DLL` is standing in `DllMain` before its body runs.

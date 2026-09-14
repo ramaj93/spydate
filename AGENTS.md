@@ -28,6 +28,7 @@ Detailed design lives in `docs/`:
 - `docs/ROADMAP.md` — phased plan and current status.
 - `docs/DECISIONS.md` — architecture decision records (ADRs).
 - `docs/MCP.md` — the agent-facing tool surface, and how to connect a client.
+- `docs/MIXED-MODE.md` — native and managed debugging in one session: design, spike evidence, plan.
 
 ## 2. Repository layout
 
