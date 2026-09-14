@@ -1227,5 +1227,111 @@ public sealed class DebuggerTests
 
         session.Stop();
     }
+
+    /// <summary>
+    /// A live patch goes into a module other than the one being read.
+    ///
+    /// This is the half of patching that was missing: an RVA was always module-relative, but there was
+    /// no way to say which module, so every patch went into the program itself. Aimed at ntdll's first
+    /// byte — the "MZ" of its mapped header, read-only and never executed — so it proves the addressing
+    /// without changing anything the process will run.
+    /// </summary>
+    [Fact]
+    public void APatchGoesIntoAModuleOtherThanTheOneBeingRead()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong ntdll = session.Modules.Single(m => m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        byte original = session.ReadMemory(ntdll, 1).Single();
+        Assert.Equal((byte)'M', original);
+
+        Assert.Null(session.SetPatch(new LivePatch(0, [0x90], [original]) { Module = "ntdll.dll" }));
+        Assert.Equal(0x90, session.ReadMemory(ntdll, 1).Single());
+        Assert.Contains(session.LivePatches, p => p.Module == "ntdll.dll" && p.Rva == 0);
+
+        Assert.Null(session.ClearPatch("ntdll.dll", 0));
+        Assert.Equal(original, session.ReadMemory(ntdll, 1).Single());
+        Assert.DoesNotContain(session.LivePatches, p => p.Module == "ntdll.dll");
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// Two modules hold a patch at the same RVA at once, and clearing one leaves the other alone.
+    ///
+    /// The case a table keyed by RVA alone could not represent at all: the second patch was the first
+    /// one, and removing either restored whichever bytes happened to be recorded. RVA 0 in both, so the
+    /// two keys differ only by module — which is the whole of what was added.
+    /// </summary>
+    [Fact]
+    public void PatchesAtTheSameRvaInTwoModulesDoNotCollide()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        ulong ntdll = session.Modules.Single(m => m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.NotEqual(exe, ntdll);
+
+        byte exeWas = session.ReadMemory(exe, 1).Single();
+        byte ntdllWas = session.ReadMemory(ntdll, 1).Single();
+
+        Assert.Null(session.SetPatch(new LivePatch(0, [0x90], [exeWas]) { Module = "where.exe" }));
+        Assert.Null(session.SetPatch(new LivePatch(0, [0x91], [ntdllWas]) { Module = "ntdll.dll" }));
+
+        Assert.Equal(2, session.LivePatches.Count);
+        Assert.Equal(0x90, session.ReadMemory(exe, 1).Single());
+        Assert.Equal(0x91, session.ReadMemory(ntdll, 1).Single());
+
+        // Each comes out on its own, restoring that module's own byte and leaving the other patched.
+        Assert.Null(session.ClearPatch("where.exe", 0));
+        Assert.Equal(exeWas, session.ReadMemory(exe, 1).Single());
+        Assert.Equal(0x91, session.ReadMemory(ntdll, 1).Single());
+
+        Assert.Null(session.ClearPatch("ntdll.dll", 0));
+        Assert.Equal(ntdllWas, session.ReadMemory(ntdll, 1).Single());
+        Assert.Empty(session.LivePatches);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A patch naming a module the process never loads is held rather than refused, and nothing is
+    /// written anywhere on its behalf. Held is the same answer a patch gets before its module arrives,
+    /// which is the normal case for a DLL.
+    /// </summary>
+    [Fact]
+    public void APatchNamingAModuleThatNeverLoadsIsHeldAndNotWritten()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        Assert.Null(session.SetPatch(new LivePatch(0x1000, [0x90], [0x00]) { Module = "no-such-module-of-ours.dll" }));
+
+        var held = Assert.Single(session.LivePatches);
+        Assert.Equal("no-such-module-of-ours.dll", held.Module);
+        Assert.Equal(0x1000u, held.Rva);
+
+        session.Stop();
+    }
 }
 

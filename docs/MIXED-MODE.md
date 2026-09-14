@@ -11,8 +11,10 @@ any of it was built. The spike was throwaway code outside the repository, so the
 is written down here rather than left in a scratch directory.
 
 Status: Phase 1 is under way on the `mixed-mode-phase-1` branch. The correctness fixes it opens with
-are in, and breakpoints can now sit in several named modules at once; the managed side of the engine,
-and everything after it, is still planned.
+are in, and breakpoints and patches can both now sit in several named modules at once — which is the
+native half of what this was for. The managed side of the engine, and everything after it, is still
+planned; so is letting a .NET target choose the native engine at all, which is an application change
+rather than an engine one.
 
 ## 1. The constraint that shapes everything
 
@@ -206,8 +208,13 @@ The smallest change that delivers native breakpoints and patches in a .NET proce
   share a preferred base. Any module loading plants the breakpoints that name it, the loader announces
   that before the module runs its own code, and only that module's breakpoints are forgotten when it
   unloads
-- ⬜ Patches in several modules. Still single-target: `WriteRange` works from `LoadedBase + rva`, so a
-  live patch can only go into the module the listing is about
+- ✅ Patches in several modules. A patch is kept under `(module, RVA)` the way a breakpoint now is, and
+  `LivePatch` carries the module itself — so the positional constructor every caller uses is unchanged
+  and `SetPatch` needed no new overload. An RVA was always module-relative; what it lacked was a way to
+  say *which* module, so every patch went into the program being read. This is the half of the original
+  request that mattered most: patching a protection DLL's process-attach check is a patch in a module
+  other than the opened one. Patches for a module are written when that module loads, before its
+  breakpoints are planted, so a breakpoint landing on a patched byte still records the patched byte
 - ⬜ Tests: a native breakpoint in a **late**-loading DLL's entry point, and the reason code at the
   stop. Covered so far: two modules at once with each byte restored to its own module, a
   module-qualified breakpoint firing at an entry point and reported as `module+0xRVA`, and one naming

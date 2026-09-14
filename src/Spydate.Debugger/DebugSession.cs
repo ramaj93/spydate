@@ -66,7 +66,17 @@ public sealed record DebugThread(uint Id, ulong StartAddress);
 /// patch, and restoring that would restore nothing. Same length as <paramref name="Bytes"/>, which
 /// is the rule the whole of patching rests on: nothing moves, so no address anyone wrote down shifts.
 /// </summary>
-public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyList<byte> Original);
+public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyList<byte> Original)
+{
+    /// <summary>
+    /// The module the RVA is in, or null for the one the listing is about.
+    ///
+    /// An RVA was always module-relative; what it lacked was a way to say <em>which</em> module, so
+    /// every patch went into the one being read. Naming one is what lets a hypothesis be tried in a
+    /// protection DLL a program loads rather than only in the program itself.
+    /// </summary>
+    public string? Module { get; init; }
+}
 
 /// <summary>
 /// A process running under a debug loop.
@@ -104,11 +114,21 @@ public sealed class DebugSession : IDisposable
     private readonly Dictionary<uint, DebugThread> _threads = new();
 
     /// <summary>
+    /// What a patch is kept under: an RVA, and which module's RVA it is.
+    ///
+    /// Null module means the one the listing is about, which is what every existing caller means and
+    /// what it meant when an RVA was the whole key. Two modules can hold a patch at the same RVA
+    /// without either being the other, so the RVA alone stopped being an identity as soon as more
+    /// than one module could be patched.
+    /// </summary>
+    private readonly record struct PatchAt(string? Module, uint Rva);
+
+    /// <summary>
     /// Bytes to keep written over the module, by RVA. Written the moment the module is there and
     /// again every time it loads, so a debug run behaves like the patched copy without one being
     /// saved — and a hypothesis can be tried in the running process and taken straight back out.
     /// </summary>
-    private readonly Dictionary<uint, LivePatch> _patches = new();
+    private readonly Dictionary<PatchAt, LivePatch> _patches = new();
     private readonly CancellationTokenSource _stopping = new();
 
     /// <summary>
@@ -317,6 +337,27 @@ public sealed class DebugSession : IDisposable
         ulong loaded = BaseOf(at.Module);
         return loaded == 0 ? 0 : loaded + at.Address;
     }
+
+    /// <summary>
+    /// Where a patch's bytes go right now, or zero when its module is not loaded.
+    ///
+    /// The same zero-means-nowhere as the breakpoint version, and for the same reason: writing to an
+    /// RVA added to a base that is not there yet puts bytes into whatever occupies that number.
+    /// </summary>
+    private ulong RuntimeOf(PatchAt at)
+    {
+        if (at.Module is null)
+        {
+            return TargetLoaded ? LoadedBase + at.Rva : 0;
+        }
+
+        ulong loaded = BaseOf(at.Module);
+        return loaded == 0 ? 0 : loaded + at.Rva;
+    }
+
+    /// <summary>A patch written the way somebody asked for it.</summary>
+    private static string Where(PatchAt at)
+        => at.Module is null ? $"RVA 0x{at.Rva:X}" : $"{at.Module}+0x{at.Rva:X}";
 
     /// <summary>The keys, copied, so they can be resolved without holding the table.</summary>
     private List<BreakpointAt> Keys()
@@ -707,29 +748,44 @@ public sealed class DebugSession : IDisposable
             return "a patch must replace as many bytes as it covers";
         }
 
+        // Which module's RVA this is comes off the patch itself, so a caller naming one needs no other
+        // entry point than the property.
+        var at = new PatchAt(patch.Module, patch.Rva);
         lock (_patches)
         {
-            _patches[patch.Rva] = patch;
+            _patches[at] = patch;
         }
 
-        if (!TargetLoaded || _process == IntPtr.Zero)
+        // Held rather than refused while its module is absent: a patch waits for the load exactly as a
+        // breakpoint does, and goes in the moment that module arrives.
+        if (_process == IntPtr.Zero || RuntimeOf(at) == 0)
         {
             return null;
         }
 
-        return WriteRange(patch.Rva, patch.Bytes);
+        return WriteRange(at, patch.Bytes);
     }
 
     /// <summary>
     /// Takes a held patch out, putting the file's own bytes back if the module is loaded. Returns
     /// null on success, or why it could not be done now — in which case it stays held and applied.
     /// </summary>
-    public string? ClearPatch(uint rva)
+    public string? ClearPatch(uint rva) => Clear(new PatchAt(null, rva));
+
+    /// <summary>Takes out a patch that was set in a named module.</summary>
+    public string? ClearPatch(string module, uint rva)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        return Clear(new PatchAt(System.IO.Path.GetFileName(module), rva));
+    }
+
+    private string? Clear(PatchAt at)
     {
         LivePatch? patch;
         lock (_patches)
         {
-            patch = _patches.TryGetValue(rva, out var found) ? found : null;
+            patch = _patches.TryGetValue(at, out var found) ? found : null;
         }
 
         if (patch is null)
@@ -737,14 +793,15 @@ public sealed class DebugSession : IDisposable
             return null;
         }
 
-        if (TargetLoaded && _process != IntPtr.Zero && WriteRange(rva, patch.Original) is { } refused)
+        if (_process != IntPtr.Zero && RuntimeOf(at) != 0
+            && WriteRange(at, patch.Original) is { } refused)
         {
             return refused;
         }
 
         lock (_patches)
         {
-            _patches.Remove(rva);
+            _patches.Remove(at);
         }
 
         return null;
@@ -754,14 +811,20 @@ public sealed class DebugSession : IDisposable
     /// Writes bytes at an RVA in the loaded module, refusing when it is not a moment to. The caller
     /// has already decided what goes there; this decides only whether it is safe to put it there now.
     /// </summary>
-    private string? WriteRange(uint rva, IReadOnlyList<byte> bytes)
+    private string? WriteRange(PatchAt at, IReadOnlyList<byte> bytes)
     {
         if (State == DebugState.Running)
         {
             return "it is running — pause it before changing its bytes";
         }
 
-        ulong start = LoadedBase + rva;
+        ulong start = RuntimeOf(at);
+        if (start == 0)
+        {
+            return $"{at.Module ?? "the module the listing is about"} is not loaded, so there is "
+                   + "nowhere to put those bytes yet";
+        }
+
         ulong end = start + (ulong)bytes.Count;
 
         foreach (var thread in Threads)
@@ -774,18 +837,18 @@ public sealed class DebugSession : IDisposable
             }
         }
 
-        foreach (var at in Keys())
+        foreach (var key in Keys())
         {
             Breakpoint? breakpoint;
             lock (_breakpoints)
             {
-                _breakpoints.TryGetValue(at, out breakpoint);
+                _breakpoints.TryGetValue(key, out breakpoint);
             }
 
-            ulong planted = RuntimeOf(at);
+            ulong planted = RuntimeOf(key);
             if (breakpoint is { Planted: true } && planted >= start && planted < end)
             {
-                return $"a breakpoint at {Where(at)} is inside those bytes; clear it first";
+                return $"a breakpoint at {Where(key)} is inside those bytes; clear it first";
             }
         }
 
@@ -796,7 +859,7 @@ public sealed class DebugSession : IDisposable
         // about, because the caller is about to believe the program is back to normal.
         if (!WriteBytes(start, bytes))
         {
-            return $"the {bytes.Count} byte(s) at 0x{ToStatic(start):X} could not be written";
+            return $"the {bytes.Count} byte(s) at {Where(at)} could not be written";
         }
 
         return null;
@@ -809,24 +872,35 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private void WritePatches()
     {
-        List<LivePatch> patches;
+        List<PatchAt> held;
         lock (_patches)
         {
-            patches = _patches.Values.ToList();
+            held = _patches.Keys.ToList();
         }
 
-        foreach (var patch in patches)
+        foreach (var at in held)
         {
+            LivePatch? patch;
+            lock (_patches)
+            {
+                _patches.TryGetValue(at, out patch);
+            }
+
+            // Skipped rather than written wrong when its module is not here. It goes in when that
+            // module loads, which is what WritePatchesNaming is for.
+            ulong start = RuntimeOf(at);
+            if (patch is null || start == 0)
+            {
+                continue;
+            }
+
             // Reported per patch rather than in the aggregate. This runs at the loader break and every
             // time the module loads, with nobody waiting on a return value, so a patch that does not
             // go in has the log as its only way of saying so — and "the program behaved as though it
             // were unpatched" is otherwise a mystery with no evidence attached to it.
-            if (!WriteBytes(LoadedBase + patch.Rva, patch.Bytes))
+            if (!WriteBytes(start, patch.Bytes))
             {
-                // Null means the process's own executable, which is the case whenever the thing being
-                // run is also the thing being read.
-                string where = _target ?? "the image";
-                Report("problem", $"the patch at RVA 0x{patch.Rva:X} could not be written into {where}");
+                Report("problem", $"the patch at {Where(at)} could not be written");
             }
         }
     }
@@ -1293,10 +1367,17 @@ public sealed class DebugSession : IDisposable
         // one the listing is about. That is the whole of debugging several modules at once, and it
         // happens here rather than at a stop because the loader announces the mapping before it runs
         // the module's own code — so a breakpoint planted now is already standing in its entry point.
-        if (module.Name.Length > 0 && PlantNaming(module.Name) is var named and > 0)
+        if (module.Name.Length > 0)
         {
-            Report("module", $"{name} loaded {where}; "
-                             + $"{named} breakpoint{(named == 1 ? string.Empty : "s")} in it armed");
+            // Patches before breakpoints, so a breakpoint landing on a patched byte records the
+            // patched byte and restores that rather than the file's.
+            WritePatchesNaming(module.Name);
+
+            if (PlantNaming(module.Name) is var named and > 0)
+            {
+                Report("module", $"{name} loaded {where}; "
+                                 + $"{named} breakpoint{(named == 1 ? string.Empty : "s")} in it armed");
+            }
         }
 
         // The main image when nothing else was named, or whichever module was: under a host, the
@@ -1623,12 +1704,10 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private void PlantAll()
     {
-        // Patches belong to the module the listing is about, so they still wait for that one.
-        if (TargetLoaded)
-        {
-            // Patches first, breakpoints on top: see WritePatches for why the order is the whole point.
-            WritePatches();
-        }
+        // Patches first, breakpoints on top: see WritePatches for why the order is the whole point.
+        // Every patch whose module is loaded, which is no longer only the target's — WritePatches
+        // skips the ones with nowhere to go yet.
+        WritePatches();
 
         // Every breakpoint whose module is here, which is no longer the same question as whether the
         // target is. One naming another module goes in when that module arrives; one naming the target
@@ -1667,6 +1746,42 @@ public sealed class DebugSession : IDisposable
         }
 
         return armed;
+    }
+
+    /// <summary>
+    /// Writes the patches that name a module, for the moment it loads.
+    ///
+    /// Called before that module's breakpoints are planted, for the reason
+    /// <see cref="WritePatches"/> gives: a breakpoint landing on a patched byte has to save the
+    /// patched byte, so that a removal puts the patch back rather than the file's own byte.
+    /// </summary>
+    private void WritePatchesNaming(string module)
+    {
+        List<PatchAt> held;
+        lock (_patches)
+        {
+            held = _patches.Keys.ToList();
+        }
+
+        foreach (var at in held)
+        {
+            if (at.Module is null || !string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            LivePatch? patch;
+            lock (_patches)
+            {
+                _patches.TryGetValue(at, out patch);
+            }
+
+            ulong start = RuntimeOf(at);
+            if (patch is not null && start != 0 && !WriteBytes(start, patch.Bytes))
+            {
+                Report("problem", $"the patch at {Where(at)} could not be written");
+            }
+        }
     }
 
     /// <summary>
