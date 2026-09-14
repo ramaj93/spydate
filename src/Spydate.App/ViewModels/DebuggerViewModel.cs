@@ -437,14 +437,20 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private bool _starting;
 
     /// <summary>
-    /// Set when the next stop is to be let go of without being shown.
+    /// Turns the panel's break-at choice into what the native loop should do with its loader break.
     ///
-    /// "Don't break" on the native side cannot be asked of the loop: it stops at the loader break
-    /// whatever anybody wants, because that is the moment its breakpoints go in. So the stop happens
-    /// and is continued from here, once, before the panel has said anything about it. One shot on
-    /// purpose — a flag left set would swallow the first real breakpoint instead.
+    /// It used to be a flag here that swallowed the first stop for "Don't break" and nothing more, so
+    /// the two entry-point choices did nothing. The loop now owns all four: the loader break is where
+    /// it decides whether to report, let go, or run on to an entry, which is the one place the timing
+    /// is not a race.
     /// </summary>
-    private bool _skipFirstStop;
+    private static EntryStop NativeEntryStop(DebugBreakAt breakAt) => breakAt switch
+    {
+        DebugBreakAt.None => EntryStop.DontBreak,
+        DebugBreakAt.EntryPoint => EntryStop.ProcessEntry,
+        DebugBreakAt.ModuleCctorOrEntryPoint => EntryStop.ModuleEntry,
+        _ => EntryStop.LoaderBreak,
+    };
 
     /// <summary>
     /// Starts the open binary under a debugger.
@@ -534,10 +540,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // The loader break is coming whether or not anybody wants it; "Don't break" means letting go
-        // of it the instant it arrives. See _skipFirstStop.
-        _skipFirstStop = BreakAt == DebugBreakAt.None;
-
         var session = new DebugSession();
         session.Reported += OnReported;
         _session = session;
@@ -555,14 +557,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         try
         {
             // Under a host, the process is somebody else's program and the addresses on screen belong
-            // to a module inside it, so the module has to be named or nothing would translate.
+            // to a module inside it, so the module has to be named or nothing would translate. The
+            // break-at choice and the module's own entry RVA go in with it, so the loader break is
+            // taken, let go of, or run past to an entry — decided in the loop rather than out here,
+            // where the timing was a race the loop does not have to run.
             session.Start(
                 run,
                 binary.Image.ImageBase,
                 binary.Image.OptionalHeader.SizeOfImage,
                 Arguments is { Length: > 0 } arguments ? arguments : null,
                 WorkingDirectory is { Length: > 0 } directory ? directory : null,
-                host is null ? null : binary.Image.FileName);
+                host is null ? null : binary.Image.FileName,
+                NativeEntryStop(BreakAt),
+                binary.Image.EntryPointRva);
 
             State = DebugState.Running;
             Status = "Running.";
@@ -1388,15 +1395,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     break;
 
                 case "stopped":
-                    // Let go of before the panel is told anything, so a run asked not to break never
-                    // appears to have stopped. Cleared first: this is good for one stop, and the next
-                    // one is a breakpoint somebody actually set.
-                    if (_skipFirstStop)
-                    {
-                        _skipFirstStop = false;
-                        _session?.Continue();
-                        break;
-                    }
 
                     State = DebugState.Stopped;
                     ExecutionAddress = e.Address;

@@ -13,6 +13,32 @@ public enum DebugState
     Exited,
 }
 
+/// <summary>
+/// Where a freshly launched process should first stop of its own accord.
+///
+/// The loader break arrives whatever anybody asked for — it is the moment the image is finally
+/// mapped and breakpoints go in — so this decides what happens once it has: report it, let go of it,
+/// or run on to a one-shot at the program's entry or the opened module's own entry point.
+/// </summary>
+public enum EntryStop
+{
+    /// <summary>Stop at the loader break, before the program's own code — dnSpy's "Create Process".</summary>
+    LoaderBreak,
+
+    /// <summary>Let go of the loader break the instant it arrives, and run on — "Don't break".</summary>
+    DontBreak,
+
+    /// <summary>Run on to the launched process's own entry point, wherever it starts.</summary>
+    ProcessEntry,
+
+    /// <summary>
+    /// Run on to the entry point of the module being read — the opened DLL's own entry under a host,
+    /// the process's entry when it is the main image. Native code has no static constructor, so
+    /// "Module cctor or Entry Point" is the entry point here.
+    /// </summary>
+    ModuleEntry,
+}
+
 /// <summary>Something the debuggee did, in the order it did it.</summary>
 public sealed record DebugEvent(string Kind, string Text)
 {
@@ -150,9 +176,19 @@ public sealed class DebugSession : IDisposable
     /// <summary>Set while stepping over a breakpoint, so its byte goes back afterwards.</summary>
     private (ulong Address, uint Thread)? _reArm;
 
-    /// <summary>A breakpoint that exists to get somewhere once: step-over, or run-to-cursor.</summary>
+    /// <summary>A breakpoint that exists to get somewhere once: step-over, run-to-cursor, or the
+    /// one-shot that carries a launch on to its entry point.</summary>
     private ulong? _temporary;
     private byte _temporaryOriginal;
+
+    /// <summary>Where the run should first stop of its own accord. Settled at <see cref="Start"/>.</summary>
+    private EntryStop _entryStop = EntryStop.LoaderBreak;
+
+    /// <summary>The opened module's entry-point RVA, for <see cref="EntryStop.ModuleEntry"/>. Zero when unknown.</summary>
+    private uint _entryRva;
+
+    /// <summary>The launched process's own entry, as the OS reported it at CreateProcess. Zero until then.</summary>
+    private ulong _processEntry;
 
     /// <summary>A step was asked for, as opposed to the trap flag being set to get off a breakpoint.</summary>
     /// <summary>The thread a step was asked of, until it has taken it. Null when nothing is stepping.</summary>
@@ -437,7 +473,9 @@ public sealed class DebugSession : IDisposable
         uint imageSize,
         string? arguments = null,
         string? workingDirectory = null,
-        string? module = null)
+        string? module = null,
+        EntryStop entryStop = EntryStop.LoaderBreak,
+        uint entryRva = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
@@ -449,6 +487,8 @@ public sealed class DebugSession : IDisposable
         ImageBase = imageBase;
         ImageSize = imageSize;
         _target = module is { Length: > 0 } ? System.IO.Path.GetFileName(module) : null;
+        _entryStop = entryStop;
+        _entryRva = entryRva;
         var ready = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _loop = new Thread(() => Loop(path, arguments, workingDirectory, ready))
@@ -1189,6 +1229,7 @@ public sealed class DebugSession : IDisposable
             {
                 case Native.CREATE_PROCESS_DEBUG_EVENT:
                     _mainThread = e.dwThreadId;
+                    _processEntry = e.CreateProcessStartAddress;
                     Remember(e.dwThreadId, e.CreateProcessStartAddress);
                     OnModuleLoaded(e.CreateProcessFile, e.CreateProcessImageBase, main: true);
                     break;
@@ -1400,6 +1441,15 @@ public sealed class DebugSession : IDisposable
 
         PlantAll();
 
+        // Module-entry break: the module being read has just landed under its host and the loader has
+        // not yet called into it, so a one-shot planted now stands in its entry point before its own
+        // code runs. This is the mixed-mode case the whole thing was for — stopping in a native DLL a
+        // managed process loads, at the first instruction that DLL runs.
+        if (_entryStop == EntryStop.ModuleEntry && _temporary is null)
+        {
+            ArmOneShot(EntryRuntime, "the module entry point");
+        }
+
         int waiting;
         lock (_breakpoints)
         {
@@ -1462,15 +1512,7 @@ public sealed class DebugSession : IDisposable
                 {
                     _sawInitialBreak = true;
                     PlantAll();
-                    CurrentAddress = e.ExceptionAddress;
-                    // Reportable, not ToStatic. The loader break is in ntdll — never in the image
-                    // being read — and ToStatic hands back an address it cannot translate unchanged,
-                    // so this reported a runtime address in another module as though it were a place
-                    // in the listing. The window then opened a document for it: a fabricated
-                    // "function" of nought blocks and nought instructions, which is what the analyst
-                    // was left staring at, wondering why the marker never moved.
-                    Report("stopped", "stopped at the loader break, before the program's own code", Reportable(e.ExceptionAddress));
-                    return (true, Native.DBG_CONTINUE);
+                    return AtLoaderBreak(e.ExceptionAddress);
                 }
 
                 // The 32-bit loader's own break, which arrives after the 64-bit one on a WOW64
@@ -1566,6 +1608,69 @@ public sealed class DebugSession : IDisposable
 
                 return (fatal, Native.DBG_EXCEPTION_NOT_HANDLED);
         }
+    }
+
+    /// <summary>
+    /// What to do once the loader break has been taken and breakpoints are in: report it, let go of
+    /// it, or run on silently to a one-shot at the program's — or the opened module's — entry point.
+    ///
+    /// The one that runs on returns "do not stop", so the loader break is never reported and the next
+    /// stop the panel sees is the entry it asked for. A module-entry under a host has nothing to arm
+    /// yet — its module has not loaded — so it runs on and <see cref="OnModuleLoaded"/> arms the
+    /// one-shot when the module lands. Anything that cannot be armed falls back to the loader break
+    /// rather than running to an exit with no stop at all, which would read as the setting doing
+    /// nothing.
+    /// </summary>
+    private (bool Stop, uint Status) AtLoaderBreak(ulong loaderBreakAddress)
+    {
+        switch (_entryStop)
+        {
+            case EntryStop.DontBreak:
+                return (false, Native.DBG_CONTINUE);
+
+            case EntryStop.ProcessEntry when ArmOneShot(_processEntry, "the entry point"):
+                return (false, Native.DBG_CONTINUE);
+
+            // The main image is the module being read (no host), and it is already mapped, so its
+            // entry can be armed now. Under a host the target loads later; leave it to OnModuleLoaded.
+            case EntryStop.ModuleEntry when _target is null && ArmOneShot(EntryRuntime, "the module entry point"):
+                return (false, Native.DBG_CONTINUE);
+
+            case EntryStop.ModuleEntry when _target is not null:
+                return (false, Native.DBG_CONTINUE);
+        }
+
+        // LoaderBreak, or an entry one-shot that could not be planted.
+        // Reportable, not ToStatic. The loader break is in ntdll — never in the image being read —
+        // and ToStatic hands back an address it cannot translate unchanged, so this once reported a
+        // runtime address in another module as though it were a place in the listing.
+        CurrentAddress = loaderBreakAddress;
+        Report("stopped", "stopped at the loader break, before the program's own code", Reportable(loaderBreakAddress));
+        return (true, Native.DBG_CONTINUE);
+    }
+
+    /// <summary>The opened module's entry point as a runtime address, or zero when it cannot be formed.</summary>
+    private ulong EntryRuntime => _entryRva != 0 && LoadedBase != 0 ? LoadedBase + _entryRva : 0;
+
+    /// <summary>
+    /// Plants a one-shot at a runtime address and records it, the way run-to-cursor does. Returns
+    /// whether it went in — a caller falling back to the loader break needs to know it did not.
+    /// </summary>
+    private bool ArmOneShot(ulong runtime, string what)
+    {
+        if (runtime == 0)
+        {
+            return false;
+        }
+
+        if (Plant(runtime, temporary: true))
+        {
+            _temporary = runtime;
+            return true;
+        }
+
+        Report("problem", $"could not set a one-shot at {what}; stopping at the loader break instead");
+        return false;
     }
 
     /// <summary>Whether the int3 at a runtime address is one of ours, planted or one-shot.</summary>

@@ -1205,6 +1205,110 @@ public sealed class DebuggerTests
     }
 
     /// <summary>
+    /// "Entry Point" runs past the loader break and stops at the launched program's own entry, with
+    /// nothing planted by anyone — the stop is the break-at itself.
+    /// </summary>
+    [Fact]
+    public void EntryPointBreakStopsAtTheProcessEntryAndNotTheLoaderBreak()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        using var session = Headless();
+        var stops = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops) { stops.Add(e.Text); }
+            }
+        };
+
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage,
+            arguments: "where.exe", entryStop: EntryStop.ProcessEntry);
+
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped at the entry point");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.Equal(exe + image.EntryPointRva, session.CurrentAddress);
+
+        // The loader break was run past, not reported: the only stop is the entry.
+        lock (stops)
+        {
+            Assert.DoesNotContain(stops, s => s.Contains("loader break", StringComparison.OrdinalIgnoreCase));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// "Module cctor or Entry Point" for native code — which has no static constructor — stops at the
+    /// entry point of the module being read. For a standalone target that module is the main image.
+    /// </summary>
+    [Fact]
+    public void ModuleEntryBreakStopsAtTheModuleEntryPoint()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        using var session = Headless();
+
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage,
+            arguments: "where.exe", entryStop: EntryStop.ModuleEntry, entryRva: image.EntryPointRva);
+
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped at the module entry");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.Equal(exe + image.EntryPointRva, session.CurrentAddress);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// "Don't break" lets go of the loader break the instant it arrives and never stops of its own
+    /// accord: the process runs to its own exit with no stop reported.
+    /// </summary>
+    [Fact]
+    public void DontBreakRunsToExitWithoutStopping()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        using var session = Headless();
+        var stops = new List<string>();
+        var exited = new ManualResetEventSlim();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops) { stops.Add(e.Text); }
+            }
+            else if (e.Kind == "exited")
+            {
+                exited.Set();
+            }
+        };
+
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage,
+            arguments: "where.exe", entryStop: EntryStop.DontBreak);
+
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(20)), "the process never exited");
+        lock (stops)
+        {
+            Assert.Empty(stops);
+        }
+    }
+
+    /// <summary>
     /// A breakpoint naming a module the process never loads waits, and does not claim to be anywhere.
     /// </summary>
     [Fact]
