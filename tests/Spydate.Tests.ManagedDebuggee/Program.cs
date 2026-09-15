@@ -30,8 +30,23 @@ internal static class Program
     private static void Main()
     {
         Console.WriteLine($"managed debuggee up, pid {Environment.ProcessId}");
+
+        // Closing a handle that was never valid raises STATUS_INVALID_HANDLE (0xC0000008) — but only
+        // while a debugger is attached; unattended it just returns false. The program has no handler
+        // for it, so a native debug loop that passes it back unhandled turns a benign check into a
+        // second chance and stops here. A real .NET program hits this constantly (its runtime closes
+        // handles as it works); this reproduces it once, at startup, so a test can watch the loop run
+        // on through it. Kept out of Spin's loop so it never perturbs the stack a pause lands on.
+        for (int i = 0; i < 5; i++)
+        {
+            CloseHandle(new IntPtr(0x00BAD000 + i));
+        }
+
         Spin();
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
 
     /// <summary>
     /// Cold at startup: never called until the loop has turned enough times, then called every turn.

@@ -433,6 +433,33 @@ public sealed class ManagedOverlayTests
     }
 
     [Fact]
+    public void ABenignInvalidHandleExceptionDoesNotStopTheProcess()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        // Don't break: nothing of ours should stop it. The debuggee closes a bogus handle five times at
+        // startup, which raises STATUS_INVALID_HANDLE under this debugger — a benign check the loop must
+        // continue, not escalate. If it escalated, a "stopped" would arrive within the first moment.
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+
+        // Run well past startup, where the handle pokes happen. It must keep running throughout.
+        Assert.True(Wait(() => session.Managed?.HasClr == true, 30), "the CLR never came up");
+        Thread.Sleep(2000);
+
+        Assert.Equal(0, Volatile.Read(ref stops));
+        Assert.Equal(DebugState.Running, session.State);
+
+        session.Stop();
+    }
+
+    [Fact]
     public void AManagedBreakpointByTokenIsHeldBeforeTheClrAndPlantedOnceItsCodeExists()
     {
         if (Fixture is not { } fixture)

@@ -53,6 +53,42 @@ internal static partial class Native
     /// <summary>The trap flag going off in 32-bit code. Every 32-bit step arrives as this.</summary>
     internal const uint EXCEPTION_WX86_SINGLE_STEP = 0x4000001E;
 
+    /// <summary>
+    /// STATUS_INVALID_HANDLE. The kernel raises this only while a debugger is watching — most often when
+    /// something closes a handle that is already gone — and the program never sees it unattended, so it
+    /// has no handler for it. A debugger that passes it back unhandled turns that benign check into a
+    /// second chance, which stops or kills a process that would have run fine. A .NET program closes
+    /// handles constantly, so it hits one moments after launch; it must be continued, not escalated.
+    /// </summary>
+    internal const uint EXCEPTION_INVALID_HANDLE = 0xC0000008;
+
+    /// <summary>DBG_PRINTEXCEPTION_C — an <c>OutputDebugStringA</c> reaching the debugger as an exception.
+    /// Informational, with no handler in the program; continued rather than escalated.</summary>
+    internal const uint DBG_PRINTEXCEPTION_C = 0x40010006;
+
+    /// <summary>DBG_PRINTEXCEPTION_WIDE_C — the wide-character form of the same.</summary>
+    internal const uint DBG_PRINTEXCEPTION_WIDE_C = 0x4001000A;
+
+    /// <summary>MS_VC_EXCEPTION — the "name this thread" exception a runtime raises for the debugger's
+    /// benefit. Informational, no program handler; continued.</summary>
+    internal const uint MS_VC_THREAD_NAME_EXCEPTION = 0x406D1388;
+
+    /// <summary>
+    /// The C++ / CLR exception code (<c>'msc'</c> with the customer bit): every managed <c>throw</c>,
+    /// and every C++ one, arrives as this. A runtime throws and catches these by the thousand as
+    /// ordinary control flow, so they must go back unhandled for its own handler to run — but they are
+    /// not news, and logging each would bury every real event under the runtime's internal traffic.
+    /// </summary>
+    internal const uint EXCEPTION_CPP_EH = 0xE06D7363;
+
+    /// <summary>
+    /// The CLR managed-exception code (<c>'CCR'</c> with the customer bit) — what every managed
+    /// <c>throw</c> on .NET Framework arrives as, the counterpart of <see cref="EXCEPTION_CPP_EH"/> on
+    /// CoreCLR and C++. Handled by the runtime by the thousand; passed back unhandled and not logged,
+    /// so an *unhandled* one still stops as the real crash it is.
+    /// </summary>
+    internal const uint EXCEPTION_CLR_MANAGED = 0xE0434352;
+
     /// <summary>CONTEXT_AMD64 | CONTROL | INTEGER | SEGMENTS | FLOATING_POINT.</summary>
     internal const uint CONTEXT_AMD64_FULL = 0x0010000B;
 

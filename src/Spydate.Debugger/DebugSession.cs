@@ -1922,6 +1922,19 @@ public sealed class DebugSession : IDisposable
                          + "its breakpoints go back in if it is loaded again");
     }
 
+    /// <summary>
+    /// An exception the kernel raises only for a watching debugger, that the program has no handler for
+    /// and never sees on its own — a stale handle closed, a thread named, a debug string printed. These
+    /// are continued as handled rather than passed back unhandled, so a benign check does not escalate
+    /// to a second chance and stop a process that would have run fine unattended. A real fault
+    /// (an access violation, an unhandled managed exception) is not among them and still stops.
+    /// </summary>
+    private static bool IsBenignDebuggerException(uint code) => code is
+        Native.EXCEPTION_INVALID_HANDLE
+        or Native.DBG_PRINTEXCEPTION_C
+        or Native.DBG_PRINTEXCEPTION_WIDE_C
+        or Native.MS_VC_THREAD_NAME_EXCEPTION;
+
     private (bool Stop, uint Status) OnException(Native.DEBUG_EVENT e)
     {
         switch (e.ExceptionCode)
@@ -2041,6 +2054,31 @@ public sealed class DebugSession : IDisposable
                 {
                     OnClrNotification(e);
                     return (false, Native.DBG_CONTINUE);
+                }
+
+                // Exceptions the OS raises only because a debugger is attached — a stale handle closed,
+                // a thread named, a debug string printed. The program has no handler for them and never
+                // meets them unattended, so passing them back unhandled escalates a benign check to a
+                // second chance and stops, or kills, a process that would have run fine. That is what
+                // halted this .NET target at a STATUS_INVALID_HANDLE moments after launch, its runtime
+                // closing handles as runtimes do. They are continued as handled — what a debugger is
+                // meant to do — so the program runs on. A genuine unhandled fault is not in this set and
+                // still stops.
+                if (e.FirstChance && IsBenignDebuggerException(e.ExceptionCode))
+                {
+                    return (false, Native.DBG_CONTINUE);
+                }
+
+                // A managed or C++ throw the runtime catches itself — 0xE0434352 on .NET Framework,
+                // 0xE06D7363 on CoreCLR and in C++. It has to go back unhandled so that handler runs,
+                // but it is ordinary control flow a runtime does thousands of times, so it is not
+                // reported: a log line each buries module loads, breakpoints and the actual stop under a
+                // runtime's internal exception traffic — which is what made a .NET target look like a
+                // fault storm rather than a running program. Only an *unhandled* one (below) is a real
+                // crash and gets reported.
+                if (e.FirstChance && e.ExceptionCode is Native.EXCEPTION_CPP_EH or Native.EXCEPTION_CLR_MANAGED)
+                {
+                    return (false, Native.DBG_EXCEPTION_NOT_HANDLED);
                 }
 
                 bool fatal = !e.FirstChance;
