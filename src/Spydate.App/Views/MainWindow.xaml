@@ -403,7 +403,7 @@
                                     </ListBox.ItemTemplate>
                                 </ListBox>
                             </TabItem>
-                            <TabItem Header="Debug">
+                            <TabItem Header="Debug" x:Name="DebugTab">
                                 <Grid DataContext="{Binding Debugger}">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
