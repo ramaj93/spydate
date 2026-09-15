@@ -1039,17 +1039,25 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// and name the stop in managed terms. Only in mixed mode; the CLR's own engine fills these panes
     /// through its own path, and a native program has no managed stack to walk.
     /// </summary>
-    private void RefreshMixedContext()
+    /// <summary>
+    /// Reads the managed side of a native stop onto the panel — the managed call stack, and the stop
+    /// named in managed terms — and returns where the stop sits in the open file as a static address, or
+    /// null when it is not in managed code of the opened assembly. That address is the point: the raw
+    /// stop is a JITted runtime address with no place in the file image, so the loop reports it as no
+    /// address at all; the managed location is what maps back to a static VA the listing and gutter
+    /// share, and only off that can the C#/IL view mark the current line and open the method stopped in.
+    /// </summary>
+    private ulong? RefreshMixedContext()
     {
         if (!IsMixedMode)
         {
-            return;
+            return null;
         }
 
         CallStack.Clear();
         if (_session is not { } session || session.Managed is not { } overlay)
         {
-            return;
+            return null;
         }
 
         // The managed frames of the thread that stopped, innermost first. A stop reports a native
@@ -1070,11 +1078,17 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         }
 
         // Name the stop in managed terms beside its native address, so a native pause reads as a place
-        // in the C#: "Stopped at 0x… — Namespace.Type.Method at IL_XXXX".
+        // in the C#: "Stopped at 0x… — Namespace.Type.Method at IL_XXXX", and map it back to the static
+        // address the listing is addressed by so the caller can mark the line and open the method.
         if (overlay.LocationOf(session.CurrentAddress) is { } location)
         {
             Status = $"{Status.TrimEnd('.')}  —  {location.Method} at IL_{location.IlOffset:X4}";
+            return location.Module is { Length: > 0 } module
+                ? AddressOf(module, (uint)location.MethodToken, (uint)location.IlOffset)
+                : null;
         }
+
+        return null;
     }
 
     /// <summary>Managed marks already handed to the current native session, so the pump does not re-add them.</summary>
@@ -1702,13 +1716,18 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                 case "stopped":
 
                     State = DebugState.Stopped;
-                    ExecutionAddress = e.Address;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";
                     RefreshModules();
                     RefreshThreads();
                     RefreshRegisters();
-                    RefreshMixedContext();
-                    if (e.Address is { } address)
+
+                    // In mixed mode the stop is inside JITted code, whose runtime address has no place in
+                    // the file image — so e.Address is null and the managed location is the only thing
+                    // that maps back to a static VA the listing and gutter share. Prefer it; fall back to
+                    // the native address for a native stop (a breakpoint in a module's own code).
+                    ulong? shown = RefreshMixedContext() ?? e.Address;
+                    ExecutionAddress = shown;
+                    if (shown is { } address)
                     {
                         StoppedAt?.Invoke(this, address);
                     }
