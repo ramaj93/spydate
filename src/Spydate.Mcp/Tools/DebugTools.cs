@@ -227,10 +227,10 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_state")]
-    [Description("Where a debugged process is: state, where it stopped, threads, registers, flags, stack, modules, breakpoints, and what it has done lately. In native mode on a .NET target it also gives the managed method, IL offset and call stack.")]
+    [Description("Where a debugged process is: state, where it stopped, threads, registers, flags, stack, modules, breakpoints, and what it has done lately. In native mode it also gives the managed method, IL offset and call stack.")]
     public string State(
         [Description("Thread to show.")] uint? thread = null,
-        [Description("Loaded modules whose name contains this (or * for all), with their bases.")] string? modules = null)
+        [Description("Loaded modules whose name contains this (* = all), with bases.")] string? modules = null)
     {
         if (Refusal() is { } refused)
         {

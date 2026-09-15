@@ -160,6 +160,12 @@ Writes save immediately; there is no save tool, because one whose only failure m
 forgot" would lose work by default. `list_annotations` is what to read after a context compaction to
 pick up where you left off, and what a person reads to review what the agent has done.
 
+`annotate` takes a target the way the reading tools do, including a managed method by name —
+`annotate(target="Namespace.Type::Method", comment="…")`. A comment belongs to an address, and a
+managed method's is where its IL begins, so this resolves the name the same way `read_function` and
+`debug_break` do and notes the method there, rather than making an agent hand-compute an RVA for it. A
+type or a field, having no single address, is refused with that said.
+
 ## Sharing a binary with the window
 
 Both write the same `.spydate` project file, and saving is a merge: each side re-reads the file,
