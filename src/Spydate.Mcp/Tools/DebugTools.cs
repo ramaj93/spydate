@@ -229,7 +229,8 @@ public sealed class DebugTools
     [McpServerTool(Name = "debug_state")]
     [Description("Where a debugged process is: state, where it stopped, threads, registers, flags, stack, modules, breakpoints, and what it has done lately. In native mode on a .NET target it also gives the managed method, IL offset and call stack.")]
     public string State(
-        [Description("Thread to show.")] uint? thread = null)
+        [Description("Thread to show.")] uint? thread = null,
+        [Description("Loaded modules whose name contains this (or * for all), with their bases.")] string? modules = null)
     {
         if (Refusal() is { } refused)
         {
@@ -247,7 +248,7 @@ public sealed class DebugTools
         }
 
         var debug = _store.Debug!;
-        return thread is { } picked && Pick(debug, picked) is { } wrong ? wrong : Describe(debug.Snapshot());
+        return thread is { } picked && Pick(debug, picked) is { } wrong ? wrong : Describe(debug.Snapshot(), modules);
     }
 
     [McpServerTool(Name = "debug_config")]
@@ -423,7 +424,7 @@ public sealed class DebugTools
         return tags.Count == 0 ? string.Empty : " (" + string.Join(", ", tags) + ")";
     }
 
-    private static string Describe(DebugSnapshot snapshot)
+    private static string Describe(DebugSnapshot snapshot, string? modulesFilter = null)
     {
         var sb = new StringBuilder();
         sb.Append(snapshot.State);
@@ -495,10 +496,40 @@ public sealed class DebugTools
         if (snapshot.Modules.Count > 0)
         {
             sb.AppendLine();
-            var target = snapshot.Modules.FirstOrDefault(m => m.IsTarget);
-            sb.AppendLine(target.Name is { Length: > 0 }
-                ? $"{snapshot.Modules.Count} modules loaded; the one being read is {target.Name} at 0x{target.Base:X}"
-                : $"{snapshot.Modules.Count} modules loaded; the one being read is not among them yet");
+            if (modulesFilter is null)
+            {
+                // The list is the process's own — every native DLL it has loaded, at the base the
+                // loader gave it. It is not dumped by default, because there are dozens; pass a name to
+                // list the ones that match, which is how a native module's runtime base is found.
+                var target = snapshot.Modules.FirstOrDefault(m => m.IsTarget);
+                sb.AppendLine(target.Name is { Length: > 0 }
+                    ? $"{snapshot.Modules.Count} modules loaded (pass modules=<name>, or *, to list them with their bases); the one being read is {target.Name} at 0x{target.Base:X}"
+                    : $"{snapshot.Modules.Count} modules loaded (pass modules=<name>, or *, to list them); the one being read is not among them yet");
+            }
+            else
+            {
+                bool all = modulesFilter is "*" or "";
+                var matched = snapshot.Modules
+                    .Where(m => all || m.Name.Contains(modulesFilter, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (matched.Count == 0)
+                {
+                    sb.AppendLine($"no loaded module matches \"{modulesFilter}\", of {snapshot.Modules.Count} loaded");
+                }
+                else
+                {
+                    sb.AppendLine(all
+                        ? $"{matched.Count} modules loaded:"
+                        : $"loaded modules matching \"{modulesFilter}\":");
+                    foreach (var (name, @base, isTarget) in matched.Take(200))
+                    {
+                        sb.AppendLine($"  {(name.Length > 0 ? name : "(unnamed)")}  0x{@base:X}"
+                                      + (isTarget ? "  (the one being read)" : string.Empty));
+                    }
+                }
+            }
         }
 
         if (snapshot.Breakpoints.Count > 0)

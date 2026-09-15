@@ -136,6 +136,13 @@ nothing is running. A .NET binary takes either engine, and this is where the dif
 one of its own managed methods or a native DLL it loads, and `debug_state` reports the managed method,
 IL offset and call stack beside the native registers — but no locals, because nothing is talking to
 the runtime. A native binary is native only, and asking for the managed engine on one is refused.
+
+Going into a native DLL the process loaded needs its runtime base, and that is the process's to give,
+not the file's: `find_symbol` and `list_imports` read the opened assembly, so they cannot name where a
+DLL was mapped this run. `debug_state(modules="<name>")` lists the loaded modules whose name contains
+the text, with the base the loader gave each — `modules="*"` lists them all — which is how a native
+module's address is recovered without walking the stack for a return address inside it. By default the
+list is a count, since there are dozens.
 Switching the engine re-points which debugger the verbs drive, so the whole flow — configure, run,
 break, inspect — stays in the tools rather than waiting on the dialog.
 

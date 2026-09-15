@@ -380,6 +380,93 @@ public class McpSessionTests
         Assert.DoesNotContain("engine:", text, StringComparison.Ordinal);   // not the rendered snapshot
     }
 
+    private sealed class FakeDebug(DebugSnapshot snapshot) : IDebugControl
+    {
+        public DebugSnapshot Snapshot() => snapshot;
+        public string? Start() => throw new NotSupportedException();
+        public void Stop() => throw new NotSupportedException();
+        public void Continue() => throw new NotSupportedException();
+        public void Pause() => throw new NotSupportedException();
+        public void StepInstruction() => throw new NotSupportedException();
+        public void StepOver() => throw new NotSupportedException();
+        public void RunTo(ulong staticVa) => throw new NotSupportedException();
+        public bool SetBreakpoint(ulong staticVa, bool on) => throw new NotSupportedException();
+        public bool SelectThread(uint threadId) => throw new NotSupportedException();
+        public string? TryPatch(ulong va, string instruction, string? comment) => throw new NotSupportedException();
+        public bool UndoPatch(uint rva) => throw new NotSupportedException();
+        public byte[] ReadMemory(ulong staticVa, int length) => throw new NotSupportedException();
+        public bool WaitUntilStopped(TimeSpan timeout) => throw new NotSupportedException();
+    }
+
+    private static DebugTools? DebugToolsWithModules(params (string Name, ulong Base, bool IsTarget)[] modules)
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return null;
+        }
+
+        var snapshot = new DebugSnapshot { State = "stopped", Modules = modules.ToList() };
+        var store = new SessionStore { Debug = new FakeDebug(snapshot) };
+        store.Set(Session(Corpus.NotepadX64));
+        return new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+    }
+
+    [Fact]
+    public void DebugStateSummarisesModulesByDefaultButOffersToListThem()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true), ("kernel32.dll", 0x7FF000000, false)) is not { } tools)
+        {
+            return;
+        }
+
+        string text = tools.State();
+
+        Assert.Contains("2 modules loaded", text, StringComparison.Ordinal);
+        Assert.Contains("modules=", text, StringComparison.Ordinal);   // tells the agent it can list them
+        Assert.DoesNotContain("0x7FF000000", text, StringComparison.Ordinal);   // not dumped by default
+    }
+
+    [Fact]
+    public void DebugStateGivesALoadedModulesRuntimeBaseByName()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true), ("KCSKRNx64.dll", 0x7FFAB000000, false)) is not { } tools)
+        {
+            return;
+        }
+
+        string text = tools.State(modules: "kcskrn");   // case-insensitive substring
+
+        Assert.Contains("KCSKRNx64.dll", text, StringComparison.Ordinal);
+        Assert.Contains("0x7FFAB000000", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("app.exe", text, StringComparison.Ordinal);   // only the match
+    }
+
+    [Fact]
+    public void DebugStateSaysWhenNoLoadedModuleMatches()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true)) is not { } tools)
+        {
+            return;
+        }
+
+        Assert.Contains("no loaded module matches", tools.State(modules: "sqlite"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugStateListsEveryModuleForAStar()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true), ("kernel32.dll", 0x7FF000000, false)) is not { } tools)
+        {
+            return;
+        }
+
+        string text = tools.State(modules: "*");
+
+        Assert.Contains("app.exe", text, StringComparison.Ordinal);
+        Assert.Contains("kernel32.dll", text, StringComparison.Ordinal);
+        Assert.Contains("0x7FF000000", text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void DebugConfigSaysSoWhenTheHostHasNoRunConfiguration()
     {
