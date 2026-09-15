@@ -1,3 +1,4 @@
+using System.Text;
 using Spydate.Core.PE;
 using Spydate.Disassembly;
 using Spydate.Mcp;
@@ -282,6 +283,90 @@ public class McpSessionTests
 
         // The over-long name was cut to the column's limit rather than pushing everything sideways.
         Assert.Equal(8, lines[2][..column].TrimEnd().Length);
+    }
+
+    // ------------------------------------------------------------------
+    // read_file — probing a raw blob that is not a PE
+    // ------------------------------------------------------------------
+
+    private static string TempBlob(byte[] bytes)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"spydate-blob-{Guid.NewGuid():N}.inx");
+        File.WriteAllBytes(path, bytes);
+        return path;
+    }
+
+    [Fact]
+    public void ReadFileShowsARawBlobAsHexWithItsSizeAndAsciiColumn()
+    {
+        string path = TempBlob([0x49, 0x4E, 0x58, 0x01, 0xFF, 0x00]);   // "INX" then non-printable
+        try
+        {
+            string text = new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path);
+
+            Assert.Contains("6 bytes", text, StringComparison.Ordinal);
+            Assert.Contains("49 4E 58 01 FF 00", text, StringComparison.Ordinal);   // the hex
+            Assert.Contains("INX...", text, StringComparison.Ordinal);              // the ascii column
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileDecodesTextWhenAsked()
+    {
+        string path = TempBlob(Encoding.UTF8.GetBytes("workset index v3"));
+        try
+        {
+            Assert.Contains("workset index v3", new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path, @as: "utf8"), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileWindowsByOffsetAndSaysMoreFollows()
+    {
+        string path = TempBlob([.. Enumerable.Range(0, 40).Select(i => (byte)i)]);
+        try
+        {
+            string text = new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path, offset: 8, length: 8);
+
+            Assert.Contains("showing 8 at offset 0x8", text, StringComparison.Ordinal);
+            Assert.Contains("more follows", text, StringComparison.Ordinal);   // 40-byte file, 8 shown from 8
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileSaysWhenTheOffsetIsPastTheEnd()
+    {
+        string path = TempBlob([1, 2, 3]);
+        try
+        {
+            Assert.Contains("past its end", new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path, offset: 100), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileRefusesAPathOutsideTheRoot()
+    {
+        // A server rooted somewhere the target is not: the read is refused before the file is touched.
+        var options = new McpOptions { Root = Path.Combine(Path.GetTempPath(), "spydate-root-" + Guid.NewGuid().ToString("N")) };
+        string text = new SessionTools(new SessionStore(), options).ReadFile(@"C:\Windows\System32\drivers\etc\hosts");
+
+        Assert.Contains("will not read files outside it", text, StringComparison.Ordinal);
     }
 
     // ------------------------------------------------------------------

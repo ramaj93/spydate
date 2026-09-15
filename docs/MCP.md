@@ -34,11 +34,18 @@ Options, all of which only ever narrow what the agent can do:
 
 ## The tools
 
-**Orienting** — `open_binary(path)` · `get_overview()`
+**Orienting** — `open_binary(path)` · `get_overview()` · `read_file(path)`
 
 `open_binary` returns one screen: architecture, entry, sections, import and export counts, what
 discovery found, whether a PDB and a project file loaded. It is deliberately dense — every line is a
 call the agent does not have to make — and ends by naming the three worth making next.
+
+`read_file` is the way past the one thing `open_binary` cannot do: it parses a PE into an image, so a
+file that is not a PE — a resource, a `.inx`, an unknown container beside the binary — is a wall.
+`read_file` reads any file's raw bytes, a window of at most 4096 by offset, as a hex dump with an
+ASCII column or decoded as UTF-8 or UTF-16, and reports the file's size so the window can be moved. It
+is bound by `--root` exactly as `open_binary` is, and reads more than PEs, so the root matters more
+with it than without.
 
 **Finding something worth reading** — `list_functions` · `find_symbol` · `list_imports` · `xrefs` ·
 `find_strings`

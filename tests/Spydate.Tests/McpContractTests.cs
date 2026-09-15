@@ -42,8 +42,15 @@ public class McpContractTests
     /// otherwise sets in the Debug Program dialog — including switching a .NET target between the
     /// managed and native engines. That is a capability, not a description, and no sentence shaved off
     /// another tool would have bought it; a whole tool is the honest cost, paid once and on purpose.
+    ///
+    /// Raised to 7,700 for read_file — a raw-bytes reader for a file that is not a PE, so a blob the
+    /// analyst points at (a resource, a .inx, an unknown container beside the binary) can be probed as
+    /// hex or text instead of being a wall. Everything else here assumes a PE has been parsed into an
+    /// image; this is the one tool that reads a file the server cannot open, which is a fourth thing a
+    /// file can be to it and, like the engines, earns its own tool rather than a strained overload of
+    /// read_data.
     /// </summary>
-    private const int MaxManifestChars = 7_300;
+    private const int MaxManifestChars = 7_700;
 
     private const int MaxDescriptionChars = 400;
 
