@@ -599,6 +599,44 @@ public sealed class DebuggerTests
         Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
     }
 
+    /// <summary>
+    /// A run-to whose target already carries a breakpoint. The one-shot lands on an int3 that is
+    /// already there, so it never recorded a byte of its own — and used to restore a stale zero in its
+    /// place when it was hit, leaving 0x00 over the program's instruction and faulting the process a few
+    /// bytes on. The byte under the target must be the program's own after the stop, not corrupted.
+    /// </summary>
+    [Fact]
+    public void ARunToOntoABreakpointDoesNotCorruptTheByteUnderIt()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        ulong entry = image.ImageBase + image.EntryPointRva;
+
+        using var session = Headless();
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong runtime = session.ToRuntime(entry);
+        byte original = session.ReadMemory(runtime, 1)[0];
+        Assert.NotEqual(0xCC, original);
+
+        // A real breakpoint at the entry, then a run-to onto the same address: the one-shot rides the
+        // breakpoint's int3 rather than planting its own.
+        Assert.True(session.AddBreakpoint(entry));
+        session.RunTo(entry);
+        session.Continue();
+
+        Assert.True(Wait(() => session.State == DebugState.Stopped && session.CurrentAddress == runtime),
+            "never stopped at the entry");
+
+        // The instruction, not a zero the one-shot wrote where the breakpoint's byte belonged.
+        Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
+    }
+
     // ------------------------------------------------------------------
     // 32-bit, which runs under WOW64 and is read with different calls
     // ------------------------------------------------------------------

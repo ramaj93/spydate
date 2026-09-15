@@ -194,6 +194,12 @@ public sealed class DebugSession : IDisposable
     private ulong? _temporary;
     private byte _temporaryOriginal;
 
+    /// <summary>Whether the one-shot planted its own int3, so its byte is ours to put back when it is
+    /// hit or replaced. False when it rode an int3 already there — a breakpoint the analyst set, or the
+    /// program's own — whose byte belongs to that owner and must not be overwritten with the one-shot's
+    /// (which it never recorded). Restoring it regardless wrote a stale zero over a real instruction.</summary>
+    private bool _temporaryPlanted;
+
     // The first-call catch (MIXED-MODE.md Phase 7): an int3 on the JIT's shared prestub worker catches a
     // cold managed method the instant it is about to be compiled, before its body runs. None of these
     // stops are reported — they are the machinery, not the breakpoint the analyst set.
@@ -1567,6 +1573,9 @@ public sealed class DebugSession : IDisposable
         _dancing = null;
         _danceReturn = 0;
         _danceRsp = 0;
+        _temporary = null;
+        _temporaryOriginal = 0;
+        _temporaryPlanted = false;
         lock (_pendingManaged)
         {
             _pendingManaged.Clear();
@@ -2540,30 +2549,39 @@ public sealed class DebugSession : IDisposable
         // whether or not a real breakpoint happens to be at the same address.
         if (_temporary == address)
         {
+            bool oursToLift = _temporaryPlanted;
             _temporary = null;
+            _temporaryPlanted = false;
 
-            // Nothing tracks this byte any more — the one-shot has just been forgotten — so a restore
-            // that fails leaves an int3 in the program for the rest of the run, with no record left of
-            // what it replaced and nothing that could put it back.
-            if (!WriteByte(address, _temporaryOriginal))
+            // A one-shot that rode an int3 already here does not own the byte under it — a breakpoint
+            // the analyst set, or the program's own. It restores nothing; control falls through to the
+            // breakpoint path below, which knows the true byte and re-arms it. The one-shot's whole job,
+            // stopping here, the same int3 already did.
+            if (oursToLift)
             {
-                Report("problem", $"the one-shot breakpoint at 0x{ToStatic(address):X} could not be taken back out");
+                // Nothing tracks this byte any more — the one-shot has just been forgotten — so a
+                // restore that fails leaves an int3 in the program for the rest of the run, with no
+                // record left of what it replaced and nothing that could put it back.
+                if (!WriteByte(address, _temporaryOriginal))
+                {
+                    Report("problem", $"the one-shot breakpoint at 0x{ToStatic(address):X} could not be taken back out");
+                }
+
+                Rewind(address, thenStep: false);
+
+                // A managed step's one-shot — planted after a call to step over it, or at the return for
+                // a step out. It goes back into the step rather than reporting a stop of its own: the
+                // step is over only when the IL offset has changed or the method has returned.
+                if (_managedStep is { } stepping && stepping.Thread == _threadId && !AdvanceManagedStep(address))
+                {
+                    return false;
+                }
+
+                // Not re-armed — that is the whole difference from a breakpoint someone set.
+                CurrentAddress = address;
+                Report("stopped", $"stopped at 0x{ToStatic(address):X}", Reportable(address));
+                return true;
             }
-
-            Rewind(address, thenStep: false);
-
-            // A managed step's one-shot — planted after a call to step over it, or at the return for a
-            // step out. It goes back into the step rather than reporting a stop of its own: the step is
-            // over only when the IL offset has changed or the method has returned.
-            if (_managedStep is { } stepping && stepping.Thread == _threadId && !AdvanceManagedStep(address))
-            {
-                return false;
-            }
-
-            // Not re-armed — that is the whole difference from a breakpoint someone set.
-            CurrentAddress = address;
-            Report("stopped", $"stopped at 0x{ToStatic(address):X}", Reportable(address));
-            return true;
         }
 
         // Found by which breakpoint resolves to this runtime address, rather than by keying on the
@@ -2798,6 +2816,16 @@ public sealed class DebugSession : IDisposable
         // which is the whole difference between it and a breakpoint somebody set.
         BreakpointAt? key = temporary ? null : Find(address);
 
+        // A one-shot replacing one that was set but never hit — a run-to abandoned when another stop
+        // came first, a step begun over the top of it. Its int3 goes back now, before this plant
+        // overwrites the record of what it replaced, so it is not left orphaned in the code.
+        if (temporary && _temporary is { } pending && pending != address && _temporaryPlanted)
+        {
+            WriteByte(pending, _temporaryOriginal);
+            _temporary = null;
+            _temporaryPlanted = false;
+        }
+
         if (existing[0] == 0xCC)
         {
             // Already an int3. Either ours from an earlier plant, in which case the byte it replaced
@@ -2816,12 +2844,20 @@ public sealed class DebugSession : IDisposable
                 }
             }
 
+            // A one-shot onto an int3 already here plants nothing and records nothing: the byte under
+            // it is the owner's, not the one-shot's to restore.
+            if (temporary)
+            {
+                _temporaryPlanted = false;
+            }
+
             return true;
         }
 
         if (temporary)
         {
             _temporaryOriginal = existing[0];
+            _temporaryPlanted = true;
         }
         else if (key is null)
         {
