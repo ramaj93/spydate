@@ -194,6 +194,28 @@ public sealed class DebugSession : IDisposable
     private ulong? _temporary;
     private byte _temporaryOriginal;
 
+    // The first-call catch (MIXED-MODE.md Phase 7): an int3 on the JIT's shared prestub worker catches a
+    // cold managed method the instant it is about to be compiled, before its body runs. None of these
+    // stops are reported — they are the machinery, not the breakpoint the analyst set.
+
+    /// <summary>The armed PreStubWorker address, or 0. Every method's first JIT passes through it, and the
+    /// MethodDesc being compiled is its argument, so the loop can tell whose JIT this is.</summary>
+    private ulong _prestubVa;
+
+    /// <summary>PreStubWorker's RVA in the runtime image once resolved from its PDB; 0 if unavailable, so
+    /// the catch falls back to planting on a later call. Set on a background task, read on the loop.</summary>
+    private volatile uint _prestubRva;
+
+    /// <summary>True while the PDB is being resolved, so it is not started twice.</summary>
+    private volatile bool _prestubResolving;
+
+    /// <summary>The held breakpoint whose method is being compiled right now, and the prestub's return
+    /// address where that method will have native code. Set between a matching prestub hit and the return
+    /// one-shot that follows it.</summary>
+    private HeldManaged? _dancing;
+    private ulong _danceReturn;
+    private byte _danceReturnOriginal;
+
     /// <summary>Where the run should first stop of its own accord. Settled at <see cref="Start"/>.</summary>
     private EntryStop _entryStop = EntryStop.LoaderBreak;
 
@@ -1234,6 +1256,13 @@ public sealed class DebugSession : IDisposable
         bool holdable = resolved.NotCompiled || (held.HoldUntilAvailable && !resolved.Ok);
         if (holdable)
         {
+            // Carry the method token if resolution found it — a name-named breakpoint arrives without one,
+            // and the prestub catch needs it to tell whose JIT a hit is for.
+            if (held.Token == 0 && resolved.MethodToken != 0)
+            {
+                held = held with { Token = resolved.MethodToken };
+            }
+
             lock (_pendingManaged)
             {
                 if (!_pendingManaged.Contains(held))
@@ -1241,6 +1270,10 @@ public sealed class DebugSession : IDisposable
                     _pendingManaged.Add(held);
                 }
             }
+
+            // Try to catch the first call at the prestub. When the PDB resolves this is exact; when it
+            // does not, the held breakpoint is planted on a later call instead — either way it is held.
+            EnablePrestubCatch();
 
             return resolved.NotCompiled
                 ? $"{held.Label} is not compiled yet; held and planted on its first call once it JITs"
@@ -1522,6 +1555,9 @@ public sealed class DebugSession : IDisposable
         _stopping.Cancel();
 
         _managedStep = null;
+        _prestubVa = 0;
+        _dancing = null;
+        _danceReturn = 0;
         lock (_pendingManaged)
         {
             _pendingManaged.Clear();
@@ -1834,6 +1870,14 @@ public sealed class DebugSession : IDisposable
         if (main)
         {
             Report("started", $"running {name} {where}");
+        }
+
+        // The runtime just mapped, and a cold managed breakpoint may already be waiting from before the
+        // run: this is the moment its prestub can be found and armed, ahead of the method it is for.
+        if (module.Name.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase)
+            || module.Name.Equals("clr.dll", StringComparison.OrdinalIgnoreCase))
+        {
+            EnablePrestubCatch();
         }
 
         // Any module arriving is the moment breakpoints naming it can go in, whether or not it is the
@@ -2164,8 +2208,243 @@ public sealed class DebugSession : IDisposable
     private bool Ours(ulong runtime) => _temporary == runtime || Find(runtime) is not null;
 
     /// <summary>An int3 we planted: put the byte back, wind RIP back onto it, and stop.</summary>
+    /// <summary>The runtime module — coreclr on .NET, clr on Framework — once it has loaded, or null.</summary>
+    private LoadedModule? RuntimeModule()
+    {
+        lock (_modules)
+        {
+            return _modules.Values.FirstOrDefault(m =>
+                m.Name.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase) ||
+                m.Name.Equals("clr.dll", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private HeldManaged? FindPending(string type, int token)
+    {
+        lock (_pendingManaged)
+        {
+            return _pendingManaged.FirstOrDefault(h => h.Token == token && string.Equals(h.Type, type, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// One register of a thread, read straight from its context. Unlike <see cref="RegistersOf"/> this
+    /// does not wait for the session to be marked stopped: the prestub dance reads rdx and rsp from
+    /// inside the event handler, before a stop is reported, and every thread is already suspended there.
+    /// </summary>
+    private ulong RegisterValue(uint threadId, string name)
+    {
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var context = ThreadContext.For(_wow64);
+            if (!context.Read(thread))
+            {
+                return 0;
+            }
+
+            foreach (var (registerName, value) in context.General())
+            {
+                if (registerName == name)
+                {
+                    return value;
+                }
+            }
+
+            return 0;
+        }
+        finally
+        {
+            Native.CloseHandle(thread);
+        }
+    }
+
+    /// <summary>
+    /// Resolves PreStubWorker from the runtime's PDB — fetched once from the symbol server, then cached —
+    /// and arms an int3 on it, so a cold managed breakpoint is caught on its <em>first</em> call rather
+    /// than a later one. Started when a cold breakpoint is first held; the resolve runs off the loop, and
+    /// arming follows once the address is known and the runtime is loaded. Silently a no-op when no PDB
+    /// can be had — the held breakpoint is then planted by <see cref="PlantPending"/> on a later call.
+    /// </summary>
+    private void EnablePrestubCatch()
+    {
+        if (_prestubRva != 0)
+        {
+            ArmPrestubIfPending();
+            return;
+        }
+
+        if (_prestubResolving || RuntimeModule() is not { } runtime)
+        {
+            return;
+        }
+
+        _prestubResolving = true;
+        string path = runtime.Path;
+        Task.Run(() =>
+        {
+            uint rva = CoreClrSymbols.PreStubWorkerRva(path);
+            _prestubRva = rva;
+            _prestubResolving = false;
+            if (rva != 0)
+            {
+                ArmPrestubIfPending();
+            }
+        });
+    }
+
+    /// <summary>Plants the PreStubWorker int3 once it is resolved, the runtime is loaded and a cold
+    /// breakpoint is still waiting — and not already armed, nor mid-dance.</summary>
+    private void ArmPrestubIfPending()
+    {
+        if (_prestubVa != 0 || _dancing is not null || _prestubRva == 0)
+        {
+            return;
+        }
+
+        lock (_pendingManaged)
+        {
+            if (_pendingManaged.Count == 0)
+            {
+                return;
+            }
+        }
+
+        if (RuntimeModule() is not { } runtime)
+        {
+            return;
+        }
+
+        ulong va = runtime.Base + _prestubRva;
+        _prestubVa = va;                          // set before the plant, so a hit is recognised as ours
+        if (!AddBreakpoint(va))
+        {
+            _prestubVa = 0;
+        }
+    }
+
+    private void DisarmPrestub()
+    {
+        if (_prestubVa == 0)
+        {
+            return;
+        }
+
+        ulong va = _prestubVa;
+        _prestubVa = 0;
+        RemoveBreakpoint(va);
+    }
+
+    /// <summary>
+    /// A hit on the JIT's shared prestub worker. Its second argument — rdx on x64 — is the MethodDesc
+    /// being compiled. When that is a method a first-call breakpoint is waiting for, the worker is
+    /// disarmed for the duration and a one-shot is set at the prestub's return, where the method will
+    /// have native code; otherwise the worker re-arms and the run goes on. Never a reported stop.
+    /// </summary>
+    private bool PrestubHit(ulong address)
+    {
+        // Lift our int3 off the worker's own first byte, wind RIP back onto it, and step off so it can be
+        // re-planted for the next JIT — the mechanics any breakpoint uses.
+        byte original = 0;
+        if (Find(address) is { } key)
+        {
+            lock (_breakpoints)
+            {
+                if (_breakpoints.TryGetValue(key, out var bp))
+                {
+                    original = bp.Original;
+                }
+            }
+        }
+
+        WriteByte(address, original);
+        Rewind(address, thenStep: true);
+        _reArm = (address, _threadId);
+        _stepThread = null;
+
+        ulong methodDesc = RegisterValue(_threadId, "rdx");
+        HeldManaged? target = _overlay?.MethodByHandle(methodDesc) is { } who ? FindPending(who.Type, who.Token) : null;
+        if (target is null)
+        {
+            // Not one whose first call is wanted: the worker re-arms (via _reArm) and the run continues.
+            return false;
+        }
+
+        // Ours. Stop watching the worker while this method compiles — its JIT can trigger others, and only
+        // this one is being caught — and set a one-shot at the return, read from the top of the stack.
+        _reArm = null;
+        DisarmPrestub();
+
+        ulong rsp = RegisterValue(_threadId, "rsp");
+        ulong ret = rsp != 0 && ReadMemory(rsp, 8) is { Length: 8 } stack ? BitConverter.ToUInt64(stack) : 0;
+        if (ret != 0 && ReadMemory(ret, 1) is { Length: 1 } was && WriteByte(ret, 0xCC))
+        {
+            _danceReturnOriginal = was[0];
+            _danceReturn = ret;
+            _dancing = target;
+        }
+        else
+        {
+            // Could not set the return one-shot; leave the method to the later-call fallback and re-arm.
+            ArmPrestubIfPending();
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The one-shot at the prestub's return: the method has just been compiled and has native code, so the
+    /// breakpoint the analyst actually asked for is planted now, in time for this first call to reach it.
+    /// Never a reported stop of its own — the reported stop is that planted breakpoint, an instant later.
+    /// </summary>
+    private bool DanceReturnHit(ulong address)
+    {
+        WriteByte(address, _danceReturnOriginal);
+        Rewind(address, thenStep: false);
+        _danceReturn = 0;
+        var cold = _dancing;
+        _dancing = null;
+
+        if (cold is not null && _overlay is { } overlay)
+        {
+            var resolved = cold.Resolve(overlay);
+            if (resolved.Ok && AddBreakpoint(resolved.Address))
+            {
+                lock (_pendingManaged)
+                {
+                    _pendingManaged.Remove(cold);
+                }
+
+                Report("module", $"{cold.Label} caught at its first call; its breakpoint is planted at 0x{ToStatic(resolved.Address):X}");
+            }
+        }
+
+        // Keep watching the worker if other cold breakpoints are still waiting.
+        ArmPrestubIfPending();
+        return false;
+    }
+
     private bool HitBreakpoint(ulong address)
     {
+        // The first-call machinery, before anything else and never reported: the JIT's shared prestub
+        // worker (armed while a cold managed breakpoint waits) and the return one-shot of a dance in
+        // progress. Each does its mechanical part and continues; the stop the analyst sees is the managed
+        // breakpoint that gets planted at the end of it.
+        if (_danceReturn != 0 && address == _danceReturn)
+        {
+            return DanceReturnHit(address);
+        }
+
+        if (_prestubVa != 0 && address == _prestubVa)
+        {
+            return PrestubHit(address);
+        }
+
         // A one-shot first: step-over and run-to-cursor put it there to get here, and it goes away
         // whether or not a real breakpoint happens to be at the same address.
         if (_temporary == address)

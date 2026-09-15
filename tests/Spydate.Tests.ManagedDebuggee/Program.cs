@@ -27,6 +27,12 @@ internal static class Program
     /// <summary>Accumulates <see cref="LateJit"/>'s result, so its JIT is not elided.</summary>
     public static long LateSum;
 
+    /// <summary>Accumulates <see cref="OnceLate"/>'s result, so its single call is not elided.</summary>
+    public static long OnceSum;
+
+    /// <summary>True once <see cref="OnceLate"/> has been called, so it is called exactly once.</summary>
+    private static bool _oncePoked;
+
     private static void Main()
     {
         Console.WriteLine($"managed debuggee up, pid {Environment.ProcessId}");
@@ -63,6 +69,21 @@ internal static class Program
         return mixed;
     }
 
+    /// <summary>
+    /// Cold at startup and called exactly once, a few seconds in — the case that separates a first-call
+    /// catch from the fallback: the fallback plants a held breakpoint only after the method has compiled,
+    /// which is after this one call has already run, so it never fires; the prestub catch stops on it.
+    /// Shaped like <see cref="Step"/> so a breakpoint has interior offsets to aim at.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static int OnceLate(int value)
+    {
+        int trebled = value * 3;
+        int plusSeven = trebled + 7;
+        int mixed = plusSeven ^ value;
+        return mixed;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Spin()
     {
@@ -79,6 +100,15 @@ internal static class Program
             if (clock.Elapsed.TotalSeconds > 4)
             {
                 LateSum += LateJit(Ticks);
+            }
+
+            // Called exactly once, a few seconds in. It is cold until then and never called again, so a
+            // breakpoint on it can only fire if its FIRST call is caught — which the poll-plant fallback
+            // cannot do (it notices the JIT after the call), and the prestub catch can.
+            if (!_oncePoked && clock.Elapsed.TotalSeconds > 3)
+            {
+                _oncePoked = true;
+                OnceSum += OnceLate(Ticks);
             }
 
             Wait();

@@ -202,6 +202,36 @@ public sealed class ManagedOverlay : IDisposable
     /// Null when the address is native, or in a method the DAC cannot resolve. This is what puts a
     /// managed name beside a native register dump.
     /// </summary>
+    /// <summary>
+    /// The method a MethodDesc handle belongs to, named the way a managed breakpoint names one — its
+    /// declaring type's full name and the method's metadata token. The JIT's shared prestub takes the
+    /// MethodDesc as its argument, so this is how the loop tells, at that stub, which method is being
+    /// compiled — and so which pending first-call breakpoint (if any) this JIT is for. Null when there is
+    /// no CLR, or the handle is not a method. The mapping is fixed, so this needs no cache flush.
+    /// </summary>
+    public (string Type, int Token)? MethodByHandle(ulong methodDesc)
+    {
+        if (Runtime() is not { } runtime)
+        {
+            return null;
+        }
+
+        try
+        {
+            var method = runtime.GetMethodByHandle(methodDesc);
+            if (method?.Type is not { } type)
+            {
+                return null;
+            }
+
+            return (type.Name ?? string.Empty, (int)method.MetadataToken);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return null;
+        }
+    }
+
     public OverlayLocation? LocationOf(ulong instructionPointer)
     {
         if (Runtime() is not { } runtime)

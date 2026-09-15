@@ -418,16 +418,55 @@ public sealed class ManagedOverlayTests
         Assert.NotNull(held);
         Assert.Contains("not compiled", held!, StringComparison.OrdinalIgnoreCase);
 
-        // Once the method is called it JITs; a poll of PlantPending finds it has native code and plants
-        // the held breakpoint. (The deterministic first-call catch needs DAC JIT notifications, which
-        // are not enabled — see MIXED-MODE.md — so this fallback catches a later call.)
-        Assert.True(Wait(() => session.PlantPending() > 0, 30), "the held breakpoint was never planted");
-
-        // And then it fires, in LateJit.
-        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the planted breakpoint never fired");
+        // Once the method is called it JITs and the breakpoint goes in — planted either by the prestub
+        // first-call catch (when the runtime PDB is available; see MIXED-MODE.md Phase 7) or, failing
+        // that, by a poll of PlantPending on a later call. Either way it fires, in LateJit.
+        Assert.True(Wait(() => { session.PlantPending(); return Volatile.Read(ref stops) >= 1; }, 30), "the held breakpoint never fired");
         var where = session.Managed!.LocationOf(session.CurrentAddress);
         Assert.NotNull(where);
         Assert.Contains("LateJit", where!.Method, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AColdMethodCalledOnceIsCaughtAtItsFirstCallViaThePrestub()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        // The catch needs PreStubWorker from the runtime's PDB. Warm the cache from this process's own
+        // runtime — the fixture is the same build — so the session's arming is instant, and skip where no
+        // PDB can be had (an offline machine), the way the whole feature falls back there.
+        string? runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
+        string coreclr = runtimeDir is { Length: > 0 } ? Path.Combine(runtimeDir, "coreclr.dll") : string.Empty;
+        if (!File.Exists(coreclr) || CoreClrSymbols.PreStubWorkerRva(coreclr) == 0)
+        {
+            return;
+        }
+
+        int token = MethodToken(fixture, FixtureType, "OnceLate");
+        Assert.NotEqual(0, token);
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true, 30), "the CLR never came up");
+
+        // OnceLate is cold, called exactly once a few seconds in, and never again. The poll-plant fallback
+        // notices its JIT only after that one call has run, so it could never stop on it. If the run stops
+        // in OnceLate, only the prestub first-call catch could have done it.
+        string? held = session.AddManagedBreakpoint(FixtureType, token, 0);
+        Assert.NotNull(held);
+
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the once-called cold method was never caught");
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("OnceLate", where!.Method, StringComparison.Ordinal);
 
         session.Stop();
     }
@@ -485,10 +524,10 @@ public sealed class ManagedOverlayTests
         Assert.NotNull(held);
         Assert.Contains("held", held!, StringComparison.OrdinalIgnoreCase);
 
-        // Once the CLR is up and Step has native code, PlantPending plants the held breakpoint, and it
-        // fires in Step — a managed breakpoint set before the run, planted over the native loop.
-        Assert.True(Wait(() => session.PlantPending() > 0, 30), "the token breakpoint was never planted");
-        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the token breakpoint never fired");
+        // Once the CLR is up and Step has native code the held breakpoint goes in — by the prestub
+        // first-call catch or a poll of PlantPending, whichever the runtime PDB allows — and it fires in
+        // Step: a managed breakpoint set before the run, planted over the native loop.
+        Assert.True(Wait(() => { session.PlantPending(); return Volatile.Read(ref stops) >= 1; }, 30), "the token breakpoint never fired");
         var where = session.Managed!.LocationOf(session.CurrentAddress);
         Assert.NotNull(where);
         Assert.Contains("Step", where!.Method, StringComparison.Ordinal);
