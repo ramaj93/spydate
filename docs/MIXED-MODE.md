@@ -505,14 +505,31 @@ read-only: the DAC names addresses, the native loop does every write.
   the worker returns before the MethodDesc shows any native code. And a method's JIT triggers nested
   JITs whose prestub calls return through the same shared address, so the return breakpoint re-arms and
   acts only when the stack has unwound back to the frame the caught method's own prestub was called from.
+- ✅ Armed before the method runs, not after. The catch is only as good as its timing: the int3 on
+  `PreStubWorker` must be in place before the cold method JITs. Resolving the worker means loading the
+  runtime's PDB — ~0.9 s for Framework's 24 MB `clr.pdb`, even warm from the on-disk cache — and if that
+  ran on a background thread the process could reach the method first and slip past (the poll-plant
+  fallback then catches it a call too late, so a once-called method like `OnStartup` is missed entirely).
+  The runtime's own load event is the fix: the whole target is frozen there and no managed code has run
+  yet, so the loop resolves the prestub **on that thread, from the on-disk cache only** (never a network
+  fetch, which would hang the frozen loop) and arms before letting go. A cold cache — no PDB on disk yet —
+  falls through to the background fetch that warms it for next time. `CoreClrSymbols.ResolvePrestub` grew
+  an `allowFetch` flag for exactly this: the load-event resolve passes it false.
 - ✅ Reached from the panel and the agent with no new surface: it is the same `AddManagedBreakpoint` a
-  gutter click already drives, now armed the moment a cold method is held.
+  gutter click already drives, now armed the moment a cold method is held. The panel's pump seeds a
+  gutter breakpoint into the session as soon as the run starts — before the runtime loads — so the
+  load-event arm finds it waiting.
 - ✅ Tests and verification. `AColdMethodCalledOnceIsCaughtAtItsFirstCallViaThePrestub` sets a breakpoint
   on a fixture method called exactly once — the case the fallback can never catch — and stops on it. On
   a real .NET Framework 4.8 app (CSPro Capture), a managed breakpoint on `CSProApp.Main.App.OnStartup`,
-  driven natively through the panel, stops at `OnStartup` IL_0000 on its first call. The one thing the
-  test cannot do in CI is fetch the PDB (a large download), so it skips where no symbols are available,
-  which is also how the feature itself degrades.
+  driven natively through the panel, stops in `OnStartup` on its first call — reliably now, where before
+  the arming race made it depend on how fast that build reached the method (CSPro does ~11 s of native
+  startup before the CLR loads, then reaches `OnStartup` within a few hundred ms — the window the
+  background arm was losing). From that first stop, IL stepping advances by IL boundary and a second,
+  deeper breakpoint in the same method is hit on continue. The one thing the test cannot do in CI is
+  fetch the PDB (a large download), so it skips where no symbols are available, which is also how the
+  feature itself degrades — and on a cold cache the very first run of a once-called startup method can
+  still miss it, because the PDB has to arrive before the arm; the run after warms the cache and catches.
 - ◑ The overlay had to be made thread-safe for this: the loop's prestub dance and the panel's pump read
   the DAC at once, and ClrMD is not safe across threads. Its reads are now serialized. Worth noting as a
   constraint, not a gap.

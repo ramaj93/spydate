@@ -42,16 +42,21 @@ public static class CoreClrSymbols
         public static PrestubInfo None => new(0, string.Empty);
     }
 
-    /// <summary>The prestub of the runtime at <paramref name="runtimePath"/> — coreclr.dll or clr.dll.</summary>
-    public static PrestubInfo ResolvePrestub(string runtimePath)
+    /// <summary>
+    /// The prestub of the runtime at <paramref name="runtimePath"/> — coreclr.dll or clr.dll. With
+    /// <paramref name="allowFetch"/> false the PDB is read only if it is already on disk, never fetched
+    /// from the symbol server: the debug loop resolves this way at a module-load stop, where the target
+    /// is frozen and a network round-trip would hang it, so it must arm from a warm cache or not at all.
+    /// </summary>
+    public static PrestubInfo ResolvePrestub(string runtimePath, bool allowFetch = true)
     {
-        uint rva = SymbolRva(runtimePath, "PreStubWorker");
+        uint rva = SymbolRva(runtimePath, "PreStubWorker", allowFetch);
         if (rva != 0)
         {
             return new PrestubInfo(rva, "rdx");
         }
 
-        rva = SymbolRva(runtimePath, "?DoPrestub@MethodDesc@@QEAA_KPEAVMethodTable@@@Z");
+        rva = SymbolRva(runtimePath, "?DoPrestub@MethodDesc@@QEAA_KPEAVMethodTable@@@Z", allowFetch);
         if (rva != 0)
         {
             return new PrestubInfo(rva, "rcx");
@@ -67,8 +72,9 @@ public static class CoreClrSymbols
     /// </summary>
     public static uint PreStubWorkerRva(string runtimePath) => SymbolRva(runtimePath, "PreStubWorker");
 
-    /// <summary>The RVA of a named public symbol in the runtime image, or 0. Cached per build.</summary>
-    public static uint SymbolRva(string runtimePath, string symbol)
+    /// <summary>The RVA of a named public symbol in the runtime image, or 0. Cached per build. With
+    /// <paramref name="allowFetch"/> false the PDB is not downloaded, only read if already on disk.</summary>
+    public static uint SymbolRva(string runtimePath, string symbol, bool allowFetch = true)
     {
         string key = $"{runtimePath}\0{symbol}";
         if (Cache.TryGetValue(key, out uint cached))
@@ -76,12 +82,19 @@ public static class CoreClrSymbols
             return cached;
         }
 
-        uint rva = Resolve(runtimePath, symbol);
-        Cache[key] = rva;
+        uint rva = Resolve(runtimePath, symbol, allowFetch);
+
+        // A hit is cached always; a miss only when a fetch was allowed, so it was a definitive miss. A
+        // no-fetch miss (the PDB simply was not on disk yet) is left uncached, so a later fetch retries.
+        if (rva != 0 || allowFetch)
+        {
+            Cache[key] = rva;
+        }
+
         return rva;
     }
 
-    private static uint Resolve(string runtimePath, string symbol)
+    private static uint Resolve(string runtimePath, string symbol, bool allowFetch)
     {
         try
         {
@@ -97,7 +110,7 @@ public static class CoreClrSymbols
                 return 0;
             }
 
-            string? pdbPath = LocalPdb(codeView);
+            string? pdbPath = LocalPdb(codeView, allowFetch);
             if (pdbPath is null)
             {
                 return 0;
@@ -143,7 +156,7 @@ public static class CoreClrSymbols
     /// itself is — <c>&lt;name&gt;/&lt;guid+age&gt;/&lt;name&gt;</c> — so a cache shared with other tools
     /// interoperates. Null when there is no PDB to be had.
     /// </summary>
-    private static string? LocalPdb(CodeViewInfo codeView)
+    private static string? LocalPdb(CodeViewInfo codeView, bool allowFetch)
     {
         string pdbName = Path.GetFileName(codeView.PdbPath);
         if (pdbName.Length == 0)
@@ -165,6 +178,13 @@ public static class CoreClrSymbols
         if (Path.GetDirectoryName(codeView.PdbPath) is { Length: > 0 } && File.Exists(codeView.PdbPath))
         {
             return codeView.PdbPath;
+        }
+
+        // Not on disk. The loop-thread resolve stops here rather than reach for the network, which would
+        // freeze the frozen target; the background resolve is the one that fetches and warms the cache.
+        if (!allowFetch)
+        {
+            return null;
         }
 
         try

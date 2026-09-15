@@ -1886,7 +1886,7 @@ public sealed class DebugSession : IDisposable
         if (module.Name.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase)
             || module.Name.Equals("clr.dll", StringComparison.OrdinalIgnoreCase))
         {
-            EnablePrestubCatch();
+            EnablePrestubCatch(atModuleLoad: true);
         }
 
         // Any module arriving is the moment breakpoints naming it can go in, whether or not it is the
@@ -2280,7 +2280,15 @@ public sealed class DebugSession : IDisposable
     /// arming follows once the address is known and the runtime is loaded. Silently a no-op when no PDB
     /// can be had — the held breakpoint is then planted by <see cref="PlantPending"/> on a later call.
     /// </summary>
-    private void EnablePrestubCatch()
+    /// <param name="atModuleLoad">
+    /// True when called from the runtime's own load event, where the whole target is frozen and no
+    /// managed method has run yet. There the prestub is resolved on the loop thread from a PDB already on
+    /// disk and armed before the process is let go — the only way to catch a once-called startup method
+    /// (App.OnStartup) on its very first call, because the alternative, a background resolve, takes ~0.9 s
+    /// to load the runtime PDB and loses the race to a method that JITs sooner. A cold cache (no PDB on
+    /// disk) falls through to the background fetch, which warms the cache for the next run.
+    /// </param>
+    private void EnablePrestubCatch(bool atModuleLoad = false)
     {
         if (_prestubRva != 0)
         {
@@ -2293,6 +2301,24 @@ public sealed class DebugSession : IDisposable
             return;
         }
 
+        bool coldWaiting;
+        lock (_pendingManaged)
+        {
+            coldWaiting = _pendingManaged.Count > 0;
+        }
+
+        if (atModuleLoad && coldWaiting)
+        {
+            var local = CoreClrSymbols.ResolvePrestub(runtime.Path, allowFetch: false);
+            if (local.Ok)
+            {
+                _prestubRegister = local.MethodDescRegister;
+                _prestubRva = local.Rva;
+                ArmPrestubIfPending(announce: true);
+                return;
+            }
+        }
+
         _prestubResolving = true;
         string path = runtime.Path;
         Task.Run(() =>
@@ -2303,26 +2329,29 @@ public sealed class DebugSession : IDisposable
             _prestubResolving = false;
             if (info.Ok)
             {
-                ArmPrestubIfPending();
+                ArmPrestubIfPending(announce: true);
             }
         });
     }
 
     /// <summary>Plants the PreStubWorker int3 once it is resolved, the runtime is loaded and a cold
     /// breakpoint is still waiting — and not already armed, nor mid-dance.</summary>
-    private void ArmPrestubIfPending()
+    private void ArmPrestubIfPending(bool announce = false)
     {
         if (_prestubVa != 0 || _dancing is not null || _prestubRva == 0)
         {
             return;
         }
 
+        int waiting;
         lock (_pendingManaged)
         {
-            if (_pendingManaged.Count == 0)
-            {
-                return;
-            }
+            waiting = _pendingManaged.Count;
+        }
+
+        if (waiting == 0)
+        {
+            return;
         }
 
         if (RuntimeModule() is not { } runtime)
@@ -2335,6 +2364,16 @@ public sealed class DebugSession : IDisposable
         if (!AddBreakpoint(va))
         {
             _prestubVa = 0;
+            return;
+        }
+
+        // Only the first arm, from a resolve, announces itself — not the silent re-arms a dance does
+        // while it steps off the worker. This is the analyst's sign the first-call catch is live before
+        // any breakpoint stops, so a cold startup method not stopping is a real miss, not "not armed yet".
+        if (announce)
+        {
+            string these = waiting == 1 ? "a cold managed breakpoint" : $"{waiting} cold managed breakpoints";
+            Report("module", $"first-call catch armed for {these} — its method will stop on its first call");
         }
     }
 
