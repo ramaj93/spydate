@@ -159,6 +159,8 @@ public sealed class ManagedOverlay : IDisposable
     /// </summary>
     public IReadOnlyList<OverlayThread> Threads()
     {
+        lock (_gate)
+        {
         if (Runtime() is not { } runtime)
         {
             return Array.Empty<OverlayThread>();
@@ -195,6 +197,7 @@ public sealed class ManagedOverlay : IDisposable
         }
 
         return threads;
+        }
     }
 
     /// <summary>
@@ -211,29 +214,36 @@ public sealed class ManagedOverlay : IDisposable
     /// </summary>
     public (string Type, int Token)? MethodByHandle(ulong methodDesc)
     {
-        if (Runtime() is not { } runtime)
+        // The whole operation under the gate, not only the attach in Runtime(): ClrMD is not safe to call
+        // from two threads at once, and here the loop's prestub dance and the panel's pump both do.
+        lock (_gate)
         {
-            return null;
-        }
-
-        try
-        {
-            var method = runtime.GetMethodByHandle(methodDesc);
-            if (method?.Type is not { } type)
+            if (Runtime() is not { } runtime)
             {
                 return null;
             }
 
-            return (type.Name ?? string.Empty, (int)method.MetadataToken);
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
-        {
-            return null;
+            try
+            {
+                var method = runtime.GetMethodByHandle(methodDesc);
+                if (method?.Type is not { } type)
+                {
+                    return null;
+                }
+
+                return (type.Name ?? string.Empty, (int)method.MetadataToken);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                return null;
+            }
         }
     }
 
     public OverlayLocation? LocationOf(ulong instructionPointer)
     {
+        lock (_gate)
+        {
         if (Runtime() is not { } runtime)
         {
             return null;
@@ -257,6 +267,7 @@ public sealed class ManagedOverlay : IDisposable
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             return null;
+        }
         }
     }
 
@@ -283,6 +294,10 @@ public sealed class ManagedOverlay : IDisposable
 
     private OverlayResolution Resolve(string typeName, int ilOffset, Func<ClrMethod, bool> match, string methodLabel, string missing)
     {
+        // Under the gate: the loop's prestub dance resolves a method at the same time the panel's pump
+        // does, and ClrMD is not thread-safe.
+        lock (_gate)
+        {
         if (Runtime() is not { } runtime)
         {
             return new OverlayResolution(0, 0, null, "there is no CLR in the process yet");
@@ -325,6 +340,7 @@ public sealed class ManagedOverlay : IDisposable
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             return new OverlayResolution(0, 0, null, "the DAC could not resolve the method");
+        }
         }
     }
 
@@ -376,6 +392,8 @@ public sealed class ManagedOverlay : IDisposable
     /// </summary>
     public OverlayStep? StepInfoAt(ulong ip)
     {
+        lock (_gate)
+        {
         if (Runtime() is not { } runtime)
         {
             return null;
@@ -431,6 +449,7 @@ public sealed class ManagedOverlay : IDisposable
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             return null;
+        }
         }
     }
 
