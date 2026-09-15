@@ -596,14 +596,10 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         // driven by the native loop on purpose, so that breakpoints and patches can go into the
         // native DLLs it loads. Deciding it twice would mean the tools were handed the managed
         // interface for a process the native loop actually owns.
-        if (_debugger.UsesManagedDebugger)
-        {
-            _session.ManagedDebug = new PanelManagedDebugControl(_debugger);
-        }
-        else
-        {
-            _session.Debug = new PanelDebugControl(_debugger);
-        }
+        // The settings object points the store at the debugger for the current engine now, and re-points
+        // it whenever the agent changes the engine through debug_config — so the tools always drive the
+        // one the run configuration names, without a person opening the Debug Program dialog.
+        _session.DebugSettings = new PanelDebugSettings(_debugger, _session);
         var options = McpOptions.Default with { AllowDebug = true };
 
         _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, _earlier);

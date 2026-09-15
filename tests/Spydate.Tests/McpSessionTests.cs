@@ -283,4 +283,116 @@ public class McpSessionTests
         // The over-long name was cut to the column's limit rather than pushing everything sideways.
         Assert.Equal(8, lines[2][..column].TrimEnd().Length);
     }
+
+    // ------------------------------------------------------------------
+    // debug_config — reading and changing the run configuration
+    // ------------------------------------------------------------------
+
+    private sealed class FakeSettings : IDebugSettings
+    {
+        public DebugSettingsSnapshot Snapshot { get; set; } = new()
+        {
+            Engine = "managed",
+            TargetIsManaged = true,
+            Running = false,
+            ExecutableEditable = true,
+            Executable = "host.exe",
+            BreakAt = "Create Process",
+            EngineOptions = ["managed", "native"],
+            BreakAtOptions = ["Don't break", "Create Process"],
+        };
+
+        public (string? Engine, string? Exe, string? Args, string? Dir, string? Break)? Applied { get; private set; }
+
+        public string? Problem { get; set; }
+
+        public DebugSettingsSnapshot Read() => Snapshot;
+
+        public string? Apply(string? engine, string? executable, string? arguments, string? workingDirectory, string? breakAt)
+        {
+            Applied = (engine, executable, arguments, workingDirectory, breakAt);
+            return Problem;
+        }
+    }
+
+    private static DebugTools DebugToolsWith(SessionStore store)
+        => new(store, McpOptions.Default with { AllowDebug = true });
+
+    private static SessionStore ConfigurableStore(FakeSettings settings)
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return new SessionStore();
+        }
+
+        var store = new SessionStore { DebugSettings = settings };
+        store.Set(Session(Corpus.NotepadX64));
+        return store;
+    }
+
+    [Fact]
+    public void DebugConfigReadsTheSettingsWithoutChangingThem()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var settings = new FakeSettings();
+        string text = DebugToolsWith(ConfigurableStore(settings)).Config();
+
+        Assert.Null(settings.Applied);   // a read touched nothing
+        Assert.Contains("engine: managed", text, StringComparison.Ordinal);
+        Assert.Contains("native", text, StringComparison.Ordinal);   // offered as the other option
+        Assert.Contains("Create Process", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugConfigChangesOnlyTheFieldGivenAndReportsTheResult()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var settings = new FakeSettings();
+        settings.Snapshot = settings.Snapshot with { Engine = "native" };
+
+        string text = DebugToolsWith(ConfigurableStore(settings)).Config(engine: "native");
+
+        Assert.Equal(("native", null, null, null, null), settings.Applied);
+        Assert.Contains("engine: native", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugConfigReturnsTheProblemWhenAChangeIsRefused()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var settings = new FakeSettings { Problem = "a run is in progress; stop it before changing how it starts." };
+
+        string text = DebugToolsWith(ConfigurableStore(settings)).Config(engine: "managed");
+
+        Assert.Equal("a run is in progress; stop it before changing how it starts.", text);
+        Assert.DoesNotContain("engine:", text, StringComparison.Ordinal);   // not the rendered snapshot
+    }
+
+    [Fact]
+    public void DebugConfigSaysSoWhenTheHostHasNoRunConfiguration()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var store = new SessionStore();   // no DebugSettings wired
+        store.Set(Session(Corpus.NotepadX64));
+
+        string text = DebugToolsWith(store).Config();
+
+        Assert.Contains("does not let its run configuration be changed", text, StringComparison.Ordinal);
+    }
 }

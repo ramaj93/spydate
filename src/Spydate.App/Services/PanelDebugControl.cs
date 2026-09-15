@@ -120,6 +120,13 @@ public sealed class PanelDebugControl : IDebugControl
             Breakpoints = _debugger.BreakpointAddresses.Order().ToList(),
             LivePatches = _debugger.LivePatches.Select(p => (p.Rva, p.Va, p.Was, p.Now, p.Comment)).ToList(),
 
+            // In mixed mode — the native loop driving a .NET target — the panel also shows the managed
+            // call stack beside the native registers. The agent gets the same, so a native stop reads
+            // as a place in the C#, innermost frame first, the stopped one marked.
+            ManagedFrames = _debugger.IsMixedMode
+                ? _debugger.CallStack.Select(f => f.Display + (f.IsCurrent ? "  (stopped here)" : string.Empty)).ToList()
+                : [],
+
             // The tail of the panel log. Enough to carry a module load, a breakpoint and an exit;
             // not so much that a long run buries the answer to the question actually asked.
             Recent = _debugger.Log.TakeLast(12).ToList(),

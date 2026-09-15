@@ -227,7 +227,7 @@ public sealed class DebugTools
     }
 
     [McpServerTool(Name = "debug_state")]
-    [Description("Where a debugged process is: state, where it stopped, threads, registers, flags, stack, modules, breakpoints, and what it has done lately.")]
+    [Description("Where a debugged process is: state, where it stopped, threads, registers, flags, stack, modules, breakpoints, and what it has done lately. In native mode on a .NET target it also gives the managed method, IL offset and call stack.")]
     public string State(
         [Description("Thread to show.")] uint? thread = null)
     {
@@ -248,6 +248,62 @@ public sealed class DebugTools
 
         var debug = _store.Debug!;
         return thread is { } picked && Pick(debug, picked) is { } wrong ? wrong : Describe(debug.Snapshot());
+    }
+
+    [McpServerTool(Name = "debug_config")]
+    [Description("Read or change how the next run starts - the Debug Program settings - without opening the dialog. No arguments reports them; any argument changes that field and leaves the rest. Only while stopped. engine picks the model for a .NET binary: managed (.NET CLR - locals, IL stepping) or native (mixed mode - native and managed breakpoints, managed stack, no locals); a native binary is native only.")]
+    public string Config(
+        [Description("\"managed\" or \"native\"; a native binary only native.")] string? engine = null,
+        [Description("Host for a DLL or .NET assembly.")] string? executable = null,
+        [Description("Command-line arguments.")] string? arguments = null,
+        [Description("Empty is the host's own folder.")] string? working_directory = null,
+        [Description("An option the read reports.")] string? break_at = null)
+    {
+        if (!_options.AllowDebug)
+        {
+            return "debugging is off. It runs the binary, so it is not on by default: start the server "
+                   + "with --allow-debug, or use the assistant panel in the window.";
+        }
+
+        if (_store.DebugSettings is not { } settings)
+        {
+            return "this host does not let its run configuration be changed here.";
+        }
+
+        if (_store.Current is null)
+        {
+            return SessionTools.NothingOpen;
+        }
+
+        bool changing = engine is not null || executable is not null || arguments is not null
+                        || working_directory is not null || break_at is not null;
+        if (changing && settings.Apply(engine, executable, arguments, working_directory, break_at) is { } problem)
+        {
+            return problem;
+        }
+
+        return Render(settings.Read());
+    }
+
+    private static string Render(DebugSettingsSnapshot s)
+    {
+        var sb = new StringBuilder();
+
+        string engine = s.Engine == "native" && s.TargetIsManaged ? "native (mixed mode)" : s.Engine;
+        sb.AppendLine(s.TargetIsManaged
+            ? $"engine: {engine}  (.NET target — also takes: {string.Join(", ", s.EngineOptions)})"
+            : $"engine: {engine}  (native binary — native only)");
+        sb.AppendLine($"executable: {(s.Executable.Length > 0 ? s.Executable : "(the target itself)")}"
+                      + (s.ExecutableEditable ? string.Empty : "  (fixed — a native EXE is its own program)"));
+        sb.AppendLine($"arguments: {(s.Arguments.Length > 0 ? s.Arguments : "(none)")}");
+        sb.AppendLine($"working directory: {(s.WorkingDirectory.Length > 0 ? s.WorkingDirectory : "(the host's own folder)")}");
+        sb.AppendLine($"break at: {s.BreakAt}  (options: {string.Join(", ", s.BreakAtOptions)})");
+        if (s.Running)
+        {
+            sb.AppendLine("a run is in progress — these cannot be changed until it stops.");
+        }
+
+        return sb.ToString().TrimEnd();
     }
 
     /// <summary>
@@ -419,6 +475,20 @@ public sealed class DebugTools
             foreach (var (address, value) in snapshot.Stack.Take(8))
             {
                 sb.AppendLine($"  {address:X16}  {value:X16}");
+            }
+        }
+
+        // The managed side of a mixed-mode stop — the native loop driving a .NET target. The status
+        // already names the method and IL offset; this is the call stack behind it, so the native
+        // registers above read as a place in the C#. Locals are not here: the read-only DAC does not
+        // expose them (switch the window's Debug engine to .NET CLR for those).
+        if (snapshot.ManagedFrames.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("managed frames (.NET target under the native engine — mixed mode; innermost first):");
+            foreach (string frame in snapshot.ManagedFrames.Take(12))
+            {
+                sb.AppendLine($"  {frame}");
             }
         }
 

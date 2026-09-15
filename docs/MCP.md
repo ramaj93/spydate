@@ -127,6 +127,18 @@ address in an IL-only assembly names a byte of IL in the file and the bytes at t
 process belong to something else. `pause` and `run_to` are named as not implemented rather than
 quietly doing nothing.
 
+`debug_config` is how the agent settles that choice itself, without a person opening the Debug Program
+dialog. Called with no arguments it reports the run configuration — engine, executable, arguments,
+working directory, break point; given any argument it changes that field and leaves the rest, while
+nothing is running. A .NET binary takes either engine, and this is where the difference is chosen:
+`managed` is the CLR debugger above — local variable values, property evaluation, statement stepping;
+`native` is the native loop driving the same .NET process, mixed mode, where a breakpoint can go into
+one of its own managed methods or a native DLL it loads, and `debug_state` reports the managed method,
+IL offset and call stack beside the native registers — but no locals, because nothing is talking to
+the runtime. A native binary is native only, and asking for the managed engine on one is refused.
+Switching the engine re-points which debugger the verbs drive, so the whole flow — configure, run,
+break, inspect — stays in the tools rather than waiting on the dialog.
+
 `get_overview` describes the assembly as an assembly: full name, target framework, entry point,
 type and member counts, what it references. It also says which of the file's two readings is about
 the program. For an IL-only assembly the native lines above it describe the CLR loader stub, and

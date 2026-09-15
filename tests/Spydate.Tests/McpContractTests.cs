@@ -35,8 +35,15 @@ public class McpContractTests
     /// debug_break — a managed address becomes a managed breakpoint over the native loop — rather than
     /// a shaved description elsewhere. Still no new tool: debug_break already routes by address, and
     /// mixed mode only changes what a managed address there means.
+    ///
+    /// Raised to 7,300 for debug_config — the first new tool since these were counted, and the reason
+    /// the rule bends here rather than breaks. It gives the agent the run configuration itself: reading
+    /// and changing the engine, executable, arguments, working directory and break point that a person
+    /// otherwise sets in the Debug Program dialog — including switching a .NET target between the
+    /// managed and native engines. That is a capability, not a description, and no sentence shaved off
+    /// another tool would have bought it; a whole tool is the honest cost, paid once and on purpose.
     /// </summary>
-    private const int MaxManifestChars = 6_600;
+    private const int MaxManifestChars = 7_300;
 
     private const int MaxDescriptionChars = 400;
 
