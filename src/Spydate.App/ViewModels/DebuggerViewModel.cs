@@ -814,6 +814,14 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Mixed mode: the process is a managed one on the native loop, so a step is an IL step over that
+        // loop — the DAC says which IL offset each native range is, and the loop single-steps until it
+        // changes — not a bare native instruction. Into descends into a managed callee.
+        if (StepMixed(IlStepKind.Into))
+        {
+            return;
+        }
+
         Resuming();
         if (_managed is not null && StepStatement(into: true) is { } refused)
         {
@@ -834,6 +842,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        if (StepMixed(IlStepKind.Over))
+        {
+            return;
+        }
+
         Resuming();
         if (_managed is not null && StepStatement(into: false) is { } declined)
         {
@@ -844,6 +857,27 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _session?.StepOver();
         State = DebugState.Running;
         NotifyCommands();
+    }
+
+    /// <summary>
+    /// A managed step over the native loop, when in mixed mode. Returns true when it handled the step —
+    /// so the ordinary native and CLR-engine paths run only when it did not. IL stepping is
+    /// <see cref="DebugSession.StepManaged"/>: the DAC's IL-to-native map says which native range each IL
+    /// offset occupies, and the loop single-steps until the offset changes, landing on a real IL
+    /// boundary rather than mid-statement.
+    /// </summary>
+    private bool StepMixed(IlStepKind kind)
+    {
+        if (!IsMixedMode || _session is not { } session || !IsStopped)
+        {
+            return false;
+        }
+
+        Resuming();
+        session.StepManaged(kind);
+        State = DebugState.Running;
+        NotifyCommands();
+        return true;
     }
 
     /// <summary>
@@ -2134,6 +2168,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStepOut))]
     private void StepOut()
     {
+        if (StepMixed(IlStepKind.Out))
+        {
+            return;
+        }
+
         if (_managed is not { } session || !IsStopped)
         {
             return;
@@ -2150,7 +2189,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
-    private bool CanStepOut() => IsStopped && IsManaged;
+    // A step out belongs to a managed stop, whether the CLR engine or the native loop is driving it.
+    private bool CanStepOut() => IsStopped && (IsManaged || IsMixedMode);
 
     /// <summary>
     /// A breakpoint clicked in the IL gutter, turned into the method and offset the runtime wants.
@@ -2335,6 +2375,13 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStepIl))]
     private void StepIl()
     {
+        // One IL offset, descending into a managed call — the native loop's IL step in mixed mode, the
+        // CLR engine's own IL step otherwise.
+        if (StepMixed(IlStepKind.Into))
+        {
+            return;
+        }
+
         if (_managed is not { } session || !IsStopped)
         {
             return;
@@ -2351,7 +2398,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
-    private bool CanStepIl() => IsStopped && IsManaged;
+    private bool CanStepIl() => IsStopped && (IsManaged || IsMixedMode);
 
     /// <summary>
     /// Steps one C# statement, into a call or over it.
