@@ -10,8 +10,7 @@ This document is the plan for closing that, and the record of a spike that settl
 any of it was built. The spike was throwaway code outside the repository, so the evidence it produced
 is written down here rather than left in a scratch directory.
 
-Status: **Phases 1–4 and 6 are complete, Phase 5 is complete to the ceiling a read-only DAC allows** on the
-`mixed-mode` branch. Phase 1 is the native engine: the
+Status: **Phases 1–7 are complete** on the `mixed-mode` branch. Phase 1 is the native engine: the
 correctness fixes are in, breakpoints and patches can both sit in several named modules at once, a .NET
 target can be told to use the native engine, and all four break-at choices are wired on both engines.
 Both engines have been run end to end **through the Debug Program dialog** — not just the choosing, the
@@ -21,18 +20,20 @@ at a native stop, without a debug port of its own. Phase 3 is managed breakpoint
 `AddManagedBreakpoint` resolves a method + IL offset to a JIT address through the overlay and plants a
 native int3 there, which re-arms and fires like any other and refuses a not-yet-compiled method with a
 reason. Phase 4 is managed stepping: `StepManaged` runs native single-steps until the overlay's IL
-offset changes — step into, over and out, each landing on a real IL boundary. Phase 5 is partial and
-honest about it: a breakpoint on a not-yet-compiled method is held and planted once it has native code
-(catching a later call), and the notification machinery for the deterministic first-call catch is
-built — but that catch cannot be reached from a read-only DAC. The plan called this the part that "may
-not work", and a symbol-backed second pass turned that from a suspicion into a proof: the JIT
-notification is armed only by writing the CLR through a *writable* DAC, which is exactly the mechanism
-this design excludes, so the first-call catch is incompatible with the premise rather than merely
-unbuilt (the evidence is in §4 and Phase 5 below). Phase 6 is the surfaces, and is done: a managed
+offset changes — step into, over and out, each landing on a real IL boundary. Phase 5 held a breakpoint
+on a not-yet-compiled method and planted it once it had native code — catching a *later* call, not the
+first — and concluded the deterministic first-call catch was closed to a read-only DAC. That was half
+right: it is closed to the *JIT-notification* route, which needs a writable DAC. **Phase 7 reaches it
+another way and completes it** — an int3 on the JIT's shared prestub worker catches a cold method the
+instant it is about to be compiled, identifying it by the MethodDesc the worker is passed, all with the
+DAC still read-only. So a managed breakpoint on a method called once at startup — `OnStartup`, the case
+that motivated all of this — now stops on its first call, on CoreCLR and .NET Framework alike. Phase 6
+is the surfaces, and is done: a managed
 breakpoint can be marked in the gutter of a natively debugged .NET program and plants over the native
 loop, a mixed stop shows the managed call stack and location beside the native registers, and the
-agent's `debug_break` reaches the same path. Every mixed-mode phase is now complete to the extent the
-read-only design allows; what a merge to master waits on is review and a run in anger, not another phase.
+agent's `debug_break` reaches the same path. Every mixed-mode phase is now complete, and verified on a
+real .NET Framework 4.8 app (CSPro Capture) as well as the CoreCLR test fixture; what a merge to master
+waits on is review, not another phase.
 
 The branch is `mixed-mode`, not `mixed-mode-phase-1`: it holds the whole feature across every phase.
 Merging to master waits until **all** mixed-mode phases are complete and stable, not the end of any one
@@ -387,13 +388,20 @@ ICorDebug.
   same on desktop CLR 4.8, so "both runtimes" holds — a .NET Framework build is not something the test
   project produces, so that half stays the spike's evidence rather than a suite test.
 
-### Phase 5 — catching a cold method's first call (partial; the unprovable part is unproven)
+### Phase 5 — catching a cold method's first call (the notification route; superseded by Phase 7)
+
+> **Superseded by Phase 7.** This phase tried the JIT-*notification* route and concluded, correctly,
+> that it needs a writable DAC and so is closed to this design. It then over-generalised that to "the
+> first-call catch is impossible read-only", which Phase 7 disproves by catching it at the *prestub*
+> instead. What stands from this phase is the held-and-planted fallback (still the behaviour when no PDB
+> is available) and the proof that the notification flag is the wrong lever. The rest is kept as the
+> record of a route that did not pan out.
 
 The plan called this "the only part that may not work", and on this runtime the deterministic
-first-call catch does not: the machinery is built and correct, but the one thing it depends on —
-enabling the CLR's JIT notifications — could not be done reliably. So a breakpoint on a cold method is
-**held and planted the moment it has native code, catching a later call**, not the first. Everything
-here is honest about that.
+first-call catch does not, *by this route*: the notification machinery is built and correct, but the one
+thing it depends on — enabling the CLR's JIT notifications — could not be done reliably. So a breakpoint
+on a cold method is **held and planted the moment it has native code, catching a later call**, not the
+first — until Phase 7 adds the prestub catch. Everything here is honest about that.
 
 - ✅ `ExceptionInformation` accessors on `Native.DEBUG_EVENT`: `NumberParameters` and
   `ExceptionInformation(i)`, reading the EXCEPTION_RECORD parameters at the x64 offsets. Verified
@@ -471,7 +479,43 @@ shows both worlds at once.
   elsewhere, so the agent aims each kind of address where it belongs.
 - ✅ An ADR extending "Managed debugging goes through dbgshim…" with the third option it did not weigh —
   "Mixed mode puts the native loop in charge, and the DAC rides along without a debug port" in
-  `DECISIONS.md`, its cold-method limit now stated as the settled read-only-DAC ceiling.
+  `DECISIONS.md`.
+
+### Phase 7 — the cold method's first call, caught at the prestub
+
+**Phase 7 is complete, and it reopens what Phase 5 closed.** Phase 5 concluded the first-call catch was
+incompatible with a read-only DAC. That ruled out one route — the CLR's JIT notification, which needs a
+writable DAC — but not the route a real debugger actually uses. This is that route, and it keeps the DAC
+read-only: the DAC names addresses, the native loop does every write.
+
+- ✅ Resolve the JIT prestub from the runtime's own PDB. `CoreClrSymbols` reads the loaded runtime's debug
+  directory for its build id, fetches the matching PDB from the Microsoft symbol server once (by the
+  build hash — that hash and nothing else leaves the machine), caches it on disk by build, and finds
+  `PreStubWorker`'s address in it. Matched on the build GUID, not GUID-and-age: a PE and the PDB the
+  server returns for it can carry different ages for one build (clr.dll says 3, its clr.pdb says 4).
+  Non-fatal throughout — no PDB, no network, and the catch simply falls back to a later call.
+- ✅ Catch the first call. An int3 on `PreStubWorker` is armed while a cold managed breakpoint waits.
+  Every method's first JIT passes through it, and the MethodDesc being compiled is the worker's argument
+  — rdx on CoreCLR's free `PreStubWorker`, and the resolver falls back to `MethodDesc::DoPrestub` (rcx)
+  where a runtime has no free worker. `ManagedOverlay.MethodByHandle` turns that MethodDesc into a type
+  and token, and if it is the method wanted, a breakpoint at the prestub's return — where the method now
+  has native code — plants the real breakpoint, in time for that same first call to reach it.
+- ✅ The details a real runtime forced. The method's native entry is the worker's return value (rax on
+  both), used when the DAC has not yet caught up to the fresh code — which it has not on Framework, where
+  the worker returns before the MethodDesc shows any native code. And a method's JIT triggers nested
+  JITs whose prestub calls return through the same shared address, so the return breakpoint re-arms and
+  acts only when the stack has unwound back to the frame the caught method's own prestub was called from.
+- ✅ Reached from the panel and the agent with no new surface: it is the same `AddManagedBreakpoint` a
+  gutter click already drives, now armed the moment a cold method is held.
+- ✅ Tests and verification. `AColdMethodCalledOnceIsCaughtAtItsFirstCallViaThePrestub` sets a breakpoint
+  on a fixture method called exactly once — the case the fallback can never catch — and stops on it. On
+  a real .NET Framework 4.8 app (CSPro Capture), a managed breakpoint on `CSProApp.Main.App.OnStartup`,
+  driven natively through the panel, stops at `OnStartup` IL_0000 on its first call. The one thing the
+  test cannot do in CI is fetch the PDB (a large download), so it skips where no symbols are available,
+  which is also how the feature itself degrades.
+- ◑ The overlay had to be made thread-safe for this: the loop's prestub dance and the panel's pump read
+  the DAC at once, and ClrMD is not safe across threads. Its reads are now serialized. Worth noting as a
+  constraint, not a gap.
 
 ## 7. Relationship to the existing record
 
