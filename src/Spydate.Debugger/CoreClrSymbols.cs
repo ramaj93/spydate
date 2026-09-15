@@ -28,8 +28,42 @@ public static class CoreClrSymbols
     private static readonly ConcurrentDictionary<string, uint> Cache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The JIT prestub in a runtime image: the RVA to plant on, and which register holds the MethodDesc
+    /// being compiled when it is hit. The two runtimes differ. CoreCLR has a free
+    /// <c>PreStubWorker(TransitionBlock*, MethodDesc*)</c>, so the MethodDesc is the second argument — rdx
+    /// on x64. .NET Framework has no such free function; its prestub is the member
+    /// <c>MethodDesc::DoPrestub(MethodTable*)</c>, so the MethodDesc is <c>this</c> — rcx. Not resolvable
+    /// (no PDB, no network) leaves <see cref="Ok"/> false and the caller falls back to a later call.
+    /// </summary>
+    public readonly record struct PrestubInfo(uint Rva, string MethodDescRegister)
+    {
+        public bool Ok => Rva != 0 && MethodDescRegister.Length > 0;
+
+        public static PrestubInfo None => new(0, string.Empty);
+    }
+
+    /// <summary>The prestub of the runtime at <paramref name="runtimePath"/> — coreclr.dll or clr.dll.</summary>
+    public static PrestubInfo ResolvePrestub(string runtimePath)
+    {
+        uint rva = SymbolRva(runtimePath, "PreStubWorker");
+        if (rva != 0)
+        {
+            return new PrestubInfo(rva, "rdx");
+        }
+
+        rva = SymbolRva(runtimePath, "?DoPrestub@MethodDesc@@QEAA_KPEAVMethodTable@@@Z");
+        if (rva != 0)
+        {
+            return new PrestubInfo(rva, "rcx");
+        }
+
+        return PrestubInfo.None;
+    }
+
+    /// <summary>
     /// The RVA of <c>PreStubWorker</c> in the given runtime image, or 0 if it cannot be resolved. Add
-    /// the module's loaded base to get the address to plant at.
+    /// the module's loaded base to get the address to plant at. CoreCLR only — see
+    /// <see cref="ResolvePrestub"/> for the runtime-agnostic form.
     /// </summary>
     public static uint PreStubWorkerRva(string runtimePath) => SymbolRva(runtimePath, "PreStubWorker");
 
@@ -69,8 +103,13 @@ public static class CoreClrSymbols
                 return 0;
             }
 
+            // Matched on the build GUID alone, not GUID-and-age. The GUID uniquely identifies the build;
+            // the age is a revision counter that legitimately differs between a PE's debug directory and
+            // the PDB the symbol server returns for it (a real case: clr.dll says age 3, its clr.pdb says
+            // 4). Requiring both, as PdbFile.Matches does for its own stricter purpose, rejects the very
+            // PDB the server keyed by this GUID.
             var pdb = PdbFile.TryLoad(pdbPath, out _);
-            if (pdb is null || !pdb.Matches(codeView))
+            if (pdb is null || pdb.Guid != codeView.Guid)
             {
                 return 0;
             }

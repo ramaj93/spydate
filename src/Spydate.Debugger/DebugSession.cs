@@ -206,6 +206,10 @@ public sealed class DebugSession : IDisposable
     /// the catch falls back to planting on a later call. Set on a background task, read on the loop.</summary>
     private volatile uint _prestubRva;
 
+    /// <summary>Which register holds the MethodDesc being compiled at the prestub — rdx on CoreCLR, rcx on
+    /// Framework. Set with <see cref="_prestubRva"/>.</summary>
+    private string _prestubRegister = "rdx";
+
     /// <summary>True while the PDB is being resolved, so it is not started twice.</summary>
     private volatile bool _prestubResolving;
 
@@ -214,7 +218,11 @@ public sealed class DebugSession : IDisposable
     /// one-shot that follows it.</summary>
     private HeldManaged? _dancing;
     private ulong _danceReturn;
-    private byte _danceReturnOriginal;
+
+    /// <summary>The stack pointer at the prestub hit for the method being caught. A method's JIT can
+    /// trigger nested JITs whose prestub calls return through the same shared address; the return that
+    /// matters is the one where the stack has unwound back to here, not a deeper nested one.</summary>
+    private ulong _danceRsp;
 
     /// <summary>Where the run should first stop of its own accord. Settled at <see cref="Start"/>.</summary>
     private EntryStop _entryStop = EntryStop.LoaderBreak;
@@ -1558,6 +1566,7 @@ public sealed class DebugSession : IDisposable
         _prestubVa = 0;
         _dancing = null;
         _danceReturn = 0;
+        _danceRsp = 0;
         lock (_pendingManaged)
         {
             _pendingManaged.Clear();
@@ -2288,10 +2297,11 @@ public sealed class DebugSession : IDisposable
         string path = runtime.Path;
         Task.Run(() =>
         {
-            uint rva = CoreClrSymbols.PreStubWorkerRva(path);
-            _prestubRva = rva;
+            var info = CoreClrSymbols.ResolvePrestub(path);
+            _prestubRegister = info.MethodDescRegister.Length > 0 ? info.MethodDescRegister : "rdx";
+            _prestubRva = info.Rva;   // volatile write publishes the register set just above it
             _prestubResolving = false;
-            if (rva != 0)
+            if (info.Ok)
             {
                 ArmPrestubIfPending();
             }
@@ -2321,7 +2331,7 @@ public sealed class DebugSession : IDisposable
         }
 
         ulong va = runtime.Base + _prestubRva;
-        _prestubVa = va;                          // set before the plant, so a hit is recognised as ours
+        _prestubVa = va;
         if (!AddBreakpoint(va))
         {
             _prestubVa = 0;
@@ -2367,7 +2377,7 @@ public sealed class DebugSession : IDisposable
         _reArm = (address, _threadId);
         _stepThread = null;
 
-        ulong methodDesc = RegisterValue(_threadId, "rdx");
+        ulong methodDesc = RegisterValue(_threadId, _prestubRegister);
         HeldManaged? target = _overlay?.MethodByHandle(methodDesc) is { } who ? FindPending(who.Type, who.Token) : null;
         if (target is null)
         {
@@ -2376,21 +2386,23 @@ public sealed class DebugSession : IDisposable
         }
 
         // Ours. Stop watching the worker while this method compiles — its JIT can trigger others, and only
-        // this one is being caught — and set a one-shot at the return, read from the top of the stack.
+        // this one is being caught — and plant a breakpoint at the prestub's return (the address on the
+        // top of the stack), recording the stack pointer so a nested JIT's return through the same shared
+        // address is told apart from this method's own.
         _reArm = null;
         DisarmPrestub();
 
         ulong rsp = RegisterValue(_threadId, "rsp");
         ulong ret = rsp != 0 && ReadMemory(rsp, 8) is { Length: 8 } stack ? BitConverter.ToUInt64(stack) : 0;
-        if (ret != 0 && ReadMemory(ret, 1) is { Length: 1 } was && WriteByte(ret, 0xCC))
+        if (ret != 0 && AddBreakpoint(ret))
         {
-            _danceReturnOriginal = was[0];
             _danceReturn = ret;
+            _danceRsp = rsp;
             _dancing = target;
         }
         else
         {
-            // Could not set the return one-shot; leave the method to the later-call fallback and re-arm.
+            // Could not set the return breakpoint; leave the method to the later-call fallback and re-arm.
             ArmPrestubIfPending();
         }
 
@@ -2398,29 +2410,69 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>
-    /// The one-shot at the prestub's return: the method has just been compiled and has native code, so the
-    /// breakpoint the analyst actually asked for is planted now, in time for this first call to reach it.
-    /// Never a reported stop of its own — the reported stop is that planted breakpoint, an instant later.
+    /// A hit on the prestub's return. When the stack has unwound back to where the method's own prestub
+    /// was called — not a deeper nested JIT returning through the same shared address — the method has
+    /// been compiled, so the breakpoint the analyst asked for is planted now, in time for this first call
+    /// to reach it. Never a reported stop of its own; the reported stop is that planted breakpoint, an
+    /// instant later.
     /// </summary>
     private bool DanceReturnHit(ulong address)
     {
-        WriteByte(address, _danceReturnOriginal);
-        Rewind(address, thenStep: false);
+        // Lift the int3, wind RIP back onto it, and step off — the mechanics any breakpoint uses.
+        byte original = 0;
+        if (Find(address) is { } key)
+        {
+            lock (_breakpoints)
+            {
+                if (_breakpoints.TryGetValue(key, out var bp))
+                {
+                    original = bp.Original;
+                }
+            }
+        }
+
+        WriteByte(address, original);
+        Rewind(address, thenStep: true);
+        _reArm = (address, _threadId);
+        _stepThread = null;
+
+        // A nested JIT returning through the same shared address: its stack is still deeper than the
+        // method we are catching (whose prestub was called at _danceRsp). Leave the return breakpoint
+        // armed — via _reArm — and wait for the return that unwinds back to our frame.
+        if (RegisterValue(_threadId, "rsp") <= _danceRsp)
+        {
+            return false;
+        }
+
+        // Our method's return. Take the return breakpoint out and plant the real one.
+        _reArm = null;
+        ulong danceReturn = _danceReturn;
         _danceReturn = 0;
+        RemoveBreakpoint(danceReturn);
+
         var cold = _dancing;
         _dancing = null;
 
         if (cold is not null && _overlay is { } overlay)
         {
+            // Where to plant. The method was just compiled inside the prestub, and the DAC may not have
+            // caught up: on CoreCLR it has, so the resolved address lands the breakpoint exactly, at an
+            // interior offset too; on .NET Framework the worker returns before the MethodDesc shows any
+            // native code, so the DAC still reads it cold. But the worker's own return value — the
+            // method's native entry — is in rax on both, so that is the fallback: it breaks at the entry
+            // rather than an interior offset, which for a first-call catch (usually the method's start) is
+            // the same place. Flush first so CoreCLR takes the exact path rather than this one.
+            overlay.MarkMoved();
             var resolved = cold.Resolve(overlay);
-            if (resolved.Ok && AddBreakpoint(resolved.Address))
+            ulong at = resolved.Ok ? resolved.Address : RegisterValue(_threadId, "rax");
+            if (at != 0 && AddBreakpoint(at))
             {
                 lock (_pendingManaged)
                 {
                     _pendingManaged.Remove(cold);
                 }
 
-                Report("module", $"{cold.Label} caught at its first call; its breakpoint is planted at 0x{ToStatic(resolved.Address):X}");
+                Report("module", $"{cold.Label} caught at its first call; its breakpoint is planted at 0x{ToStatic(at):X}");
             }
         }
 
