@@ -50,7 +50,14 @@ public sealed class SessionTools
         }
         catch (PeParseException ex)
         {
-            return $"{path} is not a PE file this can read: {ex.Message}";
+            // Name the way out. open_binary parses a PE into an image and cannot do anything with a
+            // file that is not one, and an agent that hits only this wall concludes non-PEs are
+            // unreadable and goes off to reconstruct the bytes from process memory. read_file reads
+            // any file's raw bytes and is the answer — the path is already inside --root, since that
+            // was checked above, so it is allowed here.
+            return $"{path} is not a PE file open_binary can read ({ex.Message}). "
+                + "It is still a file: read_file(path) reads its raw bytes as hex or text, which is how "
+                + "to look at a non-PE like this — a resource, a .inx, an unknown container.";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

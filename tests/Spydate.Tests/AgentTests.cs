@@ -39,6 +39,10 @@ public class AgentTests
         Assert.Contains(tools, t => t.Name == "list_functions");
         Assert.Contains(tools, t => t.Name == "read_function");
         Assert.Contains(tools, t => t.Name == "annotate");
+
+        // read_file among them, so the in-app assistant can look at a blob open_binary cannot — a .inx
+        // beside the target, say — rather than reconstructing its bytes out of process memory.
+        Assert.Contains(tools, t => t.Name == "read_file");
         Assert.True(tools.Count >= 13, $"only {tools.Count} tools were offered");
     }
 

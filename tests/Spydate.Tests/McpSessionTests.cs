@@ -81,6 +81,11 @@ public class McpSessionTests
 
         Assert.Contains("no file at", missing, StringComparison.Ordinal);
         Assert.DoesNotContain("Exception", notPe, StringComparison.Ordinal);
+
+        // A next move, not just a refusal. Told only that it is not a PE, an agent decides non-PEs
+        // cannot be read and goes to reconstruct the bytes from process memory; the refusal names
+        // read_file so the blob can be read where it sits.
+        Assert.Contains("read_file", notPe, StringComparison.Ordinal);
     }
 
     [Fact]
