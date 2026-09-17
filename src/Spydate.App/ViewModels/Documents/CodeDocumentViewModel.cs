@@ -168,6 +168,29 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
         };
     }
 
+    /// <summary>
+    /// A function in a module other than the opened binary — where execution stepped into an imported
+    /// DLL. Its own analysis, keyed and titled by the module so it does not collide with the opened
+    /// binary's documents, and read-only: no breakpoint or patch store, which belong to the file under
+    /// study, not to a library stopped in.
+    /// </summary>
+    public static CodeDocumentViewModel ForModuleDisassembly(BinaryAnalysis analysis, Function function, string moduleName)
+    {
+        return new CodeDocumentViewModel(
+            $"module:{moduleName}:{function.EntryVa:X}",
+            $"{moduleName}!{function.Name}",
+            SymbolRegular.Code24,
+            HighlightingService.Asm,
+            _ =>
+            {
+                var current = analysis.TryGetFunction(function.EntryVa, out var latest) ? latest : function;
+                return new CodeContent(AsmListing.ForFunction(analysis, current, null), current.Notes);
+            })
+        {
+            Address = function.EntryVa,
+        };
+    }
+
     public static CodeDocumentViewModel ForPseudoC(NativeDecompiler decompiler, Function function, Action<Function>? openDisassembly, Func<Function>? current = null, Action<Function>? openSplit = null)
     {
         current ??= () => function;

@@ -36,6 +36,13 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly WorkspaceService _workspace;
     private CancellationTokenSource? _analysisCts;
 
+    /// <summary>
+    /// Analyses of modules other than the opened binary, keyed by file path, built on demand the first
+    /// time execution stops in one (stepping into an imported DLL). A null value is a remembered
+    /// failure — a module that could not be read or is not x86 — so it is not retried on every step.
+    /// </summary>
+    private readonly Dictionary<string, OpenedBinary?> _modules = new(StringComparer.OrdinalIgnoreCase);
+
     public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant, DebuggerViewModel debugger)
     {
         _dialogs = dialogs;
@@ -212,7 +219,108 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        OpenTarget(new DisassemblyTarget(va, NameOf(va)));
+        // Not in the opened binary: execution stepped into another module — an imported DLL, the CRT,
+        // a system library. Show that module's own code rather than disassembling its runtime bytes as
+        // if they were the file on screen (which used to fabricate a listing at the wrong base).
+        // Nothing more to do when it works; fall through to the raw listing only when it cannot.
+        if (ShowForeignModule(va))
+        {
+            return;
+        }
+
+        // A raw listing is only meaningful for an address in the opened binary. A foreign address we
+        // could not resolve to its module — a system DLL with nothing readable on disk — is left as it
+        // is rather than disassembled here into nonsense at the wrong base.
+        if (Binary?.Image.VaToRva(va) is not null)
+        {
+            OpenTarget(new DisassemblyTarget(va, NameOf(va)));
+        }
+    }
+
+    /// <summary>
+    /// Shows the function a runtime address falls in when it is in a module other than the opened
+    /// binary — the point of "step into" reaching an imported DLL. Analyses that module's file on
+    /// demand, translates the runtime address into it, opens the function's disassembly, and puts the
+    /// execution arrow on it. False when the address is in no known module, the module cannot be read,
+    /// or the translated address lands nowhere in it — the caller then falls back to a raw listing.
+    /// </summary>
+    private bool ShowForeignModule(ulong runtimeVa)
+    {
+        if (Debugger.ModuleContaining(runtimeVa) is not { } module)
+        {
+            return false;
+        }
+
+        // The opened binary is not foreign to itself. An address it can show — in a discovered
+        // function, or a stub, or a byte in a gap between its sections — belongs to the file on screen
+        // and its own fallback listing, never to a second copy of it opened as a "module". Caught two
+        // ways: an address the image maps, and an address the module map still attributes to it (its
+        // load region runs past its last mapped section).
+        if (Binary?.Image is { } opened
+            && (opened.VaToRva(runtimeVa) is not null
+                || string.Equals(System.IO.Path.GetFileName(module.Path), opened.FileName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (ModuleAnalysis(module.Path) is not { Analysis: { } analysis, Image: { } image })
+        {
+            return false;
+        }
+
+        // Runtime address → this module's own listing address (its file base plus the run-time bias),
+        // confirmed to land somewhere real in the module. A wrong guess at which module it was in — an
+        // address in a gap, or past this module — fails the map and is left to the fallback.
+        ulong listingVa = runtimeVa - module.Base + image.ImageBase;
+        if (image.VaToRva(listingVa) is null)
+        {
+            return false;
+        }
+
+        // Step-into lands on the callee's first instruction, so the stop address is the function's
+        // entry; a known function that already covers it is reused. Discovery is per-function and lazy,
+        // so this does not walk the whole DLL.
+        var function = analysis.FunctionContaining(listingVa)
+                       ?? analysis.GetOrDiscoverFunction(listingVa);
+
+        string moduleName = System.IO.Path.GetFileName(module.Path);
+        var doc = Find($"module:{moduleName}:{function.EntryVa:X}")
+                  ?? CodeDocumentViewModel.ForModuleDisassembly(analysis, function, moduleName);
+        Show(doc);
+
+        // The arrow lives on a single shared address. Set it into this module's listing space; the
+        // opened binary's own documents draw no arrow for it, since it is not in their range.
+        Debugger.ExecutionAddress = listingVa;
+        return true;
+    }
+
+    /// <summary>
+    /// The on-demand analysis of a module that is not the opened binary, cached by path. Null — and a
+    /// remembered null — when it cannot be read or is not x86, so a step that keeps landing in it does
+    /// not keep trying.
+    /// </summary>
+    private OpenedBinary? ModuleAnalysis(string path)
+    {
+        if (_modules.TryGetValue(path, out var cached))
+        {
+            return cached;
+        }
+
+        OpenedBinary? opened = null;
+        try
+        {
+            var pe = PeImage.Load(path);
+            var analysis = pe.IsX86Family ? new BinaryAnalysis(pe) : null;
+            analysis?.LoadPdbSymbols();
+            opened = new OpenedBinary(pe, analysis, managed: null, managedLoadError: null, project: null);
+        }
+        catch (Exception ex) when (ex is IOException or BadImageFormatException or UnauthorizedAccessException or ArgumentException)
+        {
+            Log($"Could not read module {System.IO.Path.GetFileName(path)}: {ex.Message}");
+        }
+
+        _modules[path] = opened;
+        return opened;
     }
 
     /// <summary>The member whose IL covers an address, when the open file is a .NET assembly.</summary>
@@ -654,6 +762,7 @@ public sealed partial class MainViewModel : ObservableObject
         {
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
             Documents.Clear();
+            _modules.Clear();
             ActiveDocument = null;
             ClearHistory();
             Binary = opened;
@@ -741,6 +850,7 @@ public sealed partial class MainViewModel : ObservableObject
         SaveAnnotationsIfDirty();
         _analysisCts?.Cancel();
         Documents.Clear();
+        _modules.Clear();
         Explorer.Clear();
         Warnings.Clear();
         ActiveDocument = null;
