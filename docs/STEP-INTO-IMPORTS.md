@@ -26,6 +26,14 @@ Status: **Phases 1, 2 and 3 are done**, all verified in the window.
   C of `KERNEL32.dll!GetSystemTimeAsFileTime`, and clicking `ntdll!RtlInitUnicodeString` inside
   `KernelBase.dll!GetModuleHandleW` opening `ntdll.dll!RtlInitUnicodeString` — the chain
   where.exe → kernel32 → kernelbase → ntdll, each module fully analysed with its own PDB names.
+- **Follow-up** (commit "Keep decompiled view when stepping into modules; add a Breakpoints pane"):
+  stepping into a foreign module now opens it in the view the reader is already in.
+  `PreferredCodeView` counts a foreign `modulec:` tab as decompiled, and `ShowForeignModule` opens
+  the module decompiled (or leaves the reader on the current foreign function so only the arrow
+  moves) rather than always dropping to disassembly — closing the "step into / step over jumps back
+  to asm" complaint for foreign modules, the way the opened-binary path already did. Verified:
+  F11 from `sub_140001408 (C)` opening `kernel32.dll!GetModuleHandleW (C)`, and F10 there staying in
+  `KernelBase.dll!GetModuleHandleW (C)`.
 
 Not done: folding on-demand module analysis into a true multi-binary workspace (the explorer still
 lists only the opened binary; foreign modules are reached by navigation, not browsed), the stepping
