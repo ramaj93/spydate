@@ -6,7 +6,7 @@ binary. Today it steps in but has nothing to display, so the reader loses the th
 call that leaves the file. This document is the design for closing that, for review before any of it
 is built.
 
-Status: **Phases 1 and 2 are done**, both verified in the window.
+Status: **Phases 1, 2 and 3 are done**, all verified in the window.
 
 - **Phase 1** (commit "Show imported-module code when execution steps into it"): stepping where.exe
   into a call to `KERNEL32!GetModuleHandleW` opens `kernel32.dll!GetModuleHandleW` with the execution
@@ -19,9 +19,19 @@ Status: **Phases 1 and 2 are done**, both verified in the window.
   functions folded into that module's analysis — verified by "Loaded 3210 symbols for KERNEL32.dll
   from its PDB" and the open document reloading with the richer names.
 
-Phase 3 (§5 — decompiled C for foreign functions; fold into a general multi-binary view) is not
-started, nor is the stepping skip-list for noisy system modules (§4/§6). Click-to-navigate inside a
-foreign-module document still resolves against the opened binary, not that module — a Phase 3 item.
+- **Phase 3** (commit "Decompile foreign functions and navigate inside foreign modules"): a
+  foreign-module document now decompiles (a Decompile action, and a Disassembly action back), and a
+  click inside it resolves against *that module* rather than the opened binary — so kernel32's own
+  functions and imports are followed from a kernel32 document. Verified in the window: the decompiled
+  C of `KERNEL32.dll!GetSystemTimeAsFileTime`, and clicking `ntdll!RtlInitUnicodeString` inside
+  `KernelBase.dll!GetModuleHandleW` opening `ntdll.dll!RtlInitUnicodeString` — the chain
+  where.exe → kernel32 → kernelbase → ntdll, each module fully analysed with its own PDB names.
+
+Not done: folding on-demand module analysis into a true multi-binary workspace (the explorer still
+lists only the opened binary; foreign modules are reached by navigation, not browsed), the stepping
+skip-list for noisy system modules (§4/§6), and clickable api-set import names (their hyphens are not
+part of an identifier, so `api-ms-win-…!Func` does not extract as one word — non-api-set references
+like `ntdll!Func` and internal `sub_`/named functions navigate fine).
 
 ## 1. What the debugger already does, and what it doesn't
 
