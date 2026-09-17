@@ -6,9 +6,13 @@ binary. Today it steps in but has nothing to display, so the reader loses the th
 call that leaves the file. This document is the design for closing that, for review before any of it
 is built.
 
-Status: **design only, not started.** Chosen after the native-navigation work (current-view tabs and
-click-to-navigate) landed; the user asked to design this before building it. Nothing here is
-committed to until the forks in §4 are decided.
+Status: **Phase 1 is done** (commit "Show imported-module code when execution steps into it"),
+verified in the window — stepping where.exe into a call to `KERNEL32!GetModuleHandleW` opens
+`kernel32.dll!GetModuleHandleW` with the execution arrow on it. Phase 1 is disassembly only, on the
+§4 defaults (module file bytes, translated through the run-time base; on-demand cached per-module
+analysis; step-into everything, no skip-list yet). Phases 2–3 (§5) are not started. The forks in §4
+were resolved as the recommended defaults for Phase 1; the skip-list and the file-vs-memory question
+can still be revisited for later phases.
 
 ## 1. What the debugger already does, and what it doesn't
 
