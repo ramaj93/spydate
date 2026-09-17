@@ -902,6 +902,30 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public byte[] ReadMemory(ulong staticVa, int length)
         => _session is { } session ? session.ReadMemory(session.ToRuntime(staticVa), length) : [];
 
+    /// <summary>
+    /// The loaded module a runtime address falls in — the one with the greatest base at or below it —
+    /// as its file path and runtime base, or null. The module's size is not known here, so the caller
+    /// confirms the address really lands inside it once it has the module's headers.
+    /// </summary>
+    public (string Path, ulong Base)? ModuleContaining(ulong runtimeVa)
+    {
+        if (_session is not { } session)
+        {
+            return null;
+        }
+
+        (string Path, ulong Base)? found = null;
+        foreach (var module in session.Modules)
+        {
+            if (module.Base <= runtimeVa && (found is null || module.Base > found.Value.Base))
+            {
+                found = (module.Path, module.Base);
+            }
+        }
+
+        return found;
+    }
+
     /// <summary>Runs until execution reaches an address, without keeping a breakpoint there.</summary>
     public void RunTo(ulong staticVa)
     {
@@ -1730,6 +1754,14 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     if (shown is { } address)
                     {
                         StoppedAt?.Invoke(this, address);
+                    }
+                    else if (_managed is null && _session is { CurrentAddress: > 0 and var runtime })
+                    {
+                        // A native stop with no listing address is one outside the opened image —
+                        // stepped into an imported DLL, the CRT, a system library. There is nothing to
+                        // point at in the file on screen, but the window can still open that module's
+                        // own code from the run-time address, so hand it over rather than dropping it.
+                        StoppedAt?.Invoke(this, runtime);
                     }
 
                     break;
