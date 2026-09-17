@@ -1220,6 +1220,19 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
+        // A new function opens in the view the reader is already in. Navigating from a decompiled tab
+        // — clicking a function in the tree, following an xref, or the debugger stepping into another
+        // function — used to always land on the disassembly, which meant switching back to C by hand
+        // every time. Decompiled carries forward; side by side does not (it is a per-function choice,
+        // so from it a new function opens as disassembly). The Disassembly and Decompile toolbar
+        // buttons still go straight to the view they name, since they call the openers directly.
+        if (target is DisassemblyTarget dt && b.Analysis is { } forView
+            && PreferredCodeView() == CodeView.Decompiled && b.NativeDecompiler is not null)
+        {
+            OpenFunctionPseudoC(forView.GetOrDiscoverFunction(dt.Va, dt.Name));
+            return;
+        }
+
         DocumentViewModel? doc = target switch
         {
             OverviewTarget => Find("overview") ?? new OverviewDocumentViewModel(b),
@@ -1404,6 +1417,49 @@ public sealed partial class MainViewModel : ObservableObject
             Show(doc);
             Record(doc, null, f.EntryVa);
         }
+    }
+
+    /// <summary>Which single-function view a newly opened function takes.</summary>
+    private enum CodeView { Disassembly, Decompiled }
+
+    /// <summary>
+    /// The view the reader is in now, so a newly opened function can match it. Only the decompiled
+    /// (pseudo-C) tab carries forward; the disassembly, side by side, and everything else default to
+    /// disassembly — side by side because it is a per-function choice, not a mode to carry along.
+    /// </summary>
+    private CodeView PreferredCodeView()
+        => ActiveDocument?.Key is { } key && key.StartsWith("pseudoc:", StringComparison.Ordinal)
+            ? CodeView.Decompiled
+            : CodeView.Disassembly;
+
+    /// <summary>
+    /// Follows a clicked name in a native listing — the disassembly or the decompiled C — to the
+    /// function it names, opening it in the view the reader is already in (see PreferredCodeView).
+    /// The editor asks CanExecute for every word it draws the hand cursor over, so this stays a fast
+    /// lookup: a generated name carries its own address, a real name is a symbol, and only a function
+    /// entry is a link — a label inside a function or a data name is left as plain text.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanNavigateWord))]
+    private void NavigateWord(string? word)
+    {
+        if (Binary?.Analysis is { } analysis && ResolveFunction(word) is { } va)
+        {
+            OpenTarget(new DisassemblyTarget(va, analysis.NameFor(va)));
+        }
+    }
+
+    private bool CanNavigateWord(string? word) => ResolveFunction(word) is not null;
+
+    /// <summary>The entry of the function a listing word names, or null.</summary>
+    private ulong? ResolveFunction(string? word)
+    {
+        if (string.IsNullOrEmpty(word) || Binary?.Analysis is not { } analysis)
+        {
+            return null;
+        }
+
+        ulong? target = Core.Text.AddressText.FromGeneratedName(word) ?? analysis.Symbols.GetByName(word)?.Va;
+        return target is { } va && analysis.IsFunctionStart(va) ? va : null;
     }
 
 /// <summary>
