@@ -174,8 +174,15 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
     /// binary's documents, and read-only: no breakpoint or patch store, which belong to the file under
     /// study, not to a library stopped in.
     /// </summary>
-    public static CodeDocumentViewModel ForModuleDisassembly(BinaryAnalysis analysis, Function function, string moduleName)
+    public static CodeDocumentViewModel ForModuleDisassembly(
+        BinaryAnalysis analysis, Function function, string moduleName, Action<Function>? openPseudoC = null)
     {
+        var actions = new List<CodeAction>();
+        if (openPseudoC is not null)
+        {
+            actions.Add(new CodeAction("Decompile", SymbolRegular.Braces24, () => openPseudoC(function)));
+        }
+
         return new CodeDocumentViewModel(
             $"module:{moduleName}:{function.EntryVa:X}",
             $"{moduleName}!{function.Name}",
@@ -185,7 +192,36 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
             {
                 var current = analysis.TryGetFunction(function.EntryVa, out var latest) ? latest : function;
                 return new CodeContent(AsmListing.ForFunction(analysis, current, null), current.Notes);
-            })
+            },
+            actions.ToArray())
+        {
+            Address = function.EntryVa,
+        };
+    }
+
+    /// <summary>The decompiled C of a function in a module other than the opened binary — the same
+    /// per-module analysis and keying as <see cref="ForModuleDisassembly"/>, read-only.</summary>
+    public static CodeDocumentViewModel ForModulePseudoC(
+        NativeDecompiler decompiler, BinaryAnalysis analysis, Function function, string moduleName, Action<Function>? openDisassembly = null)
+    {
+        var actions = new List<CodeAction>();
+        if (openDisassembly is not null)
+        {
+            actions.Add(new CodeAction("Disassembly", SymbolRegular.Code24, () => openDisassembly(function)));
+        }
+
+        return new CodeDocumentViewModel(
+            $"modulec:{moduleName}:{function.EntryVa:X}",
+            $"{moduleName}!{function.Name} (C)",
+            SymbolRegular.Braces24,
+            HighlightingService.PseudoC,
+            _ =>
+            {
+                var current = analysis.TryGetFunction(function.EntryVa, out var latest) ? latest : function;
+                var result = decompiler.Decompile(current);
+                return new CodeContent(result.Text, result.Warnings);
+            },
+            actions.ToArray())
         {
             Address = function.EntryVa,
         };

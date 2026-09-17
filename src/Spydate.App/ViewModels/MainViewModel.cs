@@ -273,7 +273,7 @@ public sealed partial class MainViewModel : ObservableObject
             return false;
         }
 
-        if (ModuleAnalysis(module.Path) is not { Analysis: { } analysis, Image: { } image })
+        if (ModuleAnalysis(module.Path) is not { Analysis: { } analysis, Image: { } image } moduleBinary)
         {
             return false;
         }
@@ -293,10 +293,7 @@ public sealed partial class MainViewModel : ObservableObject
         var function = analysis.FunctionContaining(listingVa)
                        ?? analysis.GetOrDiscoverFunction(listingVa);
 
-        string moduleName = System.IO.Path.GetFileName(module.Path);
-        var doc = Find($"module:{moduleName}:{function.EntryVa:X}")
-                  ?? CodeDocumentViewModel.ForModuleDisassembly(analysis, function, moduleName);
-        Show(doc);
+        ShowModuleDisassembly(moduleBinary, System.IO.Path.GetFileName(module.Path), function);
 
         // The arrow lives on a single shared address. Set it into this module's listing space; the
         // opened binary's own documents draw no arrow for it, since it is not in their range.
@@ -1624,16 +1621,27 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanNavigateWord))]
     private void NavigateWord(string? word)
     {
-        if (Binary?.Analysis is not { } analysis)
+        if (NavContextFor(ActiveDocument) is not { } context || context.Owner.Analysis is not { } analysis)
         {
             return;
         }
 
-        // A function in the opened binary opens in place; a clicked import name opens the module it
-        // comes from — the static cousin of stepping into it, and the same document either way.
-        if (ResolveFunction(word) is { } va)
+        (var owner, string? moduleName) = context;
+
+        // A function of the document's own binary opens in place — in the opened binary or in the
+        // foreign module the document is showing; a clicked import name opens the module it comes
+        // from, the static cousin of stepping into it.
+        if (ResolveFunction(word, analysis) is { } va)
         {
-            OpenTarget(new DisassemblyTarget(va, analysis.NameFor(va)));
+            var function = analysis.GetOrDiscoverFunction(va);
+            if (moduleName is not null)
+            {
+                ShowModuleDisassembly(owner, moduleName, function);
+            }
+            else
+            {
+                OpenTarget(new DisassemblyTarget(va, analysis.NameFor(va)));
+            }
         }
         else if (ImportUnder(word, analysis) is { } import)
         {
@@ -1642,13 +1650,57 @@ public sealed partial class MainViewModel : ObservableObject
     }
 
     private bool CanNavigateWord(string? word)
-        => ResolveFunction(word) is not null
-           || (Binary?.Analysis is { } analysis && ImportUnder(word, analysis) is not null);
+    {
+        if (NavContextFor(ActiveDocument) is not { } context || context.Owner.Analysis is not { } analysis)
+        {
+            return false;
+        }
+
+        return ResolveFunction(word, analysis) is not null || ImportUnder(word, analysis) is not null;
+    }
 
     /// <summary>
-    /// The (module, function) a clicked word names as an import, or null. A listing writes an import as
-    /// its whole symbol — <c>KERNEL32!GetSystemTimeAsFileTime</c>, one word since <c>!</c> is part of a
-    /// name here — so the module is in the word; a bare function name is looked up in the import table.
+    /// The binary a click in a document resolves against, and its module name when the document shows a
+    /// foreign module rather than the opened binary. So a click in a kernel32 document follows
+    /// kernel32's own functions and imports, not the opened file's.
+    /// </summary>
+    private (OpenedBinary Owner, string? ModuleName)? NavContextFor(DocumentViewModel? doc)
+    {
+        if (doc?.Key is { } key && ModuleNameOf(key) is { } moduleName
+            && _modules.FirstOrDefault(m => m.Value?.Analysis is not null
+                   && string.Equals(System.IO.Path.GetFileName(m.Key), moduleName, StringComparison.OrdinalIgnoreCase)).Value is { } module)
+        {
+            return (module, moduleName);
+        }
+
+        return Binary is { Analysis: not null } binary ? (binary, null) : null;
+    }
+
+    /// <summary>The module a document key names, or null when it is not a foreign-module document.</summary>
+    private static string? ModuleNameOf(string key)
+    {
+        foreach (string prefix in ModuleKeyPrefixes)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                int end = key.IndexOf(':', prefix.Length);
+                if (end > prefix.Length)
+                {
+                    return key[prefix.Length..end];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static readonly string[] ModuleKeyPrefixes = ["module:", "modulec:"];
+
+    /// <summary>
+    /// The (module, function) a clicked word names as an import of <paramref name="analysis"/>, or null.
+    /// A listing writes an import as its whole symbol — <c>KERNEL32!GetSystemTimeAsFileTime</c>, one word
+    /// since <c>!</c> is part of a name here — so the module is in the word; a bare function name is
+    /// looked up in the import table, which is kept only for the opened binary.
     /// </summary>
     private (string Module, string Function)? ImportUnder(string? word, BinaryAnalysis analysis)
     {
@@ -1663,13 +1715,15 @@ public sealed partial class MainViewModel : ObservableObject
             return (word[..bang], word[(bang + 1)..]);
         }
 
-        return ImportMap(analysis).TryGetValue(word, out string? module) ? (TrimExtension(module), word) : null;
+        return ReferenceEquals(analysis, Binary?.Analysis) && ImportMap(analysis).TryGetValue(word, out string? module)
+            ? (TrimExtension(module), word)
+            : null;
     }
 
-    /// <summary>The entry of the function a listing word names, or null.</summary>
-    private ulong? ResolveFunction(string? word)
+    /// <summary>The entry of the function a listing word names in <paramref name="analysis"/>, or null.</summary>
+    private static ulong? ResolveFunction(string? word, BinaryAnalysis analysis)
     {
-        if (string.IsNullOrEmpty(word) || Binary?.Analysis is not { } analysis)
+        if (string.IsNullOrEmpty(word))
         {
             return null;
         }
@@ -1715,7 +1769,7 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        if (ModuleAnalysis(path) is not { Analysis: { } analysis })
+        if (ModuleAnalysis(path) is not { Analysis: { } analysis } moduleBinary)
         {
             StatusText = $"Could not read {System.IO.Path.GetFileName(path)}.";
             return;
@@ -1727,10 +1781,36 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        var function = analysis.GetOrDiscoverFunction(exportVa);
-        string name = System.IO.Path.GetFileName(path);
-        var doc = Find($"module:{name}:{function.EntryVa:X}")
-                  ?? CodeDocumentViewModel.ForModuleDisassembly(analysis, function, name);
+        ShowModuleDisassembly(moduleBinary, System.IO.Path.GetFileName(path), analysis.GetOrDiscoverFunction(exportVa));
+    }
+
+    /// <summary>
+    /// Opens a function of a module other than the opened binary as disassembly, reusing an open
+    /// document. The Decompile action and every click inside the document run against the module's own
+    /// analysis, so a foreign module reads and navigates like the opened binary does.
+    /// </summary>
+    private CodeDocumentViewModel ShowModuleDisassembly(OpenedBinary module, string moduleName, Function function)
+    {
+        var analysis = module.Analysis!;
+        var doc = Find($"module:{moduleName}:{function.EntryVa:X}") as CodeDocumentViewModel
+                  ?? CodeDocumentViewModel.ForModuleDisassembly(
+                         analysis, function, moduleName,
+                         module.NativeDecompiler is null ? null : f => ShowModulePseudoC(module, moduleName, f));
+        Show(doc);
+        return doc;
+    }
+
+    /// <summary>Opens a module function's decompiled C, with a Disassembly action back.</summary>
+    private void ShowModulePseudoC(OpenedBinary module, string moduleName, Function function)
+    {
+        if (module.NativeDecompiler is not { } decompiler || module.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        var doc = Find($"modulec:{moduleName}:{function.EntryVa:X}") as CodeDocumentViewModel
+                  ?? CodeDocumentViewModel.ForModulePseudoC(
+                         decompiler, analysis, function, moduleName, f => ShowModuleDisassembly(module, moduleName, f));
         Show(doc);
     }
 
