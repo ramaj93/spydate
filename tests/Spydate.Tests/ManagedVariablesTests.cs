@@ -571,6 +571,26 @@ public class ManagedVariablesTests
     }
 
     [SkippableFact]
+    public void ALocalIsWrittenBackJustAsAFieldIs()
+    {
+        Skip.If(Program is null, NoCompiler);
+        using var session = StopIn("Holder", "Look");
+
+        // The one local of Look, slot 0 — the `int doubled` the decompiler names. A local is reached
+        // straight off the frame with no field step, so its write is the path a field's never exercises.
+        var local = Assert.Single(session.Variables(), r => !r.Path.Argument);
+        Assert.True(local.CanSet, "a local int should be writable");
+        Assert.Null(session.SetValue(local.Path, "42"));
+        Assert.Equal("42", Assert.Single(session.Variables(), r => !r.Path.Argument).Value);
+
+        // And an argument, slot 1 of the instance method: factor, which came in as 3.
+        var factor = Assert.Single(session.Variables(), r => r.Name == "factor");
+        Assert.True(factor.CanSet);
+        Assert.Null(session.SetValue(factor.Path, "7"));
+        Assert.Equal("7", Assert.Single(session.Variables(), r => r.Name == "factor").Value);
+    }
+
+    [SkippableFact]
     public void WhatCannotBeWrittenIsRefusedRatherThanGuessedAt()
     {
         Skip.If(Program is null, NoCompiler);

@@ -199,6 +199,22 @@ public partial class MainWindow : FluentWindow
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Selects the row a right-click landed on, before its context menu opens.
+    ///
+    /// A DataGrid does not select on right-click, so "Set value…" — whose command parameter is the
+    /// grid's SelectedItem — would write into whatever was left-clicked last, or do nothing when
+    /// nothing was. Selecting the row under the pointer first makes the menu act on the row aimed at.
+    /// </summary>
+    private void SelectRowOnRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject source
+            && ItemsControl.ContainerFromElement((System.Windows.Controls.DataGrid)sender, source) is DataGridRow row)
+        {
+            row.IsSelected = true;
+        }
+    }
+
     private void OnXrefDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (XrefGrid.SelectedItem is XrefRow row)

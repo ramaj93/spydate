@@ -621,6 +621,7 @@
                                                   IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
                                                   CanUserSortColumns="False" SelectionMode="Single" SelectionUnit="FullRow"
                                                   EnableRowVirtualization="True"
+                                                  PreviewMouseRightButtonDown="SelectRowOnRightClick"
                                                   Visibility="{Binding IsChecked, ElementName=PaneLocals, Converter={StaticResource BoolToVisibility}}"
                                                   AutomationProperties.Name="Locals and arguments">
                                             <DataGrid.Columns>
