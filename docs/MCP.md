@@ -34,11 +34,18 @@ Options, all of which only ever narrow what the agent can do:
 
 ## The tools
 
-**Orienting** — `open_binary(path)` · `get_overview()`
+**Orienting** — `open_binary(path)` · `get_overview()` · `read_file(path)`
 
 `open_binary` returns one screen: architecture, entry, sections, import and export counts, what
 discovery found, whether a PDB and a project file loaded. It is deliberately dense — every line is a
 call the agent does not have to make — and ends by naming the three worth making next.
+
+`read_file` is the way past the one thing `open_binary` cannot do: it parses a PE into an image, so a
+file that is not a PE — a resource, a `.inx`, an unknown container beside the binary — is a wall.
+`read_file` reads any file's raw bytes, a window of at most 4096 by offset, as a hex dump with an
+ASCII column or decoded as UTF-8 or UTF-16, and reports the file's size so the window can be moved. It
+is bound by `--root` exactly as `open_binary` is, and reads more than PEs, so the root matters more
+with it than without.
 
 **Finding something worth reading** — `list_functions` · `find_symbol` · `list_imports` · `xrefs` ·
 `find_strings`
@@ -127,6 +134,25 @@ address in an IL-only assembly names a byte of IL in the file and the bytes at t
 process belong to something else. `pause` and `run_to` are named as not implemented rather than
 quietly doing nothing.
 
+`debug_config` is how the agent settles that choice itself, without a person opening the Debug Program
+dialog. Called with no arguments it reports the run configuration — engine, executable, arguments,
+working directory, break point; given any argument it changes that field and leaves the rest, while
+nothing is running. A .NET binary takes either engine, and this is where the difference is chosen:
+`managed` is the CLR debugger above — local variable values, property evaluation, statement stepping;
+`native` is the native loop driving the same .NET process, mixed mode, where a breakpoint can go into
+one of its own managed methods or a native DLL it loads, and `debug_state` reports the managed method,
+IL offset and call stack beside the native registers — but no locals, because nothing is talking to
+the runtime. A native binary is native only, and asking for the managed engine on one is refused.
+
+Going into a native DLL the process loaded needs its runtime base, and that is the process's to give,
+not the file's: `find_symbol` and `list_imports` read the opened assembly, so they cannot name where a
+DLL was mapped this run. `debug_state(modules="<name>")` lists the loaded modules whose name contains
+the text, with the base the loader gave each — `modules="*"` lists them all — which is how a native
+module's address is recovered without walking the stack for a return address inside it. By default the
+list is a count, since there are dozens.
+Switching the engine re-points which debugger the verbs drive, so the whole flow — configure, run,
+break, inspect — stays in the tools rather than waiting on the dialog.
+
 `get_overview` describes the assembly as an assembly: full name, target framework, entry point,
 type and member counts, what it references. It also says which of the file's two readings is about
 the program. For an IL-only assembly the native lines above it describe the CLR loader stub, and
@@ -140,6 +166,12 @@ opened this to look at.
 Writes save immediately; there is no save tool, because one whose only failure mode is "the agent
 forgot" would lose work by default. `list_annotations` is what to read after a context compaction to
 pick up where you left off, and what a person reads to review what the agent has done.
+
+`annotate` takes a target the way the reading tools do, including a managed method by name —
+`annotate(target="Namespace.Type::Method", comment="…")`. A comment belongs to an address, and a
+managed method's is where its IL begins, so this resolves the name the same way `read_function` and
+`debug_break` do and notes the method there, rather than making an agent hand-compute an RVA for it. A
+type or a field, having no single address, is refused with that said.
 
 ## Sharing a binary with the window
 

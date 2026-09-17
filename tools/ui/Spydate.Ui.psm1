@@ -211,7 +211,16 @@ function Invoke-Menu {
                     # A disabled item is not a failure to find it, and saying which it was beats
                     # an ElementNotEnabledException from somewhere inside UIA.
                     if (-not $m.Current.IsEnabled) { throw "'$Item' is disabled" }
-                    $m.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+
+                    # Invoke first, Toggle second. A checkable item exposes TogglePattern and usually
+                    # not InvokePattern, so asking only for Invoke threw "Unsupported Pattern" on
+                    # exactly the items whose whole purpose is being switched on and off.
+                    try {
+                        $m.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+                    }
+                    catch [System.InvalidOperationException] {
+                        $m.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+                    }
                     return
                 }
             }

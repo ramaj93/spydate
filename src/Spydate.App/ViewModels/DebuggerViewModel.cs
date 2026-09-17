@@ -62,7 +62,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 {
     private readonly WorkspaceService _workspace;
     private ManagedDebugSession? _managed;
-    private readonly Func<string, string, bool> _confirm;
     private DebugSession? _session;
 
     /// <summary>Registers as they were at the previous stop, so a change can be pointed at.</summary>
@@ -70,11 +69,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private readonly IFileDialogService? _dialogs;
 
-    public DebuggerViewModel(WorkspaceService workspace, IFileDialogService? dialogs = null, Func<string, string, bool>? confirm = null)
+    public DebuggerViewModel(WorkspaceService workspace, IFileDialogService? dialogs = null)
     {
         _workspace = workspace;
         _dialogs = dialogs;
-        _confirm = confirm ?? DefaultConfirm;
         workspace.CurrentChanged += (_, _) =>
         {
             StopSession();
@@ -101,12 +99,28 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RestoreBreakpoints();
         OnPropertyChanged(nameof(NeedsHost));
 
-        // Which debugger applies is a fact about the file, so the panel rearranges itself when a
+        // Read back rather than reset. These are remembered per binary exactly as the host and the
+        // arguments are, so reopening something picks up the way it was last run — which is the whole
+        // point of remembering it.
+        //
+        // A native file has no CLR to drive, so its engine is Native and there is nothing to choose:
+        // the chooser shows it and is off. Only a managed file is a real choice, defaulting to the CLR
+        // unless Native was remembered for it. Taken from the file rather than defaulted to the CLR for
+        // everything, so a native exe does not come up reading ".NET CLR", which it can never be.
+        DebugNatively = !IsManaged || target?.Engine == DebugEngine.Native;
+        BreakAt = target?.BreakAt ?? DebugBreakAt.CreateProcess;
+
+        // Which debugger applies follows from the file, so the panel rearranges itself when a
         // different one is opened rather than when something is run.
         OnPropertyChanged(nameof(IsManaged));
+        OnPropertyChanged(nameof(UsesManagedDebugger));
+        OnPropertyChanged(nameof(CanChooseDebugger));
         OnPropertyChanged(nameof(ShowsRegisters));
+        OnPropertyChanged(nameof(ShowsManagedContext));
+        OnPropertyChanged(nameof(IsMixedMode));
         OnPropertyChanged(nameof(CanPause));
         OnPropertyChanged(nameof(CanPauseNow));
+        OnPropertyChanged(nameof(CanEditHost));
     }
 
     /// <summary>
@@ -120,11 +134,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Null for whatever the default is, never the default itself. Writing it would give every
+        // binary anybody opens an entry in the remembered targets, because IsEmpty would stop being
+        // true the moment the panel read its own defaults back.
         DebugTargets.Set(path, new DebugTarget
         {
             Host = Host.Trim() is { Length: > 0 } host ? host : null,
             Arguments = Arguments.Trim() is { Length: > 0 } arguments ? arguments : null,
             WorkingDirectory = WorkingDirectory.Trim() is { Length: > 0 } directory ? directory : null,
+            // Only a managed file's Native choice is worth keeping. A native file is Native with no
+            // choice in it, so recording that would give every native binary a stored target for a
+            // default it cannot depart from — the very thing "null for the default" is meant to avoid.
+            Engine = IsManaged && DebugNatively ? DebugEngine.Native : null,
+            BreakAt = BreakAt == DebugBreakAt.CreateProcess ? null : BreakAt,
         });
     }
 
@@ -163,6 +185,21 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     {
         Host = string.Empty;
         WorkingDirectory = string.Empty;
+    }
+
+    /// <summary>
+    /// Picks the folder the program runs in. A chooser rather than free text, so a path that does not
+    /// exist — which a debuggee refuses to start in, with an error that names the process and not the
+    /// folder — cannot be typed by mistake. Opens where one is already set, if it is still there.
+    /// </summary>
+    [RelayCommand]
+    private void ChooseWorkingDirectory()
+    {
+        string? start = WorkingDirectory.Trim() is { Length: > 0 } current ? current : null;
+        if (_dialogs?.OpenFolder(start) is { Length: > 0 } chosen)
+        {
+            WorkingDirectory = chosen;
+        }
     }
 
     /// <summary>
@@ -265,19 +302,129 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public bool NeedsHost => _workspace.Current?.Image.IsDll == true && Host.Trim().Length == 0;
 
     /// <summary>
-    /// Whether debugging this binary means driving the CLR rather than the process.
+    /// Whether the open binary is an IL-only assembly.
     ///
-    /// Decided by the file, not by a setting: an IL-only assembly has no native code of its own to
-    /// stop in, and the two debuggers cannot both attach. A mixed-mode assembly stays native, where
-    /// its real machine instructions are.
+    /// A fact about the file, and only that. It used to be the whole decision as well — IL-only meant
+    /// the CLR's debugger and nothing else — which was right while there was nothing a native debugger
+    /// could usefully do with a .NET process. There is now: a .NET program's own native DLLs are
+    /// reachable by name, and stopping in one of those means the native loop has to own the process.
+    /// So what the file is and what drives it are two questions, and this answers the first.
     /// </summary>
     public bool IsManaged => _workspace.Current?.Image.ClrHeader?.IsILOnly == true;
 
+    /// <summary>
+    /// Drive this .NET program with the native loop instead of the CLR's interface.
+    ///
+    /// Only meaningful for an IL-only assembly, and only before it starts: which debugger owns the
+    /// process is settled when the session is created, and the two cannot both attach. It is what
+    /// makes a breakpoint or a patch in a native DLL the program loads possible at all — the cost
+    /// being that there is then no managed frame, no locals and no IL-level stepping, because nothing
+    /// is talking to the runtime.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UsesManagedDebugger))]
+    [NotifyPropertyChangedFor(nameof(ShowsRegisters))]
+    [NotifyPropertyChangedFor(nameof(ShowsManagedContext))]
+    [NotifyPropertyChangedFor(nameof(IsMixedMode))]
+    [NotifyPropertyChangedFor(nameof(CanPause))]
+    [NotifyPropertyChangedFor(nameof(CanPauseNow))]
+    private bool _debugNatively;
+
+    /// <summary>
+    /// Remembered like the host and the arguments are, because it is the same kind of thing: how to
+    /// run this binary, decided once and wanted again next time. Resetting it on every open — which
+    /// is what this did when the choice lived on a toolbar checkbox — meant choosing it again for
+    /// every session.
+    /// </summary>
+    partial void OnDebugNativelyChanged(bool value)
+    {
+        RememberTarget();
+        NotifyCommands();
+    }
+
+    /// <summary>
+    /// Where a run stops of its own accord. <see cref="DebugBreakAt.CreateProcess"/> is the default
+    /// because it is what both engines already did: the native loop stops at the loader break, and
+    /// the managed one was started with holdAtStart set.
+    /// </summary>
+    [ObservableProperty]
+    private DebugBreakAt _breakAt = DebugBreakAt.CreateProcess;
+
+    partial void OnBreakAtChanged(DebugBreakAt value) => RememberTarget();
+
+    /// <summary>Whether the run can still be configured: not while it is running, since it is settled by then.</summary>
+    public bool CanEditRun => !IsDebugging;
+
+    /// <summary>
+    /// Whether the executable to launch can be chosen at all.
+    ///
+    /// Only for a file that is not a program of its own. A native EXE starts itself and <em>is</em> the
+    /// executable, so the box is fixed and off. Everything else is a module something else has to load,
+    /// and that something is what the box names: a native DLL or driver, and — the case a plain
+    /// <see cref="PeImage.IsDll"/> misses — a .NET assembly, whose PE is marked an executable (its
+    /// launcher is a separate native apphost) yet which cannot be run on its own. So the test is "is it
+    /// a native EXE", written as its negation: managed, or DLL-marked. Off during a run too, like the
+    /// rest of the run configuration.
+    /// </summary>
+    public bool CanEditHost => CanEditRun && (IsManaged || _workspace.Current?.Image.IsDll == true);
+
+    /// <summary>One row of a chooser: what it means, and what to call it on screen.</summary>
+    public sealed record EngineChoice(bool Native, string Label);
+
+    public sealed record BreakAtChoice(DebugBreakAt Value, string Label);
+
+    /// <summary>
+    /// The engines, for the run configuration. Only a real choice for an IL-only assembly — a file
+    /// with native code of its own has nothing to decide — which is what <see cref="CanChooseDebugger"/>
+    /// is for.
+    /// </summary>
+    public IReadOnlyList<EngineChoice> EngineChoices { get; } =
+    [
+        new EngineChoice(false, ".NET CLR"),
+        new EngineChoice(true, "Native"),
+    ];
+
+    /// <summary>
+    /// Where to stop, named as dnSpy names them. All four are wired now: the native loop runs on to
+    /// an entry point past the loader break, and the managed engine holds, plants the entry-point or
+    /// module-cctor breakpoint, and continues to it.
+    /// </summary>
+    public IReadOnlyList<BreakAtChoice> BreakAtChoices { get; } =
+    [
+        new BreakAtChoice(DebugBreakAt.None, "Don't break"),
+        new BreakAtChoice(DebugBreakAt.CreateProcess, "Create Process"),
+        new BreakAtChoice(DebugBreakAt.EntryPoint, "Entry Point"),
+        new BreakAtChoice(DebugBreakAt.ModuleCctorOrEntryPoint, "Module cctor or Entry Point"),
+    ];
+
+    /// <summary>
+    /// Whether debugging this binary means driving the CLR rather than the process.
+    ///
+    /// The decision, as against <see cref="IsManaged"/>'s fact. Everything that used to ask whether
+    /// the file was managed and meant "will the CLR be driving" asks this instead, so that one answer
+    /// decides the engine, the panes and where a breakpoint goes.
+    /// </summary>
+    public bool UsesManagedDebugger => IsManaged && !DebugNatively;
+
+    /// <summary>
+    /// Whether the choice is still open. Only for a managed file, and only while nothing is running:
+    /// afterwards the session exists and is one kind or the other.
+    /// </summary>
+    public bool CanChooseDebugger => IsManaged && !IsDebugging;
+
     /// <summary>Registers and stack words are worth showing only when there is native code.</summary>
-    public bool ShowsRegisters => !IsManaged;
+    public bool ShowsRegisters => !UsesManagedDebugger;
+
+    /// <summary>
+    /// Whether to show a managed call stack beside the rest. True on the CLR's own engine, and also in
+    /// mixed mode — a managed program driven by the native loop — where the DAC can walk the managed
+    /// stack at a native stop. That is the display half of "both worlds at one stop": native registers
+    /// and a managed call stack for the same pause.
+    /// </summary>
+    public bool ShowsManagedContext => UsesManagedDebugger || IsMixedMode;
 
     /// <summary>Pausing and running to a cursor are native-only, so far.</summary>
-    public bool CanPause => !IsManaged;
+    public bool CanPause => !UsesManagedDebugger;
 
     /// <summary>The processor flags, spelled out. "ZF 1 CF 0" is read; 0x246 is decoded.</summary>
     [ObservableProperty]
@@ -305,6 +452,9 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsDebugging))]
     [NotifyPropertyChangedFor(nameof(IsStopped))]
+    [NotifyPropertyChangedFor(nameof(CanChooseDebugger))]
+    [NotifyPropertyChangedFor(nameof(CanEditRun))]
+    [NotifyPropertyChangedFor(nameof(CanEditHost))]
     private DebugState _state = DebugState.NotStarted;
 
     [ObservableProperty]
@@ -334,6 +484,22 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// moment, and in that moment the state is still "not started", so nothing else says no.
     /// </summary>
     private bool _starting;
+
+    /// <summary>
+    /// Turns the panel's break-at choice into what the native loop should do with its loader break.
+    ///
+    /// It used to be a flag here that swallowed the first stop for "Don't break" and nothing more, so
+    /// the two entry-point choices did nothing. The loop now owns all four: the loader break is where
+    /// it decides whether to report, let go, or run on to an entry, which is the one place the timing
+    /// is not a race.
+    /// </summary>
+    private static EntryStop NativeEntryStop(DebugBreakAt breakAt) => breakAt switch
+    {
+        DebugBreakAt.None => EntryStop.DontBreak,
+        DebugBreakAt.EntryPoint => EntryStop.ProcessEntry,
+        DebugBreakAt.ModuleCctorOrEntryPoint => EntryStop.ModuleEntry,
+        _ => EntryStop.LoaderBreak,
+    };
 
     /// <summary>
     /// Starts the open binary under a debugger.
@@ -366,6 +532,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Asked before anything starts, and already filled in with whatever was used for this binary
+        // last time. Closing it is not discarding: every box writes itself through as it is edited,
+        // the way it always has, so Close keeps the settings and only declines to run.
+        var configure = new Views.RunConfigWindow(this) { Owner = Application.Current?.MainWindow };
+        if (configure.ShowDialog() != true)
+        {
+            return;
+        }
+
         // A DLL is not a program: CreateProcess refuses it, and the refusal used to arrive after the
         // confirmation, so it asked whether to run something that could not be run. Something else
         // has to load it, and that is what the host is for.
@@ -387,7 +562,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         string run = host ?? path;
 
-        if (IsManaged)
+        if (UsesManagedDebugger)
         {
             // The host, not the assembly. A .NET assembly with an entry point is still a DLL — the
             // .exe beside it is a native launcher with no metadata of its own — so the thing the
@@ -400,27 +575,20 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        // Asked every time, not once and remembered. The answer is about this binary, and the cost
-        // of getting it wrong is running something hostile on the analyst's own machine.
-        if (!_confirm(
-                "Run this binary?",
-                (host is null
-                    ? $"{binary.DisplayName} will be started on this machine and will do whatever it does.\n\n"
-                    : $"{Path.GetFileName(host)} will be started on this machine, so that it loads "
-                      + $"{binary.DisplayName}. Both will do whatever they do.\n\n")
-                + "Everything else in Spydate only reads the file. Debug it in a virtual machine if you "
-                + "do not know what it is.\n\nStart it?"))
-        {
-            return;
-        }
-
         var session = new DebugSession();
         session.Reported += OnReported;
         _session = session;
 
-        foreach (ulong address in BreakpointAddresses)
+        // In mixed mode the gutter marks are managed — they cannot be planted as native int3s at their
+        // IL's static address, which is not executed code. They are seeded as managed breakpoints once
+        // the run is up, by the pump below. In pure native mode a mark is a native address and goes in
+        // now, so it is standing before the loader break.
+        if (!IsMixedMode)
         {
-            session.AddBreakpoint(address);
+            foreach (ulong address in BreakpointAddresses)
+            {
+                session.AddBreakpoint(address);
+            }
         }
 
         // Every patch that is switched on goes into the run, so it behaves like the patched copy
@@ -431,20 +599,32 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         try
         {
             // Under a host, the process is somebody else's program and the addresses on screen belong
-            // to a module inside it, so the module has to be named or nothing would translate.
+            // to a module inside it, so the module has to be named or nothing would translate. The
+            // break-at choice and the module's own entry RVA go in with it, so the loader break is
+            // taken, let go of, or run past to an entry — decided in the loop rather than out here,
+            // where the timing was a race the loop does not have to run.
             session.Start(
                 run,
                 binary.Image.ImageBase,
                 binary.Image.OptionalHeader.SizeOfImage,
                 Arguments is { Length: > 0 } arguments ? arguments : null,
                 WorkingDirectory is { Length: > 0 } directory ? directory : null,
-                host is null ? null : binary.Image.FileName);
+                host is null ? null : binary.Image.FileName,
+                NativeEntryStop(BreakAt),
+                binary.Image.EntryPointRva);
 
             State = DebugState.Running;
             Status = "Running.";
             Add(host is null
                 ? $"started {run}"
                 : $"started {run}, waiting for {binary.Image.FileName} to load");
+
+            // Mixed mode: start pumping so the managed marks are seeded the moment the CLR is up and
+            // planted as their methods JIT, without a native breakpoint of the analyst's own to hang it on.
+            if (IsMixedMode)
+            {
+                EnsureMixedPump();
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException)
         {
@@ -465,20 +645,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private async Task StartManagedAsync(OpenedBinary binary, string run, string? host)
     {
-        if (!_confirm(
-                "Run this binary?",
-                (host is null
-                    ? $"{binary.DisplayName} will be started on this machine under the .NET debugger "
-                      + "and will do whatever it does.\n\n"
-                    : $"{Path.GetFileName(host)} will be started on this machine under the .NET "
-                      + $"debugger, so that it loads {binary.DisplayName}. Both will do whatever they "
-                      + "do.\n\n")
-                + "Everything else in Spydate only reads the file. Debug "
-                + "it in a virtual machine if you do not know what it is.\n\nStart it?"))
-        {
-            return;
-        }
-
         var session = new ManagedDebugSession();
         session.Reported += OnManagedReported;
         _managed = session;
@@ -502,8 +668,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             // Off the window's thread and waited for, rather than done on it. The await comes back
             // here, on the thread that owns the bound collections, so everything below is unchanged.
+            // Held unless the run was asked to go straight through. The runtime does this properly,
+            // where the native loop has to be continued out of a stop it takes regardless.
             problem = await Task.Run(
-                () => session.Start(run, arguments, directory, holdAtStart: true));
+                () => session.Start(run, arguments, directory, holdAtStart: BreakAt != DebugBreakAt.None));
         }
         finally
         {
@@ -530,11 +698,63 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             }
         }
 
+        // Break-at, the managed way: hold at the start (which is why holdAtStart followed the same
+        // "anything but Don't break" rule), plant the entry-point or module-cctor breakpoint while
+        // held, and continue to it — so the panel comes up stopped where the program first runs its
+        // own code, not at the runtime's own initial hold. Both of those methods run once, so an
+        // ordinary breakpoint there is a one-shot in all but name.
+        if (BreakAt is DebugBreakAt.EntryPoint or DebugBreakAt.ModuleCctorOrEntryPoint
+            && PlantManagedEntryBreak(binary, session))
+        {
+            session.Continue();
+            State = DebugState.Running;
+            Status = "Running to the entry point.";
+            Add("continuing to the entry point");
+            SyncManaged();
+            NotifyCommands();
+            return;
+        }
+
         State = DebugState.Stopped;
         Status = "Held before it ran anything.";
         Add($"started {run} under the .NET debugger, held before it ran anything");
         SyncManaged();
         NotifyCommands();
+    }
+
+    /// <summary>
+    /// Sets the breakpoint a managed break-at continues to: the module initializer when the choice is
+    /// "Module cctor or Entry Point" and the assembly has one — it runs before the entry point —
+    /// otherwise the entry point. Returns whether there is something to continue to; a false answer
+    /// means hold at the start rather than run on to a stop that will never come.
+    /// </summary>
+    private bool PlantManagedEntryBreak(OpenedBinary binary, ManagedDebugSession session)
+    {
+        if (binary.Managed is not { } managed)
+        {
+            return false;
+        }
+
+        var target = BreakAt == DebugBreakAt.ModuleCctorOrEntryPoint
+            ? managed.ModuleInitializer ?? managed.EntryPoint
+            : managed.EntryPoint;
+
+        if (target is null)
+        {
+            Add("there is no entry point to break at; holding at the start instead");
+            return false;
+        }
+
+        string module = binary.Image.FileName;
+        uint token = (uint)MetadataTokens.GetToken(target.Handle);
+        if (session.SetBreakpoint(module, token, 0) is { } refused)
+        {
+            Add($"could not set the entry-point breakpoint: {refused}; holding at the start instead");
+            return false;
+        }
+
+        Add($"break at {target.Name} in {module}; continuing to it");
+        return true;
     }
 
     [RelayCommand(CanExecute = nameof(IsDebugging))]
@@ -594,6 +814,14 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // Mixed mode: the process is a managed one on the native loop, so a step is an IL step over that
+        // loop — the DAC says which IL offset each native range is, and the loop single-steps until it
+        // changes — not a bare native instruction. Into descends into a managed callee.
+        if (StepMixed(IlStepKind.Into))
+        {
+            return;
+        }
+
         Resuming();
         if (_managed is not null && StepStatement(into: true) is { } refused)
         {
@@ -614,6 +842,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        if (StepMixed(IlStepKind.Over))
+        {
+            return;
+        }
+
         Resuming();
         if (_managed is not null && StepStatement(into: false) is { } declined)
         {
@@ -624,6 +857,27 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _session?.StepOver();
         State = DebugState.Running;
         NotifyCommands();
+    }
+
+    /// <summary>
+    /// A managed step over the native loop, when in mixed mode. Returns true when it handled the step —
+    /// so the ordinary native and CLR-engine paths run only when it did not. IL stepping is
+    /// <see cref="DebugSession.StepManaged"/>: the DAC's IL-to-native map says which native range each IL
+    /// offset occupies, and the loop single-steps until the offset changes, landing on a real IL
+    /// boundary rather than mid-statement.
+    /// </summary>
+    private bool StepMixed(IlStepKind kind)
+    {
+        if (!IsMixedMode || _session is not { } session || !IsStopped)
+        {
+            return false;
+        }
+
+        Resuming();
+        session.StepManaged(kind);
+        State = DebugState.Running;
+        NotifyCommands();
+        return true;
     }
 
     /// <summary>
@@ -670,9 +924,18 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     public void ToggleBreakpoint(ulong staticVa)
     {
-        if (IsManaged)
+        if (UsesManagedDebugger)
         {
             ToggleManagedBreakpoint(staticVa);
+            return;
+        }
+
+        // Mixed mode: a managed program driven by the native loop. The line is C#, so the mark is a
+        // managed breakpoint — resolved to the address the JIT put that IL at and planted as a native
+        // int3 there — not a native breakpoint at the IL's static address, which is not code that runs.
+        if (IsMixedMode && MixedTarget(staticVa) is { } target)
+        {
+            ToggleMixedBreakpoint(staticVa, target);
             return;
         }
 
@@ -693,6 +956,195 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         BreakpointsVersion++;
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// A managed program driven by the native loop — the case where a native breakpoint and a managed
+    /// one both make sense in the same run, and the whole point of mixed mode. True only for an IL-only
+    /// assembly the user chose to debug natively; a native file, or one on the CLR's own engine, is not.
+    /// </summary>
+    public bool IsMixedMode => IsManaged && DebugNatively;
+
+    /// <summary>
+    /// The managed method and IL offset a listing address falls in, as the DAC path names them: the
+    /// declaring type's full name, the method's metadata token, and the IL offset. Null when the address
+    /// is not inside a method body, or the file's metadata cannot name the type — in which case the
+    /// caller falls back to a native breakpoint at the address itself.
+    /// </summary>
+    private (string Type, uint Token, uint Offset)? MixedTarget(ulong staticVa)
+    {
+        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        {
+            return null;
+        }
+
+        if (binary.Image.VaToRva(staticVa) is not { } rva || bodies.At(rva) is not { } body)
+        {
+            return null;
+        }
+
+        uint token = (uint)System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(body.Method);
+        if (binary.Managed?.Locate((int)token)?.Type.FullName is not { Length: > 0 } type)
+        {
+            return null;
+        }
+
+        return (type, token, (uint)body.OffsetOf(rva));
+    }
+
+    /// <summary>
+    /// Sets or clears a managed breakpoint over the native loop. Marked in the gutter whether or not a
+    /// run is going: set before the run it is seeded and planted when the CLR is up and the method has
+    /// native code; set during a run it goes to the session at once. The session holds it until it can
+    /// plant, so a method not JITted yet is not refused — it is planted on a later call.
+    /// </summary>
+    private void ToggleMixedBreakpoint(ulong staticVa, (string Type, uint Token, uint Offset) target)
+    {
+        if (BreakpointAddresses.Remove(staticVa))
+        {
+            _seededMixed.Remove(staticVa);
+            string? refused = _session?.RemoveManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+            RememberBreakpoint(staticVa, on: false);
+            Add(refused ?? $"cleared the managed breakpoint in {target.Type} at IL_{target.Offset:X4}");
+        }
+        else
+        {
+            BreakpointAddresses.Add(staticVa);
+            RememberBreakpoint(staticVa, on: true);
+
+            if (_session is { } session)
+            {
+                string? result = session.AddManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+                if (result is null || !result.Contains("nothing is running", StringComparison.Ordinal))
+                {
+                    _seededMixed.Add(staticVa);
+                }
+
+                Add(result ?? $"managed breakpoint in {target.Type} at IL_{target.Offset:X4} — a native int3 where the JIT put it");
+                EnsureMixedPump();
+            }
+            else
+            {
+                Add($"managed breakpoint in {target.Type} at IL_{target.Offset:X4}; it plants over the native loop when the run starts");
+            }
+        }
+
+        BreakpointsVersion++;
+        RefreshBreakpoints();
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// At a mixed stop, walk the managed stack with the DAC and show it beside the native registers —
+    /// and name the stop in managed terms. Only in mixed mode; the CLR's own engine fills these panes
+    /// through its own path, and a native program has no managed stack to walk.
+    /// </summary>
+    /// <summary>
+    /// Reads the managed side of a native stop onto the panel — the managed call stack, and the stop
+    /// named in managed terms — and returns where the stop sits in the open file as a static address, or
+    /// null when it is not in managed code of the opened assembly. That address is the point: the raw
+    /// stop is a JITted runtime address with no place in the file image, so the loop reports it as no
+    /// address at all; the managed location is what maps back to a static VA the listing and gutter
+    /// share, and only off that can the C#/IL view mark the current line and open the method stopped in.
+    /// </summary>
+    private ulong? RefreshMixedContext()
+    {
+        if (!IsMixedMode)
+        {
+            return null;
+        }
+
+        CallStack.Clear();
+        if (_session is not { } session || session.Managed is not { } overlay)
+        {
+            return null;
+        }
+
+        // The managed frames of the thread that stopped, innermost first. A stop reports a native
+        // thread id; the overlay names its threads by OS id, so they line up.
+        var thread = overlay.Threads().FirstOrDefault(t => t.OsId == session.CurrentThreadId)
+                     ?? overlay.Threads().FirstOrDefault();
+
+        int index = 0;
+        bool current = true;
+        foreach (var frame in thread?.Frames ?? [])
+        {
+            bool managed = frame.Method is { Length: > 0 };
+            CallStack.Add(new ManagedFrameRow(index++, frame.Method ?? frame.Kind, managed, managed && current));
+            if (managed)
+            {
+                current = false;   // the innermost managed frame is the one stopped in
+            }
+        }
+
+        // Name the stop in managed terms beside its native address, so a native pause reads as a place
+        // in the C#: "Stopped at 0x… — Namespace.Type.Method at IL_XXXX", and map it back to the static
+        // address the listing is addressed by so the caller can mark the line and open the method.
+        if (overlay.LocationOf(session.CurrentAddress) is { } location)
+        {
+            Status = $"{Status.TrimEnd('.')}  —  {location.Method} at IL_{location.IlOffset:X4}";
+            return location.Module is { Length: > 0 } module
+                ? AddressOf(module, (uint)location.MethodToken, (uint)location.IlOffset)
+                : null;
+        }
+
+        return null;
+    }
+
+    /// <summary>Managed marks already handed to the current native session, so the pump does not re-add them.</summary>
+    private readonly HashSet<ulong> _seededMixed = new();
+
+    /// <summary>
+    /// Polls the session while a mixed run is live: it hands any managed mark to the session once its
+    /// overlay exists, and plants held ones as their methods JIT. Polling is inherent to the read-only
+    /// DAC — a cold method announces nothing when it compiles, so the plant is caught on the next tick
+    /// (see MIXED-MODE.md Phase 5). Off outside a mixed run.
+    /// </summary>
+    private System.Windows.Threading.DispatcherTimer? _mixedPump;
+
+    private void EnsureMixedPump()
+    {
+        if (_mixedPump is not null || Application.Current is null)
+        {
+            return;
+        }
+
+        _mixedPump = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _mixedPump.Tick += (_, _) => PumpMixed();
+        _mixedPump.Start();
+        PumpMixed();
+    }
+
+    private void PumpMixed()
+    {
+        if (_session is not { } session)
+        {
+            StopMixedPump();
+            return;
+        }
+
+        foreach (ulong va in BreakpointAddresses.ToList())
+        {
+            if (_seededMixed.Contains(va) || MixedTarget(va) is not { } target)
+            {
+                continue;
+            }
+
+            string? result = session.AddManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+            if (result is null || !result.Contains("nothing is running", StringComparison.Ordinal))
+            {
+                _seededMixed.Add(va);
+            }
+        }
+
+        session.PlantPending();
+    }
+
+    private void StopMixedPump()
+    {
+        _mixedPump?.Stop();
+        _mixedPump = null;
+        _seededMixed.Clear();
     }
 
     /// <summary>
@@ -1262,13 +1714,20 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     break;
 
                 case "stopped":
+
                     State = DebugState.Stopped;
-                    ExecutionAddress = e.Address;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";
                     RefreshModules();
                     RefreshThreads();
                     RefreshRegisters();
-                    if (e.Address is { } address)
+
+                    // In mixed mode the stop is inside JITted code, whose runtime address has no place in
+                    // the file image — so e.Address is null and the managed location is the only thing
+                    // that maps back to a static VA the listing and gutter share. Prefer it; fall back to
+                    // the native address for a native stop (a breakpoint in a module's own code).
+                    ulong? shown = RefreshMixedContext() ?? e.Address;
+                    ExecutionAddress = shown;
+                    if (shown is { } address)
                     {
                         StoppedAt?.Invoke(this, address);
                     }
@@ -1666,6 +2125,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private void StopSession()
     {
         ExecutionAddress = null;
+        StopMixedPump();
         if (_workspace.Current is { } open)
         {
             open.Patches.Changed -= OnSavedPatchChanged;
@@ -1727,6 +2187,11 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStepOut))]
     private void StepOut()
     {
+        if (StepMixed(IlStepKind.Out))
+        {
+            return;
+        }
+
         if (_managed is not { } session || !IsStopped)
         {
             return;
@@ -1743,7 +2208,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
-    private bool CanStepOut() => IsStopped && IsManaged;
+    // A step out belongs to a managed stop, whether the CLR engine or the native loop is driving it.
+    private bool CanStepOut() => IsStopped && (IsManaged || IsMixedMode);
 
     /// <summary>
     /// A breakpoint clicked in the IL gutter, turned into the method and offset the runtime wants.
@@ -1928,6 +2394,13 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStepIl))]
     private void StepIl()
     {
+        // One IL offset, descending into a managed call — the native loop's IL step in mixed mode, the
+        // CLR engine's own IL step otherwise.
+        if (StepMixed(IlStepKind.Into))
+        {
+            return;
+        }
+
         if (_managed is not { } session || !IsStopped)
         {
             return;
@@ -1944,7 +2417,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         NotifyCommands();
     }
 
-    private bool CanStepIl() => IsStopped && IsManaged;
+    private bool CanStepIl() => IsStopped && (IsManaged || IsMixedMode);
 
     /// <summary>
     /// Steps one C# statement, into a call or over it.
@@ -2060,9 +2533,6 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
     }
-
-    private static bool DefaultConfirm(string title, string message)
-        => MessageBox.Show(message, title, MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
 
     public void Dispose() => StopSession();
 }

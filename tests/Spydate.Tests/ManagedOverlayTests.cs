@@ -1,0 +1,540 @@
+using System.Reflection.Metadata;
+using System.Runtime.Versioning;
+using Spydate.Debugger;
+
+namespace Spydate.Tests;
+
+/// <summary>
+/// The managed overlay: ClrMD reading the managed world while <see cref="DebugSession"/> owns the one
+/// OS debug port. The whole point of the mixed-mode design is that these two coexist, so the tests
+/// prove exactly that — a managed stack walked, statics read, a native address named in managed terms,
+/// all while the native loop holds the process stopped.
+/// </summary>
+[SupportedOSPlatform("windows")]
+[Collection(Debugging.Name)]
+public sealed class ManagedOverlayTests
+{
+    /// <summary>
+    /// The managed debuggee built beside the tests. It spins in a known method and holds a known
+    /// static, so a pause always finds managed frames and a static read has something to check.
+    /// Null when this build has not produced it.
+    /// </summary>
+    private static string? Fixture
+    {
+        get
+        {
+            string here = AppContext.BaseDirectory;
+            string guess = Path.GetFullPath(Path.Combine(
+                here, "..", "..", "..", "..", "Spydate.Tests.ManagedDebuggee", "bin", "Debug", "net10.0", "ManagedDebuggee.exe"));
+            return File.Exists(guess) ? guess : null;
+        }
+    }
+
+    private const string SpinFrame = "ManagedDebuggee.Program.Spin";
+    private const string FixtureType = "ManagedDebuggee.Program";
+
+    /// <summary>
+    /// The metadata token of a fixture method, read straight from the assembly's own metadata — so a
+    /// token-named breakpoint can be set before the CLR is even up, exactly as the window has a token
+    /// from a clicked line before a run. The fixture path is the apphost EXE; the metadata is in the
+    /// DLL beside it.
+    /// </summary>
+    private static int MethodToken(string exePath, string typeFullName, string methodName)
+    {
+        string dll = Path.ChangeExtension(exePath, ".dll");
+        using var stream = File.OpenRead(dll);
+        using var pe = new System.Reflection.PortableExecutable.PEReader(stream);
+        var md = pe.GetMetadataReader();
+        foreach (var th in md.TypeDefinitions)
+        {
+            var td = md.GetTypeDefinition(th);
+            string ns = md.GetString(td.Namespace);
+            string name = md.GetString(td.Name);
+            string full = ns.Length == 0 ? name : $"{ns}.{name}";
+            if (full != typeFullName)
+            {
+                continue;
+            }
+
+            foreach (var mh in td.GetMethods())
+            {
+                if (md.GetString(md.GetMethodDefinition(mh).Name) == methodName)
+                {
+                    return System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(mh);
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    private static bool Wait(Func<bool> until, int seconds = 20)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (clock.Elapsed < TimeSpan.FromSeconds(seconds))
+        {
+            if (until())
+            {
+                return true;
+            }
+
+            Thread.Sleep(50);
+        }
+
+        return until();
+    }
+
+    /// <summary>
+    /// Runs the fixture and stops it with its own code on a managed stack, ready to read.
+    ///
+    /// A pause the instant a CLR appears can land before the fixture's own type is loaded — the
+    /// runtime brings itself up first, and <c>Program</c> and its statics arrive a moment later when
+    /// Main runs. So this pauses, checks that <c>Spin</c> is on a managed stack, and if not lets the
+    /// process run on and pauses again. Once Spin is there the type is loaded and its static
+    /// constructor has run, so statics are readable too.
+    /// </summary>
+    private static ManagedOverlay PauseInManagedCode(DebugSession session)
+    {
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+        var overlay = session.Managed!;
+
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            Assert.True(session.Pause(), "could not pause the running debuggee");
+            Assert.True(Wait(() => session.State == DebugState.Stopped), "the pause never stopped it");
+
+            if (overlay.Threads().SelectMany(t => t.Frames).Any(f => f.Method?.Contains(SpinFrame, StringComparison.Ordinal) == true))
+            {
+                return overlay;
+            }
+
+            session.Continue();
+            Assert.True(Wait(() => session.State == DebugState.Running), "the debuggee never resumed");
+            Thread.Sleep(150);
+        }
+
+        return overlay;   // let the caller's assertions report what did not turn up
+    }
+
+    [Fact]
+    public void AManagedStackIsWalkedWhileTheNativeLoopHoldsThePort()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+
+        // Let it run: the CLR is not up at the loader break, and the overlay needs a live runtime.
+        // Then the native loop takes the process, with the fixture's own code on a managed stack.
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        var overlay = PauseInManagedCode(session);
+
+        var threads = overlay.Threads();
+        Assert.NotEmpty(threads);
+
+        // The spinner's own frames are on a managed stack, walked while DebugSession owns the port.
+        var frames = threads.SelectMany(t => t.Frames).ToList();
+        Assert.Contains(frames, f => f.Method?.Contains("ManagedDebuggee.Program.Spin", StringComparison.Ordinal) == true);
+        Assert.Contains(frames, f => f.Method?.Contains("ManagedDebuggee.Program.Main", StringComparison.Ordinal) == true);
+
+        // The frames name their module, so a caller can tell the debuggee's own code from the runtime.
+        Assert.Contains(frames, f => f.Module is { } m && m.Equals("ManagedDebuggee.dll", StringComparison.OrdinalIgnoreCase));
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void StaticsAndAManagedLocationAreReadableAtANativeStop()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        var overlay = PauseInManagedCode(session);
+
+        // A static string, read straight out of memory, with the value the fixture set.
+        var statics = overlay.Statics("ManagedDebuggee.Program");
+        var label = Assert.Single(statics, s => s.Name == "Label");
+        Assert.Contains("spydate-overlay", label.Value, StringComparison.Ordinal);
+
+        // A native instruction pointer, said in managed terms: the frame is in Spin, and the DAC gives
+        // the method back with a real metadata token.
+        var spin = overlay.Threads()
+            .SelectMany(t => t.Frames)
+            .First(f => f.Method?.Contains("ManagedDebuggee.Program.Spin", StringComparison.Ordinal) == true);
+
+        var location = overlay.LocationOf(spin.InstructionPointer);
+        Assert.NotNull(location);
+        Assert.Contains("Spin", location!.Method, StringComparison.Ordinal);
+        Assert.Equal("ManagedDebuggee.dll", location.Module);
+        Assert.NotEqual(0, location.MethodToken);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void ANativeProcessHasNoManagedOverlay()
+    {
+        string where = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "where.exe");
+        if (!OperatingSystem.IsWindows() || !File.Exists(where))
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        session.Start(where, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        // A native program has no CLR, so the overlay is present but empty — not throwing, not
+        // pretending. This is the answer for the whole native half of Spydate's corpus.
+        var overlay = session.Managed!;
+        Assert.False(overlay.HasClr);
+        Assert.Empty(overlay.Threads());
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedBreakpointAtAnInteriorIlOffsetFiresTwice()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+
+        // Count the stops rather than watch the state: Step is called every ~50ms, so after a continue
+        // the re-armed int3 fires again almost at once, and the momentary Running state can be shorter
+        // than a poll interval. The stop count cannot be missed. With Don't break and no pause, the only
+        // stops are this breakpoint's hits.
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+
+        // An interior IL offset of Step, once it has been JITted — the first offset past zero, so the
+        // breakpoint is inside the method body rather than at its entry.
+        var offsets = new List<int>();
+        Assert.True(Wait(() => (offsets = session.Managed!.IlOffsets(FixtureType, "Step").ToList()).Count > 1),
+            "Step never compiled");
+        int interior = offsets.First(o => o > 0);
+
+        // The managed breakpoint: the overlay resolves Step + interior offset to a JIT address, and the
+        // native loop plants an int3 there. Polled because HasClr can precede Step's first call.
+        string? planted = "pending";
+        Assert.True(Wait(() => (planted = session.AddManagedBreakpoint(FixtureType, "Step", interior)) is null),
+            $"could not set the managed breakpoint: {planted}");
+
+        // It fires, in Step, at the offset asked for.
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the managed breakpoint never fired");
+        ulong first = session.CurrentAddress;
+        var location = session.Managed!.LocationOf(first);
+        Assert.NotNull(location);
+        Assert.Contains("Step", location!.Method, StringComparison.Ordinal);
+
+        // And re-arms on the JIT page: continued, Step is called again and it stops in the same place.
+        // This is the whole of "a managed breakpoint is a native int3 that behaves like any other".
+        session.Continue();
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 2, 15), "the managed breakpoint did not re-arm");
+        Assert.Equal(first, session.CurrentAddress);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void ABreakpointInAMethodThatIsNotCompiledIsRefusedWithAReason()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+
+        // Cold has a method descriptor — the fixture references it through a delegate — but is never
+        // invoked, so it is never JITted. A breakpoint there is refused, and the refusal says why:
+        // there is no native code to break in until its first call. Polled because the type's static
+        // constructor, which makes the descriptor, runs a moment after the CLR appears.
+        string? refusal = null;
+        Assert.True(
+            Wait(() => (refusal = session.AddManagedBreakpoint(FixtureType, "Cold", 0)) is { } r
+                       && r.Contains("compiled", StringComparison.OrdinalIgnoreCase), 15),
+            $"the cold method was not refused with a clear reason: {refusal}");
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// Starts the fixture, sets a breakpoint at an interior IL offset of Step, and waits for it to fire
+    /// — leaving the process stopped in Step, ready to step. Returns the offset it stopped at.
+    /// </summary>
+    private static int StopInStep(DebugSession session, string fixture, Func<int> stops)
+    {
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
+
+        var offsets = new List<int>();
+        Assert.True(Wait(() => (offsets = session.Managed!.IlOffsets(FixtureType, "Step").ToList()).Count > 2),
+            "Step never compiled");
+        int interior = offsets.First(o => o > 0);
+
+        Assert.True(Wait(() => session.AddManagedBreakpoint(FixtureType, "Step", interior) is null),
+            "could not set the managed breakpoint");
+        Assert.True(Wait(() => stops() >= 1, 15), "the managed breakpoint never fired");
+        return interior;
+    }
+
+    [Fact]
+    public void AManagedStepOverLandsOnTheNextIlOffsetInTheSameMethod()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        int startIl = StopInStep(session, fixture, () => Volatile.Read(ref stops));
+
+        int before = stops;
+        session.StepManaged(IlStepKind.Over);
+        Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), "the step never landed");
+
+        // Landed on a real IL boundary — a later offset — still inside Step. (The spike showed the same
+        // on desktop CLR 4.8; the suite exercises CoreCLR.)
+        var location = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(location);
+        Assert.Contains("Step", location!.Method, StringComparison.Ordinal);
+        Assert.True(location.IlOffset > startIl, $"expected an IL offset past {startIl}, got {location.IlOffset}");
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedStepOverStaysInTheMethodAcrossACall()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        StopInStep(session, fixture, () => Volatile.Read(ref stops));
+
+        // Out of Step and into its caller Spin, which calls Step and Wait each turn of its loop.
+        int before = stops;
+        session.StepManaged(IlStepKind.Out);
+        Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), "step out never landed");
+        Assert.Contains("Spin", session.Managed!.LocationOf(session.CurrentAddress)!.Method, StringComparison.Ordinal);
+
+        // Several step-overs stay in Spin — the Step and Wait calls are stepped over, not descended into.
+        for (int i = 0; i < 8; i++)
+        {
+            before = stops;
+            session.StepManaged(IlStepKind.Over);
+            Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), $"step over #{i} never landed");
+            var where = session.Managed!.LocationOf(session.CurrentAddress);
+            Assert.NotNull(where);
+            Assert.Contains("Spin", where!.Method, StringComparison.Ordinal);
+        }
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedStepIntoDescendsIntoAManagedCall()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        StopInStep(session, fixture, () => Volatile.Read(ref stops));
+
+        // Out to Spin, then step into repeatedly until it descends out of Spin into a callee — Spin
+        // calls Step and Wait, both managed, so an into step lands in one of them.
+        int before = stops;
+        session.StepManaged(IlStepKind.Out);
+        Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), "step out never landed");
+
+        string? descendedInto = null;
+        for (int i = 0; i < 40 && descendedInto is null; i++)
+        {
+            before = stops;
+            session.StepManaged(IlStepKind.Into);
+            Assert.True(Wait(() => Volatile.Read(ref stops) > before, 15), $"step into #{i} never landed");
+            var where = session.Managed!.LocationOf(session.CurrentAddress);
+            if (where is not null && !where.Method.Contains("Spin", StringComparison.Ordinal))
+            {
+                descendedInto = where.Method;
+            }
+        }
+
+        Assert.True(descendedInto is not null, "step into never descended out of Spin");
+        Assert.Contains("ManagedDebuggee.Program", descendedInto!, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedBreakpointOnAColdMethodIsHeldAndPlantedWhenItCompiles()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+
+        // Wait until the fixture's own type is loaded (Step has compiled), not merely until a CLR is
+        // present — the type arrives a moment after the runtime. LateJit stays cold for seconds, so it
+        // is still uncompiled at this point.
+        Assert.True(Wait(() => session.Managed?.IlOffsets(FixtureType, "Step").Count > 0), "the fixture type never loaded");
+
+        // Set the breakpoint while LateJit is still cold — there is no native code to break in yet.
+        string? held = session.AddManagedBreakpoint(FixtureType, "LateJit", 0);
+        Assert.NotNull(held);
+        Assert.Contains("not compiled", held!, StringComparison.OrdinalIgnoreCase);
+
+        // Once the method is called it JITs and the breakpoint goes in — planted either by the prestub
+        // first-call catch (when the runtime PDB is available; see MIXED-MODE.md Phase 7) or, failing
+        // that, by a poll of PlantPending on a later call. Either way it fires, in LateJit.
+        Assert.True(Wait(() => { session.PlantPending(); return Volatile.Read(ref stops) >= 1; }, 30), "the held breakpoint never fired");
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("LateJit", where!.Method, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AColdMethodCalledOnceIsCaughtAtItsFirstCallViaThePrestub()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        // The catch needs PreStubWorker from the runtime's PDB. Warm the cache from this process's own
+        // runtime — the fixture is the same build — so the session's arming is instant, and skip where no
+        // PDB can be had (an offline machine), the way the whole feature falls back there.
+        string? runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
+        string coreclr = runtimeDir is { Length: > 0 } ? Path.Combine(runtimeDir, "coreclr.dll") : string.Empty;
+        if (!File.Exists(coreclr) || CoreClrSymbols.PreStubWorkerRva(coreclr) == 0)
+        {
+            return;
+        }
+
+        int token = MethodToken(fixture, FixtureType, "OnceLate");
+        Assert.NotEqual(0, token);
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+        Assert.True(Wait(() => session.Managed?.HasClr == true, 30), "the CLR never came up");
+
+        // OnceLate is cold, called exactly once a few seconds in, and never again. The poll-plant fallback
+        // notices its JIT only after that one call has run, so it could never stop on it. If the run stops
+        // in OnceLate, only the prestub first-call catch could have done it.
+        string? held = session.AddManagedBreakpoint(FixtureType, token, 0);
+        Assert.NotNull(held);
+
+        Assert.True(Wait(() => Volatile.Read(ref stops) >= 1, 15), "the once-called cold method was never caught");
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("OnceLate", where!.Method, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void ABenignInvalidHandleExceptionDoesNotStopTheProcess()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        // Don't break: nothing of ours should stop it. The debuggee closes a bogus handle five times at
+        // startup, which raises STATUS_INVALID_HANDLE under this debugger — a benign check the loop must
+        // continue, not escalate. If it escalated, a "stopped" would arrive within the first moment.
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+
+        // Run well past startup, where the handle pokes happen. It must keep running throughout.
+        Assert.True(Wait(() => session.Managed?.HasClr == true, 30), "the CLR never came up");
+        Thread.Sleep(2000);
+
+        Assert.Equal(0, Volatile.Read(ref stops));
+        Assert.Equal(DebugState.Running, session.State);
+
+        session.Stop();
+    }
+
+    [Fact]
+    public void AManagedBreakpointByTokenIsHeldBeforeTheClrAndPlantedOnceItsCodeExists()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        // The token, read from the file's metadata, is knowable before anything runs — which is the
+        // whole point: the window has it from a clicked line before a run, when there is no CLR to ask.
+        int token = MethodToken(fixture, FixtureType, "Step");
+        Assert.NotEqual(0, token);
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        session.Start(fixture, imageBase: 0, imageSize: 0, entryStop: EntryStop.DontBreak);
+
+        // Set by token before the CLR is up. A name-based set here would be refused ("no type loaded");
+        // a token-based one is held instead, because a token from the opened assembly is a real method
+        // that will arrive.
+        string? held = session.AddManagedBreakpoint(FixtureType, token, 0);
+        Assert.NotNull(held);
+        Assert.Contains("held", held!, StringComparison.OrdinalIgnoreCase);
+
+        // Once the CLR is up and Step has native code the held breakpoint goes in — by the prestub
+        // first-call catch or a poll of PlantPending, whichever the runtime PDB allows — and it fires in
+        // Step: a managed breakpoint set before the run, planted over the native loop.
+        Assert.True(Wait(() => { session.PlantPending(); return Volatile.Read(ref stops) >= 1; }, 30), "the token breakpoint never fired");
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("Step", where!.Method, StringComparison.Ordinal);
+
+        // Clearing it by token removes the mark; there is nothing left to fire on a fresh continue.
+        Assert.Null(session.RemoveManagedBreakpoint(FixtureType, token, 0));
+
+        session.Stop();
+    }
+}

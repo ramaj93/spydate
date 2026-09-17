@@ -19,6 +19,7 @@ public partial class MainWindow : FluentWindow
     private readonly MainViewModel _viewModel;
     private double _lastExplorerWidth = DefaultExplorerWidth;
     private double _lastOutputHeight = DefaultOutputHeight;
+    private bool _wasDebugging;
 
     public MainWindow(MainViewModel viewModel)
     {
@@ -31,6 +32,25 @@ public partial class MainWindow : FluentWindow
         });
         InitializeComponent();
         _viewModel.Output.CollectionChanged += (_, _) => ScrollOutputToEnd();
+
+        // Bring the Debug pane forward when a run begins — that is where the run reports itself, and
+        // where its registers, stack and threads are. Only on the start transition, so the reader who
+        // steps over to another tab mid-session is not yanked back at the next stop.
+        _viewModel.Debugger.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(DebuggerViewModel.State))
+            {
+                return;
+            }
+
+            bool debugging = _viewModel.Debugger.IsDebugging;
+            if (debugging && !_wasDebugging)
+            {
+                DebugTab.IsSelected = true;
+            }
+
+            _wasDebugging = debugging;
+        };
 
         _viewModel.Assistant.Transcript.CollectionChanged += (_, e) => OnTranscriptChanged(e);
 
@@ -177,6 +197,22 @@ public partial class MainWindow : FluentWindow
         }
 
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// Selects the row a right-click landed on, before its context menu opens.
+    ///
+    /// A DataGrid does not select on right-click, so "Set value…" — whose command parameter is the
+    /// grid's SelectedItem — would write into whatever was left-clicked last, or do nothing when
+    /// nothing was. Selecting the row under the pointer first makes the menu act on the row aimed at.
+    /// </summary>
+    private void SelectRowOnRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject source
+            && ItemsControl.ContainerFromElement((System.Windows.Controls.DataGrid)sender, source) is DataGridRow row)
+        {
+            row.IsSelected = true;
+        }
     }
 
     private void OnXrefDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)

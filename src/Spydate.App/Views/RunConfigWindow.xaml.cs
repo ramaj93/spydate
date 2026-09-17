@@ -15,6 +15,15 @@ public partial class RunConfigWindow : Window
     public RunConfigWindow(object debugger)
     {
         InitializeComponent();
+        DarkChrome.Apply(this);
         DataContext = debugger;
     }
+
+    /// <summary>
+    /// Run it. The only thing the buttons decide, since the settings are already written through.
+    ///
+    /// Not a command on the debugger: the command that starts a run is what opens this window, and
+    /// binding it here would have the dialog reopen itself instead of starting anything.
+    /// </summary>
+    private void OnDebug(object sender, RoutedEventArgs e) => DialogResult = true;
 }

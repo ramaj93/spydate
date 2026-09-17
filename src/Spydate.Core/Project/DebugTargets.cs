@@ -10,6 +10,47 @@ namespace Spydate.Core.Project;
 /// the DLL is then a module inside a process that is running somebody else's executable. For an EXE
 /// there is no host — it is its own — and the arguments and directory still apply.
 /// </summary>
+/// <summary>
+/// Which debugger drives the process.
+///
+/// Only ever a question for an IL-only assembly: everything else has native code and no choice to
+/// make. <see cref="Native"/> on a .NET program is what makes a breakpoint or a patch in one of the
+/// native DLLs it loads possible, at the cost of there being no managed frames or locals — nothing
+/// is talking to the runtime then.
+/// </summary>
+public enum DebugEngine
+{
+    /// <summary>Decided from the file, which is what happened before there was anything to decide.</summary>
+    Auto = 0,
+
+    /// <summary>The Win32 debug loop.</summary>
+    Native,
+
+    /// <summary>The CLR debugging interface.</summary>
+    Clr,
+}
+
+/// <summary>
+/// Where a run should stop of its own accord, before anything else is asked of it.
+///
+/// The names are dnSpy's, because the choice is the same one and an analyst who knows the other
+/// program should not have to learn a second vocabulary for it.
+/// </summary>
+public enum DebugBreakAt
+{
+    /// <summary>Run on. Nothing stops it but a breakpoint somebody set.</summary>
+    None = 0,
+
+    /// <summary>The first moment there is a process at all, before it has run its own code.</summary>
+    CreateProcess,
+
+    /// <summary>The executable's entry point.</summary>
+    EntryPoint,
+
+    /// <summary>The module's static constructor if it has one, and its entry point if it does not.</summary>
+    ModuleCctorOrEntryPoint,
+}
+
 public sealed record DebugTarget
 {
     /// <summary>The executable to start. Null or empty means the binary itself, which needs it to be one.</summary>
@@ -24,11 +65,34 @@ public sealed record DebugTarget
     [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; init; }
 
-    /// <summary>Whether anything has actually been set, so an empty one can be dropped rather than stored.</summary>
+    /// <summary>
+    /// Which debugger to use, or null for whatever the file implies.
+    ///
+    /// Written as a name rather than a number: this file is indented and meant to be readable, and a
+    /// number would also silently change meaning if the enum were ever reordered.
+    /// </summary>
+    [JsonPropertyName("engine")]
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public DebugEngine? Engine { get; init; }
+
+    /// <summary>Where to stop on starting, or null for the default.</summary>
+    [JsonPropertyName("breakAt")]
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public DebugBreakAt? BreakAt { get; init; }
+
+    /// <summary>
+    /// Whether anything has actually been set, so an empty one can be dropped rather than stored.
+    ///
+    /// The two settings count as unset when they are null, and the caller is expected to write null
+    /// for its own defaults. Otherwise merely opening a binary would give it an entry here, and a
+    /// file of remembered targets would fill up with binaries nobody ever chose to run.
+    /// </summary>
     [JsonIgnore]
     public bool IsEmpty => string.IsNullOrWhiteSpace(Host)
                            && string.IsNullOrWhiteSpace(Arguments)
-                           && string.IsNullOrWhiteSpace(WorkingDirectory);
+                           && string.IsNullOrWhiteSpace(WorkingDirectory)
+                           && Engine is null
+                           && BreakAt is null;
 }
 
 /// <summary>

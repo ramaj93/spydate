@@ -61,12 +61,12 @@ public sealed class CodeEditor : TextEditor
         nameof(RevealLine), typeof(int), typeof(CodeEditor),
         new FrameworkPropertyMetadata(0, OnRevealLineChanged));
 
-    /// <summary>Identifiers in the text that name a type or member, for Ctrl+click to definition.</summary>
+    /// <summary>Identifiers in the text that name a type or member, for click-to-definition.</summary>
     public static readonly DependencyProperty ReferencesProperty = DependencyProperty.Register(
         nameof(References), typeof(IReadOnlyList<SourceReference>), typeof(CodeEditor),
         new FrameworkPropertyMetadata(null));
 
-    /// <summary>Invoked with the <see cref="SourceReference"/> under a Ctrl+click.</summary>
+    /// <summary>Invoked with the <see cref="SourceReference"/> under a click.</summary>
     public static readonly DependencyProperty GoToDefinitionCommandProperty = DependencyProperty.Register(
         nameof(GoToDefinitionCommand), typeof(System.Windows.Input.ICommand), typeof(CodeEditor),
         new FrameworkPropertyMetadata(null));
@@ -113,7 +113,13 @@ public sealed class CodeEditor : TextEditor
         TextArea.LeftMargins.Insert(0, new BreakpointMargin(this));
         TextArea.Caret.PositionChanged += (_, _) => UpdateCaretContext();
         PreviewMouseRightButtonDown += MoveCaretToClick;
-        PreviewMouseLeftButtonDown += GoToDefinitionOnCtrlClick;
+        PreviewMouseLeftButtonDown += NoteReferenceUnderPress;
+        PreviewMouseLeftButtonUp += FollowReferenceOnClick;
+
+        // handledEventsToo, because the text view sets the I-beam by handling QueryCursor itself, and
+        // a plain += would never see the event once it had. This runs after and overrides it, but only
+        // where there is a reference to follow — everywhere else the I-beam stands.
+        AddHandler(Mouse.QueryCursorEvent, new QueryCursorEventHandler(ShowHandOverReference), handledEventsToo: true);
     }
 
     public IReadOnlyList<SourceReference>? References
@@ -128,23 +134,78 @@ public sealed class CodeEditor : TextEditor
         set => SetValue(GoToDefinitionCommandProperty, value);
     }
 
+    /// <summary>The reference the left button went down on, and where, so the release can follow it.</summary>
+    private SourceReference? _pressedReference;
+    private Point _pressedPoint;
+
     /// <summary>
-    /// Ctrl+click on an identifier that names a type or member follows it to its definition. The
-    /// click maps to a line and column, and a reference covering that column on that line is the one
-    /// to open — the same 1-based counting the decompiler recorded them in.
+    /// Clicking an identifier that names a type or member follows it to its definition — a plain click,
+    /// the way dnSpy navigates, with no modifier.
+    ///
+    /// The press over a reference is handled here, which stops the text view from starting a selection
+    /// and taking the mouse: a reference is a link, not text to sweep over, and letting the selection
+    /// begin was what left the editor stuck in select mode once the release was swallowed. The follow
+    /// happens on release so a press-and-hold that wanders off does not navigate; a press on ordinary
+    /// text is left alone, so selecting and copying code still works everywhere but on a link.
     /// </summary>
-    private void GoToDefinitionOnCtrlClick(object sender, MouseButtonEventArgs e)
+    private void NoteReferenceUnderPress(object sender, MouseButtonEventArgs e)
     {
-        if ((Keyboard.Modifiers & ModifierKeys.Control) == 0
-            || GoToDefinitionCommand is not { } command
-            || References is not { Count: > 0 } references)
+        _pressedPoint = e.GetPosition(this);
+        _pressedReference = ReferenceAt(_pressedPoint);
+        if (_pressedReference is not null)
         {
+            e.Handled = true;   // a link: do not let the text view select or capture the mouse
+        }
+    }
+
+    private void FollowReferenceOnClick(object sender, MouseButtonEventArgs e)
+    {
+        if (_pressedReference is not { } reference || GoToDefinitionCommand is not { } command)
+        {
+            _pressedReference = null;
             return;
         }
 
-        if (GetPositionFromPoint(e.GetPosition(this)) is not { } position)
+        _pressedReference = null;
+        e.Handled = true;
+
+        var released = e.GetPosition(this);
+        if (Math.Abs(released.X - _pressedPoint.X) > SystemParameters.MinimumHorizontalDragDistance
+            || Math.Abs(released.Y - _pressedPoint.Y) > SystemParameters.MinimumVerticalDragDistance)
         {
-            return;
+            return;   // the press wandered off the link before releasing — not a click
+        }
+
+        if (ReferenceAt(released) == reference && command.CanExecute(reference))
+        {
+            command.Execute(reference);
+        }
+    }
+
+    /// <summary>
+    /// A hand cursor over a navigable identifier, so it reads as a link rather than editable text.
+    /// Handled on the editor so it wins over the text view's own I-beam, and suppressed mid-drag so a
+    /// selection sweeping across identifiers does not flicker.
+    /// </summary>
+    private void ShowHandOverReference(object sender, QueryCursorEventArgs e)
+    {
+        if (e.LeftButton == MouseButtonState.Released && ReferenceAt(e.GetPosition(this)) is not null)
+        {
+            e.Cursor = Cursors.Hand;
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// The reference covering a point, or null. A click maps to a line and column, and a reference
+    /// covering that column on that line is the one under it — the same 1-based counting the
+    /// decompiler recorded them in.
+    /// </summary>
+    private SourceReference? ReferenceAt(Point point)
+    {
+        if (References is not { Count: > 0 } references || GetPositionFromPoint(point) is not { } position)
+        {
+            return null;
         }
 
         foreach (var reference in references)
@@ -153,15 +214,11 @@ public sealed class CodeEditor : TextEditor
                 && position.Column >= reference.Column
                 && position.Column < reference.Column + reference.Length)
             {
-                if (command.CanExecute(reference))
-                {
-                    command.Execute(reference);
-                }
-
-                e.Handled = true;
-                return;
+                return reference;
             }
         }
+
+        return null;
     }
 
     public string BoundText

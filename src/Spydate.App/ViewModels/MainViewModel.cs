@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Reflection.Metadata.Ecma335;
 using System.Text;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -1196,6 +1197,18 @@ public sealed partial class MainViewModel : ObservableObject
 
         var b = Binary;
         var pe = b.Image;
+
+        // A field or an event has no body to read on its own, so opening one opens its declaring type
+        // and stops on the line it is declared — dnSpy's behaviour, and far more use than a document
+        // one line long. Methods and properties keep their own documents, where the addresses, the
+        // breakpoint gutter and the IL view live.
+        if (target is ManagedMemberTarget { Member.Kind: ManagedMemberKind.Field or ManagedMemberKind.Event } memberTarget
+            && (memberTarget.Assembly ?? b.Managed) is { } owner)
+        {
+            RevealManagedMember(owner, memberTarget);
+            return;
+        }
+
         DocumentViewModel? doc = target switch
         {
             OverviewTarget => Find("overview") ?? new OverviewDocumentViewModel(b),
@@ -1225,6 +1238,20 @@ public sealed partial class MainViewModel : ObservableObject
             Show(doc);
             Record(doc, target);
         }
+    }
+
+    /// <summary>
+    /// Opens the type a member belongs to and stops on the line the member is declared, reusing the
+    /// type's document if it is already open. Only the opened assembly carries the debugger's
+    /// addresses (Locate); a member in a resolved reference is decompiled through that reference.
+    /// </summary>
+    private void RevealManagedMember(ManagedAssembly assembly, ManagedMemberTarget target)
+    {
+        var doc = Find($"managed:type:{assembly.Name}:{target.Type.FullName}") as ManagedCodeDocumentViewModel
+                  ?? ManagedCodeDocumentViewModel.ForType(assembly, target.Type, target.Assembly is null ? Locate : null, GoToDefinition);
+        Show(doc);
+        Record(doc, new ManagedTypeTarget(target.Type, target.Assembly));
+        doc.RevealMember(MetadataTokens.GetToken(target.Member.Handle));
     }
 
     /// <summary>Opens the function the active document is about in both views at once.</summary>
@@ -1277,7 +1304,7 @@ public sealed partial class MainViewModel : ObservableObject
             : null;
 
     /// <summary>
-    /// Follows a Ctrl+clicked identifier to its definition. The target may be in the assembly on
+    /// Follows a clicked identifier to its definition. The target may be in the assembly on
     /// screen or in one it references; resolution runs from the viewed assembly so a click inside a
     /// reference's code can go on into a third assembly. A definition in the opened binary opens as
     /// its own code — with the debugger's addresses — and one elsewhere opens through that assembly.

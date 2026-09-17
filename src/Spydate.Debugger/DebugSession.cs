@@ -13,6 +13,45 @@ public enum DebugState
     Exited,
 }
 
+/// <summary>
+/// Where a freshly launched process should first stop of its own accord.
+///
+/// The loader break arrives whatever anybody asked for — it is the moment the image is finally
+/// mapped and breakpoints go in — so this decides what happens once it has: report it, let go of it,
+/// or run on to a one-shot at the program's entry or the opened module's own entry point.
+/// </summary>
+public enum EntryStop
+{
+    /// <summary>Stop at the loader break, before the program's own code — dnSpy's "Create Process".</summary>
+    LoaderBreak,
+
+    /// <summary>Let go of the loader break the instant it arrives, and run on — "Don't break".</summary>
+    DontBreak,
+
+    /// <summary>Run on to the launched process's own entry point, wherever it starts.</summary>
+    ProcessEntry,
+
+    /// <summary>
+    /// Run on to the entry point of the module being read — the opened DLL's own entry under a host,
+    /// the process's entry when it is the main image. Native code has no static constructor, so
+    /// "Module cctor or Entry Point" is the entry point here.
+    /// </summary>
+    ModuleEntry,
+}
+
+/// <summary>How a managed step should treat the calls it meets on the way to the next IL offset.</summary>
+public enum IlStepKind
+{
+    /// <summary>Descend into a managed call, stopping at the callee's first line; step over native ones.</summary>
+    Into,
+
+    /// <summary>Stay in this method: step over every call, stopping at the next IL offset here.</summary>
+    Over,
+
+    /// <summary>Run until this method returns to its caller.</summary>
+    Out,
+}
+
 /// <summary>Something the debuggee did, in the order it did it.</summary>
 public sealed record DebugEvent(string Kind, string Text)
 {
@@ -31,6 +70,16 @@ public sealed record DebugEvent(string Kind, string Text)
 public sealed record Breakpoint(ulong Address, byte Original)
 {
     public bool Planted { get; init; }
+
+    /// <summary>
+    /// The module this is in, or null for the one the listing is about.
+    ///
+    /// Null keeps <see cref="Address"/> meaning a static address, which is what every breakpoint was
+    /// before there could be more than one module in play. A name makes it an RVA in that module
+    /// instead — because a static address cannot say which module is meant once several are of
+    /// interest at once.
+    /// </summary>
+    public string? Module { get; init; }
 }
 
 /// <summary>A module the debuggee has loaded, and where it landed.</summary>
@@ -56,7 +105,17 @@ public sealed record DebugThread(uint Id, ulong StartAddress);
 /// patch, and restoring that would restore nothing. Same length as <paramref name="Bytes"/>, which
 /// is the rule the whole of patching rests on: nothing moves, so no address anyone wrote down shifts.
 /// </summary>
-public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyList<byte> Original);
+public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyList<byte> Original)
+{
+    /// <summary>
+    /// The module the RVA is in, or null for the one the listing is about.
+    ///
+    /// An RVA was always module-relative; what it lacked was a way to say <em>which</em> module, so
+    /// every patch went into the one being read. Naming one is what lets a hypothesis be tried in a
+    /// protection DLL a program loads rather than only in the program itself.
+    /// </summary>
+    public string? Module { get; init; }
+}
 
 /// <summary>
 /// A process running under a debug loop.
@@ -71,18 +130,44 @@ public sealed record LivePatch(uint Rva, IReadOnlyList<byte> Bytes, IReadOnlyLis
 /// </summary>
 public sealed class DebugSession : IDisposable
 {
+    /// <summary>
+    /// What a breakpoint is kept under.
+    ///
+    /// <paramref name="Module"/> null means the module the listing is about — the one
+    /// <see cref="Start"/> named — and then <paramref name="Address"/> is a static address in it. A
+    /// named module makes <paramref name="Address"/> an RVA in that module instead.
+    ///
+    /// The asymmetry is forced and worth stating. A static address cannot name a module: 0x180000000
+    /// is the default base for an x64 DLL and most of them keep it, so several modules in one process
+    /// routinely claim the same static address, and an address alone would silently mean whichever one
+    /// happened to be asked first. An RVA plus a name always says which. The null case keeps its
+    /// static address because that is what the listing shows and what every existing caller passes,
+    /// and because with no image base given there is no RVA to speak of.
+    /// </summary>
+    private readonly record struct BreakpointAt(string? Module, ulong Address);
+
     private readonly ConcurrentQueue<Action> _commands = new();
     private readonly SemaphoreSlim _resume = new(0, 1);
-    private readonly Dictionary<ulong, Breakpoint> _breakpoints = new();
+    private readonly Dictionary<BreakpointAt, Breakpoint> _breakpoints = new();
     private readonly Dictionary<ulong, LoadedModule> _modules = new();
     private readonly Dictionary<uint, DebugThread> _threads = new();
+
+    /// <summary>
+    /// What a patch is kept under: an RVA, and which module's RVA it is.
+    ///
+    /// Null module means the one the listing is about, which is what every existing caller means and
+    /// what it meant when an RVA was the whole key. Two modules can hold a patch at the same RVA
+    /// without either being the other, so the RVA alone stopped being an identity as soon as more
+    /// than one module could be patched.
+    /// </summary>
+    private readonly record struct PatchAt(string? Module, uint Rva);
 
     /// <summary>
     /// Bytes to keep written over the module, by RVA. Written the moment the module is there and
     /// again every time it loads, so a debug run behaves like the patched copy without one being
     /// saved — and a hypothesis can be tried in the running process and taken straight back out.
     /// </summary>
-    private readonly Dictionary<uint, LivePatch> _patches = new();
+    private readonly Dictionary<PatchAt, LivePatch> _patches = new();
     private readonly CancellationTokenSource _stopping = new();
 
     /// <summary>
@@ -104,9 +189,55 @@ public sealed class DebugSession : IDisposable
     /// <summary>Set while stepping over a breakpoint, so its byte goes back afterwards.</summary>
     private (ulong Address, uint Thread)? _reArm;
 
-    /// <summary>A breakpoint that exists to get somewhere once: step-over, or run-to-cursor.</summary>
+    /// <summary>A breakpoint that exists to get somewhere once: step-over, run-to-cursor, or the
+    /// one-shot that carries a launch on to its entry point.</summary>
     private ulong? _temporary;
     private byte _temporaryOriginal;
+
+    /// <summary>Whether the one-shot planted its own int3, so its byte is ours to put back when it is
+    /// hit or replaced. False when it rode an int3 already there — a breakpoint the analyst set, or the
+    /// program's own — whose byte belongs to that owner and must not be overwritten with the one-shot's
+    /// (which it never recorded). Restoring it regardless wrote a stale zero over a real instruction.</summary>
+    private bool _temporaryPlanted;
+
+    // The first-call catch (MIXED-MODE.md Phase 7): an int3 on the JIT's shared prestub worker catches a
+    // cold managed method the instant it is about to be compiled, before its body runs. None of these
+    // stops are reported — they are the machinery, not the breakpoint the analyst set.
+
+    /// <summary>The armed PreStubWorker address, or 0. Every method's first JIT passes through it, and the
+    /// MethodDesc being compiled is its argument, so the loop can tell whose JIT this is.</summary>
+    private ulong _prestubVa;
+
+    /// <summary>PreStubWorker's RVA in the runtime image once resolved from its PDB; 0 if unavailable, so
+    /// the catch falls back to planting on a later call. Set on a background task, read on the loop.</summary>
+    private volatile uint _prestubRva;
+
+    /// <summary>Which register holds the MethodDesc being compiled at the prestub — rdx on CoreCLR, rcx on
+    /// Framework. Set with <see cref="_prestubRva"/>.</summary>
+    private string _prestubRegister = "rdx";
+
+    /// <summary>True while the PDB is being resolved, so it is not started twice.</summary>
+    private volatile bool _prestubResolving;
+
+    /// <summary>The held breakpoint whose method is being compiled right now, and the prestub's return
+    /// address where that method will have native code. Set between a matching prestub hit and the return
+    /// one-shot that follows it.</summary>
+    private HeldManaged? _dancing;
+    private ulong _danceReturn;
+
+    /// <summary>The stack pointer at the prestub hit for the method being caught. A method's JIT can
+    /// trigger nested JITs whose prestub calls return through the same shared address; the return that
+    /// matters is the one where the stack has unwound back to here, not a deeper nested one.</summary>
+    private ulong _danceRsp;
+
+    /// <summary>Where the run should first stop of its own accord. Settled at <see cref="Start"/>.</summary>
+    private EntryStop _entryStop = EntryStop.LoaderBreak;
+
+    /// <summary>The opened module's entry-point RVA, for <see cref="EntryStop.ModuleEntry"/>. Zero when unknown.</summary>
+    private uint _entryRva;
+
+    /// <summary>The launched process's own entry, as the OS reported it at CreateProcess. Zero until then.</summary>
+    private ulong _processEntry;
 
     /// <summary>A step was asked for, as opposed to the trap flag being set to get off a breakpoint.</summary>
     /// <summary>The thread a step was asked of, until it has taken it. Null when nothing is stepping.</summary>
@@ -173,6 +304,18 @@ public sealed class DebugSession : IDisposable
     /// such a caller has to guess which process was just launched.
     /// </summary>
     public uint ProcessId => _processId;
+
+    /// <summary>
+    /// The managed overlay: ClrMD attached passively to this process, or null before it has started.
+    ///
+    /// This loop owns the port and does the breaking; the overlay reads the managed world — threads,
+    /// stacks, objects, the IL-to-native map — without a port of its own. It is only meaningful while
+    /// the process is stopped, which is when this loop has it, and it is told when the process has run
+    /// so its cached view can flush. Disposed when the session stops.
+    /// </summary>
+    public ManagedOverlay? Managed => _overlay;
+
+    private ManagedOverlay? _overlay;
 
     /// <summary>
     /// The thread being looked at and stepped. Defaults to whichever one stopped.
@@ -256,6 +399,102 @@ public sealed class DebugSession : IDisposable
 
     private bool Translatable => LoadedBase != 0 && ImageBase != 0 && ImageSize != 0;
 
+    /// <summary>Where a named module landed this run, or zero if it is not loaded.</summary>
+    private ulong BaseOf(string module)
+    {
+        lock (_modules)
+        {
+            foreach (var loaded in _modules.Values)
+            {
+                if (string.Equals(loaded.Name, module, StringComparison.OrdinalIgnoreCase))
+                {
+                    return loaded.Base;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Where a breakpoint is right now, or zero when there is nowhere for it to be yet.
+    ///
+    /// Zero is the whole point of the return: a breakpoint whose module is not loaded has no address,
+    /// and the alternative is what used to happen — the translation handed back the static address
+    /// unchanged, and planting wrote an int3 into whatever occupied that number, which on a relocated
+    /// module is nothing at all.
+    /// </summary>
+    private ulong RuntimeOf(BreakpointAt at)
+    {
+        if (at.Module is null)
+        {
+            return TargetLoaded ? ToRuntime(at.Address) : 0;
+        }
+
+        ulong loaded = BaseOf(at.Module);
+        return loaded == 0 ? 0 : loaded + at.Address;
+    }
+
+    /// <summary>
+    /// Where a patch's bytes go right now, or zero when its module is not loaded.
+    ///
+    /// The same zero-means-nowhere as the breakpoint version, and for the same reason: writing to an
+    /// RVA added to a base that is not there yet puts bytes into whatever occupies that number.
+    /// </summary>
+    private ulong RuntimeOf(PatchAt at)
+    {
+        if (at.Module is null)
+        {
+            return TargetLoaded ? LoadedBase + at.Rva : 0;
+        }
+
+        ulong loaded = BaseOf(at.Module);
+        return loaded == 0 ? 0 : loaded + at.Rva;
+    }
+
+    /// <summary>A patch written the way somebody asked for it.</summary>
+    private static string Where(PatchAt at)
+        => at.Module is null ? $"RVA 0x{at.Rva:X}" : $"{at.Module}+0x{at.Rva:X}";
+
+    /// <summary>The keys, copied, so they can be resolved without holding the table.</summary>
+    private List<BreakpointAt> Keys()
+    {
+        lock (_breakpoints)
+        {
+            return _breakpoints.Keys.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Which breakpoint is at a runtime address, or null for none of them.
+    ///
+    /// A reverse lookup rather than a keyed one, because a runtime address no longer identifies a
+    /// breakpoint on its own — two modules can be at bases that make different breakpoints resolve
+    /// from the same static number. The keys are copied out first: resolving one reads
+    /// <see cref="_modules"/>, and taking that lock inside <see cref="_breakpoints"/> would invert the
+    /// order every other path here uses.
+    /// </summary>
+    private BreakpointAt? Find(ulong runtime)
+    {
+        foreach (var at in Keys())
+        {
+            if (RuntimeOf(at) == runtime)
+            {
+                return at;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>A breakpoint written the way somebody asked for it.</summary>
+    private static string Where(BreakpointAt at)
+        => at.Module is null ? $"0x{at.Address:X}" : $"{at.Module}+0x{at.Address:X}";
+
+    /// <summary>An address written as whichever breakpoint is there, or as a plain listing address.</summary>
+    private string Describe(ulong runtime)
+        => Find(runtime) is { } at ? Where(at) : $"0x{ToStatic(runtime):X}";
+
     public IReadOnlyList<Breakpoint> Breakpoints
     {
         get
@@ -295,7 +534,9 @@ public sealed class DebugSession : IDisposable
         uint imageSize,
         string? arguments = null,
         string? workingDirectory = null,
-        string? module = null)
+        string? module = null,
+        EntryStop entryStop = EntryStop.LoaderBreak,
+        uint entryRva = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
@@ -307,6 +548,8 @@ public sealed class DebugSession : IDisposable
         ImageBase = imageBase;
         ImageSize = imageSize;
         _target = module is { Length: > 0 } ? System.IO.Path.GetFileName(module) : null;
+        _entryStop = entryStop;
+        _entryRva = entryRva;
         var ready = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _loop = new Thread(() => Loop(path, arguments, workingDirectory, ready))
@@ -325,11 +568,16 @@ public sealed class DebugSession : IDisposable
 
     /// <summary>Lets it run on. Does nothing unless it is stopped.</summary>
     /// <summary>Lets it run on, and lets go of anything a step was holding.</summary>
-    public void Continue() => Post(() =>
+    public void Continue()
     {
-        _stepThread = null;
-        ReleaseOthers();
-    });
+        _overlay?.MarkMoved();
+        Post(() =>
+        {
+            _stepThread = null;
+            _managedStep = null;
+            ReleaseOthers();
+        });
+    }
 
     /// <summary>
     /// Stops a running process wherever it happens to be. Returns false unless it was running.
@@ -346,6 +594,7 @@ public sealed class DebugSession : IDisposable
         }
 
         _pausing = true;
+        _overlay?.MarkMoved();
         if (!Native.DebugBreakProcess(_process))
         {
             _pausing = false;
@@ -356,7 +605,11 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>One instruction, then stop again. Into a call, not over it.</summary>
-    public void StepInstruction() => Post(() => Trap());
+    public void StepInstruction()
+    {
+        _overlay?.MarkMoved();
+        Post(() => Trap());
+    }
 
     /// <summary>
     /// One instruction, but over a call rather than into it.
@@ -369,8 +622,11 @@ public sealed class DebugSession : IDisposable
     /// Everything else is an ordinary step. A conditional jump stepped "over" still has to go where
     /// it goes — there is no instruction after it to break on in any useful sense.
     /// </summary>
-    public void StepOver() => Post(() =>
+    public void StepOver()
     {
+        _overlay?.MarkMoved();
+        Post(() =>
+        {
         if (Decode() is not { } instruction || !IsCall(instruction))
         {
             Trap();
@@ -386,20 +642,202 @@ public sealed class DebugSession : IDisposable
         {
             Trap();
         }
-    });
+        });
+    }
 
     /// <summary>
     /// Runs until execution reaches a static address, then stops. The breakpoint is not remembered:
     /// it is a way of getting somewhere, not a place to keep stopping at.
     /// </summary>
-    public void RunTo(ulong staticVa) => Post(() =>
+    public void RunTo(ulong staticVa)
     {
-        ulong runtime = ToRuntime(staticVa);
-        if (Plant(runtime, temporary: true))
+        _overlay?.MarkMoved();
+        Post(() =>
         {
-            _temporary = runtime;
+            ulong runtime = ToRuntime(staticVa);
+            if (Plant(runtime, temporary: true))
+            {
+                _temporary = runtime;
+            }
+        });
+    }
+
+    /// <summary>A managed step in flight: the thread, what to do with calls, and where it started.</summary>
+    private sealed record ManagedStep(
+        uint Thread, IlStepKind Kind, ulong RangeStart, ulong RangeEnd, ulong MethodStart, ulong MethodEnd, int StartIl, string Method);
+
+    private ManagedStep? _managedStep;
+
+    /// <summary>
+    /// Steps by one IL offset, over the native loop and the DAC together.
+    ///
+    /// A managed step is a run of native single-steps that ends when the IL offset changes — the DAC
+    /// says which native range each IL offset occupies, and while the instruction pointer stays in the
+    /// starting range it is still on the same offset. Calls are the only complication: stepped over by
+    /// a one-shot after them (<see cref="IlStepKind.Over"/>), descended into when they are managed and
+    /// the step is <see cref="IlStepKind.Into"/>, and skipped entirely by <see cref="IlStepKind.Out"/>,
+    /// which just runs to the caller's return address. Nothing here talks to ICorDebug; it is the
+    /// overlay's addresses and the loop's int3s.
+    /// </summary>
+    public void StepManaged(IlStepKind kind) => Post(() => BeginManagedStep(kind));
+
+    private void BeginManagedStep(IlStepKind kind)
+    {
+        uint thread = SelectedThreadId;
+        ulong rip = RipOf(thread);
+        if (_overlay?.StepInfoAt(rip) is not { } info)
+        {
+            Report("problem", "a managed step needs a managed frame, and there is none at this stop");
+            return;
         }
-    });
+
+        _managedStep = new ManagedStep(thread, kind, info.RangeStart, info.RangeEnd, info.MethodStart, info.MethodEnd, info.IlOffset, info.Method);
+
+        if (kind == IlStepKind.Out)
+        {
+            // Out is not a walk: it runs to where the method returns, which is the instruction pointer
+            // of the frame above this one, and the DAC hands that over. The one-shot there is what the
+            // step waits on; the whole process runs until it is hit.
+            ulong ret = CallerReturn(thread);
+            if (ret == 0 || !Plant(ret, temporary: true))
+            {
+                _managedStep = null;
+                Report("problem", "there is no caller to step out to");
+                return;
+            }
+
+            _temporary = ret;
+            return;
+        }
+
+        // Into and Over walk the method one instruction at a time, so the others are held for the run,
+        // the way a plain native step holds them — otherwise another thread could stop first and the
+        // step would report from somewhere else entirely.
+        HoldOthers(thread);
+        AdvanceManagedStep(rip);
+    }
+
+    /// <summary>
+    /// Where a managed step goes next after landing at an address: finished, or one more micro-step.
+    /// Returns whether the step is done — true means the caller reports the stop, false means another
+    /// single-step or a step-over-the-call has been issued and nothing should be said yet.
+    /// </summary>
+    private bool AdvanceManagedStep(ulong rip)
+    {
+        if (_managedStep is not { } step)
+        {
+            return true;
+        }
+
+        bool done = step.Kind switch
+        {
+            IlStepKind.Over => rip < step.RangeStart || rip >= step.RangeEnd,
+            IlStepKind.Out => rip < step.MethodStart || rip >= step.MethodEnd,
+            IlStepKind.Into => IntoLanded(step, rip),
+            _ => true,
+        };
+
+        if (done)
+        {
+            _managedStep = null;
+            return true;
+        }
+
+        // Not done. A call is stepped over by a one-shot after it, unless the step is Into and the call
+        // goes to managed code, in which case single-stepping descends into it.
+        if (Decode() is { } instruction && IsCall(instruction))
+        {
+            bool descend = step.Kind == IlStepKind.Into && CallTargetManaged(instruction);
+            if (!descend && Plant(instruction.NextIP, temporary: true))
+            {
+                _temporary = instruction.NextIP;
+                return false;
+            }
+        }
+
+        ArmSingleStep(step.Thread);
+        return false;
+    }
+
+    /// <summary>Whether an Into step has reached a new managed location — a new IL offset, or a callee.</summary>
+    private bool IntoLanded(ManagedStep step, ulong rip)
+    {
+        if (_overlay?.StepInfoAt(rip) is not { } info)
+        {
+            // Native code — a helper the step wandered into. Keep going until it is back in managed code.
+            return false;
+        }
+
+        return info.Method != step.Method || info.IlOffset != step.StartIl;
+    }
+
+    /// <summary>Whether a direct call goes to code the DAC knows as managed, so an Into step descends.</summary>
+    private bool CallTargetManaged(Iced.Intel.Instruction instruction)
+    {
+        if (instruction.FlowControl != Iced.Intel.FlowControl.Call)
+        {
+            // Indirect: the target is not known without reading the register, so it is stepped over.
+            return false;
+        }
+
+        ulong target = instruction.NearBranchTarget;
+        return target != 0 && _overlay?.LocationOf(target) is not null;
+    }
+
+    /// <summary>The return address of the managed frame above a thread's current one, or zero.</summary>
+    private ulong CallerReturn(uint thread)
+    {
+        var walked = _overlay?.Threads().FirstOrDefault(t => t.OsId == thread);
+        return walked is { Frames.Count: >= 2 } ? walked.Frames[1].InstructionPointer : 0;
+    }
+
+    /// <summary>A thread's instruction pointer, or zero when it cannot be read.</summary>
+    private ulong RipOf(uint thread)
+    {
+        using var context = ThreadContext.For(_wow64);
+        var handle = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, thread);
+        if (handle == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return context.Read(handle) ? context.InstructionPointer : 0;
+        }
+        finally
+        {
+            Native.CloseHandle(handle);
+        }
+    }
+
+    /// <summary>Sets the trap flag on a thread so its next instruction faults, and attributes the step to it.</summary>
+    private void ArmSingleStep(uint thread)
+    {
+        _stepThread = thread;
+        _stepWasWaiting = false;
+
+        using var context = ThreadContext.For(_wow64);
+        var handle = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, thread);
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            if (context.Read(handle))
+            {
+                _stepFrom = context.InstructionPointer;
+                context.SetTrapFlag(true);
+                context.Write(handle);
+            }
+        }
+        finally
+        {
+            Native.CloseHandle(handle);
+        }
+    }
 
     /// <summary>The instruction at RIP, or null when it cannot be read or decoded.</summary>
     private Iced.Intel.Instruction? Decode()
@@ -606,29 +1044,44 @@ public sealed class DebugSession : IDisposable
             return "a patch must replace as many bytes as it covers";
         }
 
+        // Which module's RVA this is comes off the patch itself, so a caller naming one needs no other
+        // entry point than the property.
+        var at = new PatchAt(patch.Module, patch.Rva);
         lock (_patches)
         {
-            _patches[patch.Rva] = patch;
+            _patches[at] = patch;
         }
 
-        if (!TargetLoaded || _process == IntPtr.Zero)
+        // Held rather than refused while its module is absent: a patch waits for the load exactly as a
+        // breakpoint does, and goes in the moment that module arrives.
+        if (_process == IntPtr.Zero || RuntimeOf(at) == 0)
         {
             return null;
         }
 
-        return WriteRange(patch.Rva, patch.Bytes);
+        return WriteRange(at, patch.Bytes);
     }
 
     /// <summary>
     /// Takes a held patch out, putting the file's own bytes back if the module is loaded. Returns
     /// null on success, or why it could not be done now — in which case it stays held and applied.
     /// </summary>
-    public string? ClearPatch(uint rva)
+    public string? ClearPatch(uint rva) => Clear(new PatchAt(null, rva));
+
+    /// <summary>Takes out a patch that was set in a named module.</summary>
+    public string? ClearPatch(string module, uint rva)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        return Clear(new PatchAt(System.IO.Path.GetFileName(module), rva));
+    }
+
+    private string? Clear(PatchAt at)
     {
         LivePatch? patch;
         lock (_patches)
         {
-            patch = _patches.TryGetValue(rva, out var found) ? found : null;
+            patch = _patches.TryGetValue(at, out var found) ? found : null;
         }
 
         if (patch is null)
@@ -636,14 +1089,15 @@ public sealed class DebugSession : IDisposable
             return null;
         }
 
-        if (TargetLoaded && _process != IntPtr.Zero && WriteRange(rva, patch.Original) is { } refused)
+        if (_process != IntPtr.Zero && RuntimeOf(at) != 0
+            && WriteRange(at, patch.Original) is { } refused)
         {
             return refused;
         }
 
         lock (_patches)
         {
-            _patches.Remove(rva);
+            _patches.Remove(at);
         }
 
         return null;
@@ -653,14 +1107,20 @@ public sealed class DebugSession : IDisposable
     /// Writes bytes at an RVA in the loaded module, refusing when it is not a moment to. The caller
     /// has already decided what goes there; this decides only whether it is safe to put it there now.
     /// </summary>
-    private string? WriteRange(uint rva, IReadOnlyList<byte> bytes)
+    private string? WriteRange(PatchAt at, IReadOnlyList<byte> bytes)
     {
         if (State == DebugState.Running)
         {
             return "it is running — pause it before changing its bytes";
         }
 
-        ulong start = LoadedBase + rva;
+        ulong start = RuntimeOf(at);
+        if (start == 0)
+        {
+            return $"{at.Module ?? "the module the listing is about"} is not loaded, so there is "
+                   + "nowhere to put those bytes yet";
+        }
+
         ulong end = start + (ulong)bytes.Count;
 
         foreach (var thread in Threads)
@@ -673,15 +1133,18 @@ public sealed class DebugSession : IDisposable
             }
         }
 
-        lock (_breakpoints)
+        foreach (var key in Keys())
         {
-            foreach (var (staticVa, breakpoint) in _breakpoints)
+            Breakpoint? breakpoint;
+            lock (_breakpoints)
             {
-                ulong at = ToRuntime(staticVa);
-                if (breakpoint.Planted && at >= start && at < end)
-                {
-                    return $"a breakpoint at 0x{staticVa:X} is inside those bytes; clear it first";
-                }
+                _breakpoints.TryGetValue(key, out breakpoint);
+            }
+
+            ulong planted = RuntimeOf(key);
+            if (breakpoint is { Planted: true } && planted >= start && planted < end)
+            {
+                return $"a breakpoint at {Where(key)} is inside those bytes; clear it first";
             }
         }
 
@@ -692,7 +1155,7 @@ public sealed class DebugSession : IDisposable
         // about, because the caller is about to believe the program is back to normal.
         if (!WriteBytes(start, bytes))
         {
-            return $"the {bytes.Count} byte(s) at 0x{ToStatic(start):X} could not be written";
+            return $"the {bytes.Count} byte(s) at {Where(at)} could not be written";
         }
 
         return null;
@@ -705,81 +1168,333 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private void WritePatches()
     {
-        List<LivePatch> patches;
+        List<PatchAt> held;
         lock (_patches)
         {
-            patches = _patches.Values.ToList();
+            held = _patches.Keys.ToList();
         }
 
-        foreach (var patch in patches)
+        foreach (var at in held)
         {
+            LivePatch? patch;
+            lock (_patches)
+            {
+                _patches.TryGetValue(at, out patch);
+            }
+
+            // Skipped rather than written wrong when its module is not here. It goes in when that
+            // module loads, which is what WritePatchesNaming is for.
+            ulong start = RuntimeOf(at);
+            if (patch is null || start == 0)
+            {
+                continue;
+            }
+
             // Reported per patch rather than in the aggregate. This runs at the loader break and every
             // time the module loads, with nobody waiting on a return value, so a patch that does not
             // go in has the log as its only way of saying so — and "the program behaved as though it
             // were unpatched" is otherwise a mystery with no evidence attached to it.
-            if (!WriteBytes(LoadedBase + patch.Rva, patch.Bytes))
+            if (!WriteBytes(start, patch.Bytes))
             {
-                // Null means the process's own executable, which is the case whenever the thing being
-                // run is also the thing being read.
-                string where = _target ?? "the image";
-                Report("problem", $"the patch at RVA 0x{patch.Rva:X} could not be written into {where}");
+                Report("problem", $"the patch at {Where(at)} could not be written");
             }
         }
     }
 
-    public bool AddBreakpoint(ulong staticVa)
+    public bool AddBreakpoint(ulong staticVa) => Add(new BreakpointAt(null, staticVa));
+
+    /// <summary>
+    /// Adds a breakpoint at an RVA in a named module, which is how one goes into a module other than
+    /// the one the listing is about.
+    ///
+    /// A name and an RVA rather than an address, for the reason <see cref="BreakpointAt"/> gives: an
+    /// address cannot name a module when modules share a preferred base, and they usually do. This is
+    /// what lets breakpoints sit in three different DLLs of one process at once.
+    /// </summary>
+    public bool AddBreakpoint(string module, uint rva)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        return Add(new BreakpointAt(System.IO.Path.GetFileName(module), rva));
+    }
+
+    /// <summary>
+    /// Sets a breakpoint at a managed method and IL offset — a managed breakpoint over the native loop.
+    ///
+    /// The overlay resolves it to the native address the JIT put that code at, and this plants an
+    /// ordinary native int3 there. That is the whole trick: a managed breakpoint <em>is</em> a native
+    /// breakpoint at an address the DAC found, so it re-arms and fires like any other, and needs
+    /// nothing from ICorDebug. The address is a JIT address, outside every module image, so it goes in
+    /// as a plain runtime address rather than a module and RVA.
+    ///
+    /// Returns null when it went in, or why it could not — a method not yet compiled (it JITs on its
+    /// first call, and there is no address before then), a name that does not resolve, an offset with
+    /// no code. The refusal is deliberate: a managed breakpoint that failed quietly would read as a
+    /// method that was never reached.
+    /// </summary>
+    public string? AddManagedBreakpoint(string type, string method, int ilOffset)
+        => AddManagedBreakpoint(new HeldManaged(type, method, 0, ilOffset, HoldUntilAvailable: false));
+
+    /// <summary>
+    /// The same, but naming the method by its metadata token — which is what the window has when a line
+    /// is clicked. Held until it can be planted rather than refused up front: a token from the opened
+    /// assembly's own metadata is a real method that <em>will</em> load, so a breakpoint on it set before
+    /// the CLR is up, or before its type is loaded, or before it is JITted, is kept and planted the
+    /// moment each of those is true. That is what lets a managed breakpoint be marked in the gutter
+    /// before the run, over the native loop, and go in once its code exists.
+    /// </summary>
+    public string? AddManagedBreakpoint(string type, int methodToken, int ilOffset)
+        => AddManagedBreakpoint(new HeldManaged(type, null, methodToken, ilOffset, HoldUntilAvailable: true));
+
+    private string? AddManagedBreakpoint(HeldManaged held)
+    {
+        if (_overlay is not { } overlay)
+        {
+            return "nothing is running";
+        }
+
+        var resolved = held.Resolve(overlay);
+        if (resolved.Ok)
+        {
+            return AddBreakpoint(resolved.Address)
+                ? null
+                : $"a breakpoint is already set at 0x{resolved.Address:X}";
+        }
+
+        // Held rather than refused. A not-yet-compiled method is planted the moment it has native code,
+        // either when a JIT notification announces it (the deterministic first-call catch) or when
+        // PlantPending next re-resolves it (the fallback, which catches a later call). A token-based
+        // breakpoint is also held while the CLR is not up yet or its type has not loaded, since a token
+        // from the opened assembly is a real method that will arrive — a name-based one is not, because
+        // a name that does not resolve is as likely a typo as a thing not loaded yet.
+        bool holdable = resolved.NotCompiled || (held.HoldUntilAvailable && !resolved.Ok);
+        if (holdable)
+        {
+            // Carry the method token if resolution found it — a name-named breakpoint arrives without one,
+            // and the prestub catch needs it to tell whose JIT a hit is for.
+            if (held.Token == 0 && resolved.MethodToken != 0)
+            {
+                held = held with { Token = resolved.MethodToken };
+            }
+
+            lock (_pendingManaged)
+            {
+                if (!_pendingManaged.Contains(held))
+                {
+                    _pendingManaged.Add(held);
+                }
+            }
+
+            // Try to catch the first call at the prestub. When the PDB resolves this is exact; when it
+            // does not, the held breakpoint is planted on a later call instead — either way it is held.
+            EnablePrestubCatch();
+
+            return resolved.NotCompiled
+                ? $"{held.Label} is not compiled yet; held and planted on its first call once it JITs"
+                : $"{held.Label} is held; it is planted once the CLR is up and its code exists";
+        }
+
+        return resolved.Problem ?? "the managed breakpoint could not be resolved";
+    }
+
+    /// <summary>
+    /// A managed breakpoint waiting to be planted: it is named by type and either a method name or a
+    /// metadata token, plus the IL offset. <see cref="HoldUntilAvailable"/> is set for a token-named
+    /// one, which is kept through "no CLR yet" and "type not loaded yet" as well as "not compiled yet",
+    /// because a token from the opened assembly is a real method that will turn up.
+    /// </summary>
+    private sealed record HeldManaged(string Type, string? Method, int Token, int IlOffset, bool HoldUntilAvailable)
+    {
+        public OverlayResolution Resolve(ManagedOverlay overlay)
+            => Method is not null ? overlay.Resolve(Type, Method, IlOffset) : overlay.Resolve(Type, Token, IlOffset);
+
+        public string Label => Method ?? $"{Type} 0x{Token:X8}";
+    }
+
+    private readonly List<HeldManaged> _pendingManaged = new();
+
+    private const uint ClrDataNotifyException = 0x04242420;
+
+    /// <summary>The first parameter of every CLR DAC notification — a magic marker, so a stray exception
+    /// with the same code is not mistaken for one.</summary>
+    private const ulong ClrNotifyMagic = 0x31415927;
+
+    /// <summary>
+    /// Plants every held managed breakpoint whose method has since been compiled, and returns how many
+    /// went in. The fallback to a JIT notification: a caller can poll this, and each pending breakpoint
+    /// is planted the first time its method has native code — which catches a later call even when JIT
+    /// notifications are not enabled.
+    /// </summary>
+    public int PlantPending()
+    {
+        if (_overlay is not { } overlay)
+        {
+            return 0;
+        }
+
+        List<HeldManaged> waiting;
+        lock (_pendingManaged)
+        {
+            waiting = _pendingManaged.ToList();
+        }
+
+        int planted = 0;
+        foreach (var held in waiting)
+        {
+            var resolved = held.Resolve(overlay);
+            if (resolved.Ok && AddBreakpoint(resolved.Address))
+            {
+                planted++;
+                lock (_pendingManaged)
+                {
+                    _pendingManaged.Remove(held);
+                }
+
+                Report("module", $"{held.Label} compiled; its held breakpoint is planted at 0x{ToStatic(resolved.Address):X}");
+            }
+        }
+
+        return planted;
+    }
+
+    /// <summary>
+    /// A CLR DAC notification arrived — a method was jitted, or a module loaded. When it is a JIT
+    /// notification, this is the deterministic moment a cold method first has native code, so every
+    /// held breakpoint whose method is now compiled is planted before the call that caused the JIT
+    /// continues. Runs on the loop thread while the process is stopped on the notification.
+    /// </summary>
+    private void OnClrNotification(Native.DEBUG_EVENT e)
+    {
+        // Only a real notification, told by its magic marker; and only a JIT one, which carries three
+        // parameters (magic, MethodDesc, native code) as against the two of a module notification.
+        if (e.NumberParameters < 3 || e.ExceptionInformation(0) != ClrNotifyMagic)
+        {
+            return;
+        }
+
+        // The MethodDesc and its fresh native code are in the notification, but the simplest and most
+        // robust use of it is as the trigger to re-resolve every held breakpoint: the method is
+        // compiled as of this instant, so PlantPending finds and plants it.
+        PlantPending();
+    }
+
+    /// <summary>
+    /// Clears a managed breakpoint set by <see cref="AddManagedBreakpoint"/>. Resolution is stable
+    /// while the method stays compiled — the same method and offset give the same address — so
+    /// re-resolving finds exactly what was planted.
+    /// </summary>
+    public string? RemoveManagedBreakpoint(string type, string method, int ilOffset)
+    {
+        if (_overlay is not { } overlay)
+        {
+            return "nothing is running";
+        }
+
+        var resolved = overlay.Resolve(type, method, ilOffset);
+        if (!resolved.Ok)
+        {
+            return resolved.Problem ?? "the managed breakpoint could not be resolved";
+        }
+
+        return RemoveBreakpoint(resolved.Address) ? null : "there was no such breakpoint";
+    }
+
+    /// <summary>
+    /// Clears a managed breakpoint set by the token-named <see cref="AddManagedBreakpoint(string,int,int)"/>.
+    /// Drops it from the held list whether or not it had been planted yet, so a mark cleared before its
+    /// code existed does not quietly plant itself later.
+    /// </summary>
+    public string? RemoveManagedBreakpoint(string type, int methodToken, int ilOffset)
+    {
+        var held = new HeldManaged(type, null, methodToken, ilOffset, HoldUntilAvailable: true);
+        bool wasHeld;
+        lock (_pendingManaged)
+        {
+            wasHeld = _pendingManaged.Remove(held);
+        }
+
+        if (_overlay is not { } overlay)
+        {
+            return wasHeld ? null : "nothing is running";
+        }
+
+        var resolved = overlay.Resolve(type, methodToken, ilOffset);
+        if (resolved.Ok && RemoveBreakpoint(resolved.Address))
+        {
+            return null;
+        }
+
+        // Held but never planted, or planted and now gone: either way the mark is cleared. Only a
+        // token that cannot resolve and was not held is a genuine "there was nothing there".
+        return wasHeld || resolved.NotCompiled ? null : resolved.Problem ?? "there was no such breakpoint";
+    }
+
+    private bool Add(BreakpointAt at)
     {
         lock (_breakpoints)
         {
-            if (_breakpoints.ContainsKey(staticVa))
+            if (_breakpoints.ContainsKey(at))
             {
                 return false;
             }
 
-            _breakpoints[staticVa] = new Breakpoint(staticVa, 0);
+            _breakpoints[at] = new Breakpoint(at.Address, 0) { Module = at.Module };
         }
 
-        // Only if the module is actually here. On a DLL that its host has not loaded yet there is
-        // no address to put it at; it goes in when the module arrives.
+        // Only if its module is actually here. On a DLL that its host has not loaded yet there is no
+        // address to put it at; it goes in when the module arrives. RuntimeOf answers zero for that,
+        // which is what PlantOne refuses on — so this no longer has to ask about the target module
+        // specifically, and a breakpoint in any loaded module goes in at once.
         //
         // Written straight in rather than posted. Post means "do this, then continue", so setting a
         // breakpoint while stopped let the program run on; and while it ran, one set did nothing
         // until something else happened to plant it. Writing a byte needs the process handle, not
         // the debug loop's thread.
-        if (TargetLoaded && _process != IntPtr.Zero)
+        if (_process != IntPtr.Zero)
         {
-            PlantStatic(staticVa);
+            PlantOne(at);
         }
 
         return true;
     }
 
-    public bool RemoveBreakpoint(ulong staticVa)
+    public bool RemoveBreakpoint(ulong staticVa) => Remove(new BreakpointAt(null, staticVa));
+
+    /// <summary>Removes a breakpoint named the way <see cref="AddBreakpoint(string, uint)"/> set it.</summary>
+    public bool RemoveBreakpoint(string module, uint rva)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(module);
+
+        return Remove(new BreakpointAt(System.IO.Path.GetFileName(module), rva));
+    }
+
+    private bool Remove(BreakpointAt at)
     {
         Breakpoint? existing;
         lock (_breakpoints)
         {
-            if (!_breakpoints.TryGetValue(staticVa, out existing))
+            if (!_breakpoints.TryGetValue(at, out existing))
             {
                 return false;
             }
 
-            _breakpoints.Remove(staticVa);
+            _breakpoints.Remove(at);
         }
 
         // The byte goes back whenever there is one to put back, running or not, and without resuming
         // anything. Posted, removing a breakpoint while stopped let the program run; removed while it
         // ran, it only left the table - the int3 stayed in the code with nothing left that knew what
         // it had replaced.
-        if (existing.Planted && _process != IntPtr.Zero
-            && !WriteByte(ToRuntime(staticVa), existing.Original))
+        ulong runtime = RuntimeOf(at);
+        if (existing.Planted && _process != IntPtr.Zero && runtime != 0
+            && !WriteByte(runtime, existing.Original))
         {
             // Said, because this is exactly the failure the paragraph above is about. The table no
             // longer holds the breakpoint and the int3 is still in the code, so the program goes on
             // stopping at something that nothing can now explain, find or remove. The removal itself
             // still stands — it was asked for — but it does not get to be silent about this.
             Report("problem",
-                $"the breakpoint at 0x{staticVa:X} was removed, but its original byte could not be put "
+                $"the breakpoint at {Where(at)} was removed, but its original byte could not be put "
                 + "back — the int3 is still in the code");
         }
 
@@ -852,6 +1567,24 @@ public sealed class DebugSession : IDisposable
     public void Stop()
     {
         _stopping.Cancel();
+
+        _managedStep = null;
+        _prestubVa = 0;
+        _dancing = null;
+        _danceReturn = 0;
+        _danceRsp = 0;
+        _temporary = null;
+        _temporaryOriginal = 0;
+        _temporaryPlanted = false;
+        lock (_pendingManaged)
+        {
+            _pendingManaged.Clear();
+        }
+
+        // The DAC's read handle on the process goes before the process does. Disposed here rather than
+        // only in Dispose so a session stopped and left around does not hold the debuggee's handle open.
+        _overlay?.Dispose();
+        _overlay = null;
 
         // Ended first, and only then let go. Resuming the held threads of a live process let them
         // run, and one that was due to trap reported a step after Stop had been pressed.
@@ -943,6 +1676,7 @@ public sealed class DebugSession : IDisposable
 
         _process = info.hProcess;
         _processId = info.dwProcessId;
+        _overlay = new ManagedOverlay(_processId, () => State == DebugState.Running);
 
         // Asked of the running process rather than taken from the file being read: under a host the
         // two are different programs, and it is the host's width that decides how a thread is read.
@@ -981,6 +1715,7 @@ public sealed class DebugSession : IDisposable
             {
                 case Native.CREATE_PROCESS_DEBUG_EVENT:
                     _mainThread = e.dwThreadId;
+                    _processEntry = e.CreateProcessStartAddress;
                     Remember(e.dwThreadId, e.CreateProcessStartAddress);
                     OnModuleLoaded(e.CreateProcessFile, e.CreateProcessImageBase, main: true);
                     break;
@@ -1155,6 +1890,31 @@ public sealed class DebugSession : IDisposable
             Report("started", $"running {name} {where}");
         }
 
+        // The runtime just mapped, and a cold managed breakpoint may already be waiting from before the
+        // run: this is the moment its prestub can be found and armed, ahead of the method it is for.
+        if (module.Name.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase)
+            || module.Name.Equals("clr.dll", StringComparison.OrdinalIgnoreCase))
+        {
+            EnablePrestubCatch(atModuleLoad: true);
+        }
+
+        // Any module arriving is the moment breakpoints naming it can go in, whether or not it is the
+        // one the listing is about. That is the whole of debugging several modules at once, and it
+        // happens here rather than at a stop because the loader announces the mapping before it runs
+        // the module's own code — so a breakpoint planted now is already standing in its entry point.
+        if (module.Name.Length > 0)
+        {
+            // Patches before breakpoints, so a breakpoint landing on a patched byte records the
+            // patched byte and restores that rather than the file's.
+            WritePatchesNaming(module.Name);
+
+            if (PlantNaming(module.Name) is var named and > 0)
+            {
+                Report("module", $"{name} loaded {where}; "
+                                 + $"{named} breakpoint{(named == 1 ? string.Empty : "s")} in it armed");
+            }
+        }
+
         // The main image when nothing else was named, or whichever module was: under a host, the
         // process's own executable is not the thing being read.
         bool wanted = _target is null ? main : string.Equals(module.Name, _target, StringComparison.OrdinalIgnoreCase);
@@ -1174,6 +1934,15 @@ public sealed class DebugSession : IDisposable
         }
 
         PlantAll();
+
+        // Module-entry break: the module being read has just landed under its host and the loader has
+        // not yet called into it, so a one-shot planted now stands in its entry point before its own
+        // code runs. This is the mixed-mode case the whole thing was for — stopping in a native DLL a
+        // managed process loads, at the first instruction that DLL runs.
+        if (_entryStop == EntryStop.ModuleEntry && _temporary is null)
+        {
+            ArmOneShot(EntryRuntime, "the module entry point");
+        }
 
         int waiting;
         lock (_breakpoints)
@@ -1197,16 +1966,36 @@ public sealed class DebugSession : IDisposable
             _modules.Remove(loadBase, out gone);
         }
 
+        // Breakpoints that named this module lose their place whether or not it was the target: its
+        // mapping is gone, and the bytes they saved belong to it.
+        if (gone?.Name is { Length: > 0 } left)
+        {
+            Unplant(left);
+        }
+
         if (loadBase != LoadedBase || LoadedBase == 0)
         {
             return;
         }
 
         LoadedBase = 0;
-        Unplant();
+        Unplant(null);
         Report("module", $"{(gone?.Name is { Length: > 0 } name ? name : "the target module")} was unloaded; "
                          + "its breakpoints go back in if it is loaded again");
     }
+
+    /// <summary>
+    /// An exception the kernel raises only for a watching debugger, that the program has no handler for
+    /// and never sees on its own — a stale handle closed, a thread named, a debug string printed. These
+    /// are continued as handled rather than passed back unhandled, so a benign check does not escalate
+    /// to a second chance and stop a process that would have run fine unattended. A real fault
+    /// (an access violation, an unhandled managed exception) is not among them and still stops.
+    /// </summary>
+    private static bool IsBenignDebuggerException(uint code) => code is
+        Native.EXCEPTION_INVALID_HANDLE
+        or Native.DBG_PRINTEXCEPTION_C
+        or Native.DBG_PRINTEXCEPTION_WIDE_C
+        or Native.MS_VC_THREAD_NAME_EXCEPTION;
 
     private (bool Stop, uint Status) OnException(Native.DEBUG_EVENT e)
     {
@@ -1230,15 +2019,7 @@ public sealed class DebugSession : IDisposable
                 {
                     _sawInitialBreak = true;
                     PlantAll();
-                    CurrentAddress = e.ExceptionAddress;
-                    // Reportable, not ToStatic. The loader break is in ntdll — never in the image
-                    // being read — and ToStatic hands back an address it cannot translate unchanged,
-                    // so this reported a runtime address in another module as though it were a place
-                    // in the listing. The window then opened a document for it: a fabricated
-                    // "function" of nought blocks and nought instructions, which is what the analyst
-                    // was left staring at, wondering why the marker never moved.
-                    Report("stopped", "stopped at the loader break, before the program's own code", Reportable(e.ExceptionAddress));
-                    return (true, Native.DBG_CONTINUE);
+                    return AtLoaderBreak(e.ExceptionAddress);
                 }
 
                 // The 32-bit loader's own break, which arrives after the 64-bit one on a WOW64
@@ -1279,11 +2060,7 @@ public sealed class DebugSession : IDisposable
                     // Only if it is still wanted. Removed while its thread was stepping off it, it came
                     // back anyway: an int3 nothing knew about, which the next pass through reported as
                     // not ours, and which had already cost the instruction its first byte.
-                    bool wanted;
-                    lock (_breakpoints)
-                    {
-                        wanted = _breakpoints.ContainsKey(ToStatic(armed.Address));
-                    }
+                    bool wanted = Find(armed.Address) is not null;
 
                     if (wanted)
                     {
@@ -1300,6 +2077,13 @@ public sealed class DebugSession : IDisposable
 
                 // One instruction has run on the thread that was asked to step, so this is where it stops.
                 _stepThread = null;
+
+                // A managed step is many of these — single-steps that go by unmentioned until the IL
+                // offset changes. Only the one that lands on the new offset falls through to report.
+                if (_managedStep is { } stepping && stepping.Thread == _threadId && !AdvanceManagedStep(e.ExceptionAddress))
+                {
+                    return (false, Native.DBG_CONTINUE);
+                }
 
                 // The step is over, so whatever was held for it goes free. Before the stop is
                 // reported, because what is reported next is a session that can be continued.
@@ -1324,6 +2108,41 @@ public sealed class DebugSession : IDisposable
                 // Continue greyed out and no way to do anything but stop. An access violation is
                 // the single most interesting place a debugger ever pauses, and it was the one
                 // place the panel could not tell you it had.
+                // A CLR DAC notification (a method was jitted, a module loaded). It carries a magic
+                // first parameter and, for a JIT notification, the MethodDesc and the fresh native code
+                // — the deterministic way to catch a method that had no address until it compiled. It is
+                // first-chance and belongs to the runtime, so it is taken silently after being acted on.
+                if (e.ExceptionCode == ClrDataNotifyException && e.FirstChance)
+                {
+                    OnClrNotification(e);
+                    return (false, Native.DBG_CONTINUE);
+                }
+
+                // Exceptions the OS raises only because a debugger is attached — a stale handle closed,
+                // a thread named, a debug string printed. The program has no handler for them and never
+                // meets them unattended, so passing them back unhandled escalates a benign check to a
+                // second chance and stops, or kills, a process that would have run fine. That is what
+                // halted this .NET target at a STATUS_INVALID_HANDLE moments after launch, its runtime
+                // closing handles as runtimes do. They are continued as handled — what a debugger is
+                // meant to do — so the program runs on. A genuine unhandled fault is not in this set and
+                // still stops.
+                if (e.FirstChance && IsBenignDebuggerException(e.ExceptionCode))
+                {
+                    return (false, Native.DBG_CONTINUE);
+                }
+
+                // A managed or C++ throw the runtime catches itself — 0xE0434352 on .NET Framework,
+                // 0xE06D7363 on CoreCLR and in C++. It has to go back unhandled so that handler runs,
+                // but it is ordinary control flow a runtime does thousands of times, so it is not
+                // reported: a log line each buries module loads, breakpoints and the actual stop under a
+                // runtime's internal exception traffic — which is what made a .NET target look like a
+                // fault storm rather than a running program. Only an *unhandled* one (below) is a real
+                // crash and gets reported.
+                if (e.FirstChance && e.ExceptionCode is Native.EXCEPTION_CPP_EH or Native.EXCEPTION_CLR_MANAGED)
+                {
+                    return (false, Native.DBG_EXCEPTION_NOT_HANDLED);
+                }
+
                 bool fatal = !e.FirstChance;
                 if (fatal)
                 {
@@ -1340,52 +2159,443 @@ public sealed class DebugSession : IDisposable
         }
     }
 
-    /// <summary>Whether the int3 at a runtime address is one of ours, planted or one-shot.</summary>
-    private bool Ours(ulong runtime)
+    /// <summary>
+    /// What to do once the loader break has been taken and breakpoints are in: report it, let go of
+    /// it, or run on silently to a one-shot at the program's — or the opened module's — entry point.
+    ///
+    /// The one that runs on returns "do not stop", so the loader break is never reported and the next
+    /// stop the panel sees is the entry it asked for. A module-entry under a host has nothing to arm
+    /// yet — its module has not loaded — so it runs on and <see cref="OnModuleLoaded"/> arms the
+    /// one-shot when the module lands. Anything that cannot be armed falls back to the loader break
+    /// rather than running to an exit with no stop at all, which would read as the setting doing
+    /// nothing.
+    /// </summary>
+    private (bool Stop, uint Status) AtLoaderBreak(ulong loaderBreakAddress)
     {
-        if (_temporary == runtime)
+        switch (_entryStop)
         {
+            case EntryStop.DontBreak:
+                return (false, Native.DBG_CONTINUE);
+
+            case EntryStop.ProcessEntry when ArmOneShot(_processEntry, "the entry point"):
+                return (false, Native.DBG_CONTINUE);
+
+            // The main image is the module being read (no host), and it is already mapped, so its
+            // entry can be armed now. Under a host the target loads later; leave it to OnModuleLoaded.
+            case EntryStop.ModuleEntry when _target is null && ArmOneShot(EntryRuntime, "the module entry point"):
+                return (false, Native.DBG_CONTINUE);
+
+            case EntryStop.ModuleEntry when _target is not null:
+                return (false, Native.DBG_CONTINUE);
+        }
+
+        // LoaderBreak, or an entry one-shot that could not be planted.
+        // Reportable, not ToStatic. The loader break is in ntdll — never in the image being read —
+        // and ToStatic hands back an address it cannot translate unchanged, so this once reported a
+        // runtime address in another module as though it were a place in the listing.
+        CurrentAddress = loaderBreakAddress;
+        Report("stopped", "stopped at the loader break, before the program's own code", Reportable(loaderBreakAddress));
+        return (true, Native.DBG_CONTINUE);
+    }
+
+    /// <summary>The opened module's entry point as a runtime address, or zero when it cannot be formed.</summary>
+    private ulong EntryRuntime => _entryRva != 0 && LoadedBase != 0 ? LoadedBase + _entryRva : 0;
+
+    /// <summary>
+    /// Plants a one-shot at a runtime address and records it, the way run-to-cursor does. Returns
+    /// whether it went in — a caller falling back to the loader break needs to know it did not.
+    /// </summary>
+    private bool ArmOneShot(ulong runtime, string what)
+    {
+        if (runtime == 0)
+        {
+            return false;
+        }
+
+        if (Plant(runtime, temporary: true))
+        {
+            _temporary = runtime;
             return true;
         }
 
-        lock (_breakpoints)
+        Report("problem", $"could not set a one-shot at {what}; stopping at the loader break instead");
+        return false;
+    }
+
+    /// <summary>Whether the int3 at a runtime address is one of ours, planted or one-shot.</summary>
+    private bool Ours(ulong runtime) => _temporary == runtime || Find(runtime) is not null;
+
+    /// <summary>An int3 we planted: put the byte back, wind RIP back onto it, and stop.</summary>
+    /// <summary>The runtime module — coreclr on .NET, clr on Framework — once it has loaded, or null.</summary>
+    private LoadedModule? RuntimeModule()
+    {
+        lock (_modules)
         {
-            return _breakpoints.ContainsKey(ToStatic(runtime));
+            return _modules.Values.FirstOrDefault(m =>
+                m.Name.Equals("coreclr.dll", StringComparison.OrdinalIgnoreCase) ||
+                m.Name.Equals("clr.dll", StringComparison.OrdinalIgnoreCase));
         }
     }
 
-    /// <summary>An int3 we planted: put the byte back, wind RIP back onto it, and stop.</summary>
+    private HeldManaged? FindPending(string type, int token)
+    {
+        lock (_pendingManaged)
+        {
+            return _pendingManaged.FirstOrDefault(h => h.Token == token && string.Equals(h.Type, type, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// One register of a thread, read straight from its context. Unlike <see cref="RegistersOf"/> this
+    /// does not wait for the session to be marked stopped: the prestub dance reads rdx and rsp from
+    /// inside the event handler, before a stop is reported, and every thread is already suspended there.
+    /// </summary>
+    private ulong RegisterValue(uint threadId, string name)
+    {
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return 0;
+        }
+
+        try
+        {
+            using var context = ThreadContext.For(_wow64);
+            if (!context.Read(thread))
+            {
+                return 0;
+            }
+
+            foreach (var (registerName, value) in context.General())
+            {
+                if (registerName == name)
+                {
+                    return value;
+                }
+            }
+
+            return 0;
+        }
+        finally
+        {
+            Native.CloseHandle(thread);
+        }
+    }
+
+    /// <summary>
+    /// Resolves PreStubWorker from the runtime's PDB — fetched once from the symbol server, then cached —
+    /// and arms an int3 on it, so a cold managed breakpoint is caught on its <em>first</em> call rather
+    /// than a later one. Started when a cold breakpoint is first held; the resolve runs off the loop, and
+    /// arming follows once the address is known and the runtime is loaded. Silently a no-op when no PDB
+    /// can be had — the held breakpoint is then planted by <see cref="PlantPending"/> on a later call.
+    /// </summary>
+    /// <param name="atModuleLoad">
+    /// True when called from the runtime's own load event, where the whole target is frozen and no
+    /// managed method has run yet. There the prestub is resolved on the loop thread from a PDB already on
+    /// disk and armed before the process is let go — the only way to catch a once-called startup method
+    /// (App.OnStartup) on its very first call, because the alternative, a background resolve, takes ~0.9 s
+    /// to load the runtime PDB and loses the race to a method that JITs sooner. A cold cache (no PDB on
+    /// disk) falls through to the background fetch, which warms the cache for the next run.
+    /// </param>
+    private void EnablePrestubCatch(bool atModuleLoad = false)
+    {
+        if (_prestubRva != 0)
+        {
+            ArmPrestubIfPending();
+            return;
+        }
+
+        if (_prestubResolving || RuntimeModule() is not { } runtime)
+        {
+            return;
+        }
+
+        bool coldWaiting;
+        lock (_pendingManaged)
+        {
+            coldWaiting = _pendingManaged.Count > 0;
+        }
+
+        if (atModuleLoad && coldWaiting)
+        {
+            var local = CoreClrSymbols.ResolvePrestub(runtime.Path, allowFetch: false);
+            if (local.Ok)
+            {
+                _prestubRegister = local.MethodDescRegister;
+                _prestubRva = local.Rva;
+                ArmPrestubIfPending(announce: true);
+                return;
+            }
+        }
+
+        _prestubResolving = true;
+        string path = runtime.Path;
+        Task.Run(() =>
+        {
+            var info = CoreClrSymbols.ResolvePrestub(path);
+            _prestubRegister = info.MethodDescRegister.Length > 0 ? info.MethodDescRegister : "rdx";
+            _prestubRva = info.Rva;   // volatile write publishes the register set just above it
+            _prestubResolving = false;
+            if (info.Ok)
+            {
+                ArmPrestubIfPending(announce: true);
+            }
+        });
+    }
+
+    /// <summary>Plants the PreStubWorker int3 once it is resolved, the runtime is loaded and a cold
+    /// breakpoint is still waiting — and not already armed, nor mid-dance.</summary>
+    private void ArmPrestubIfPending(bool announce = false)
+    {
+        if (_prestubVa != 0 || _dancing is not null || _prestubRva == 0)
+        {
+            return;
+        }
+
+        int waiting;
+        lock (_pendingManaged)
+        {
+            waiting = _pendingManaged.Count;
+        }
+
+        if (waiting == 0)
+        {
+            return;
+        }
+
+        if (RuntimeModule() is not { } runtime)
+        {
+            return;
+        }
+
+        ulong va = runtime.Base + _prestubRva;
+        _prestubVa = va;
+        if (!AddBreakpoint(va))
+        {
+            _prestubVa = 0;
+            return;
+        }
+
+        // Only the first arm, from a resolve, announces itself — not the silent re-arms a dance does
+        // while it steps off the worker. This is the analyst's sign the first-call catch is live before
+        // any breakpoint stops, so a cold startup method not stopping is a real miss, not "not armed yet".
+        if (announce)
+        {
+            string these = waiting == 1 ? "a cold managed breakpoint" : $"{waiting} cold managed breakpoints";
+            Report("module", $"first-call catch armed for {these} — its method will stop on its first call");
+        }
+    }
+
+    private void DisarmPrestub()
+    {
+        if (_prestubVa == 0)
+        {
+            return;
+        }
+
+        ulong va = _prestubVa;
+        _prestubVa = 0;
+        RemoveBreakpoint(va);
+    }
+
+    /// <summary>
+    /// A hit on the JIT's shared prestub worker. Its second argument — rdx on x64 — is the MethodDesc
+    /// being compiled. When that is a method a first-call breakpoint is waiting for, the worker is
+    /// disarmed for the duration and a one-shot is set at the prestub's return, where the method will
+    /// have native code; otherwise the worker re-arms and the run goes on. Never a reported stop.
+    /// </summary>
+    private bool PrestubHit(ulong address)
+    {
+        // Lift our int3 off the worker's own first byte, wind RIP back onto it, and step off so it can be
+        // re-planted for the next JIT — the mechanics any breakpoint uses.
+        byte original = 0;
+        if (Find(address) is { } key)
+        {
+            lock (_breakpoints)
+            {
+                if (_breakpoints.TryGetValue(key, out var bp))
+                {
+                    original = bp.Original;
+                }
+            }
+        }
+
+        WriteByte(address, original);
+        Rewind(address, thenStep: true);
+        _reArm = (address, _threadId);
+        _stepThread = null;
+
+        ulong methodDesc = RegisterValue(_threadId, _prestubRegister);
+        HeldManaged? target = _overlay?.MethodByHandle(methodDesc) is { } who ? FindPending(who.Type, who.Token) : null;
+        if (target is null)
+        {
+            // Not one whose first call is wanted: the worker re-arms (via _reArm) and the run continues.
+            return false;
+        }
+
+        // Ours. Stop watching the worker while this method compiles — its JIT can trigger others, and only
+        // this one is being caught — and plant a breakpoint at the prestub's return (the address on the
+        // top of the stack), recording the stack pointer so a nested JIT's return through the same shared
+        // address is told apart from this method's own.
+        _reArm = null;
+        DisarmPrestub();
+
+        ulong rsp = RegisterValue(_threadId, "rsp");
+        ulong ret = rsp != 0 && ReadMemory(rsp, 8) is { Length: 8 } stack ? BitConverter.ToUInt64(stack) : 0;
+        if (ret != 0 && AddBreakpoint(ret))
+        {
+            _danceReturn = ret;
+            _danceRsp = rsp;
+            _dancing = target;
+        }
+        else
+        {
+            // Could not set the return breakpoint; leave the method to the later-call fallback and re-arm.
+            ArmPrestubIfPending();
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// A hit on the prestub's return. When the stack has unwound back to where the method's own prestub
+    /// was called — not a deeper nested JIT returning through the same shared address — the method has
+    /// been compiled, so the breakpoint the analyst asked for is planted now, in time for this first call
+    /// to reach it. Never a reported stop of its own; the reported stop is that planted breakpoint, an
+    /// instant later.
+    /// </summary>
+    private bool DanceReturnHit(ulong address)
+    {
+        // Lift the int3, wind RIP back onto it, and step off — the mechanics any breakpoint uses.
+        byte original = 0;
+        if (Find(address) is { } key)
+        {
+            lock (_breakpoints)
+            {
+                if (_breakpoints.TryGetValue(key, out var bp))
+                {
+                    original = bp.Original;
+                }
+            }
+        }
+
+        WriteByte(address, original);
+        Rewind(address, thenStep: true);
+        _reArm = (address, _threadId);
+        _stepThread = null;
+
+        // A nested JIT returning through the same shared address: its stack is still deeper than the
+        // method we are catching (whose prestub was called at _danceRsp). Leave the return breakpoint
+        // armed — via _reArm — and wait for the return that unwinds back to our frame.
+        if (RegisterValue(_threadId, "rsp") <= _danceRsp)
+        {
+            return false;
+        }
+
+        // Our method's return. Take the return breakpoint out and plant the real one.
+        _reArm = null;
+        ulong danceReturn = _danceReturn;
+        _danceReturn = 0;
+        RemoveBreakpoint(danceReturn);
+
+        var cold = _dancing;
+        _dancing = null;
+
+        if (cold is not null && _overlay is { } overlay)
+        {
+            // Where to plant. The method was just compiled inside the prestub, and the DAC may not have
+            // caught up: on CoreCLR it has, so the resolved address lands the breakpoint exactly, at an
+            // interior offset too; on .NET Framework the worker returns before the MethodDesc shows any
+            // native code, so the DAC still reads it cold. But the worker's own return value — the
+            // method's native entry — is in rax on both, so that is the fallback: it breaks at the entry
+            // rather than an interior offset, which for a first-call catch (usually the method's start) is
+            // the same place. Flush first so CoreCLR takes the exact path rather than this one.
+            overlay.MarkMoved();
+            var resolved = cold.Resolve(overlay);
+            ulong at = resolved.Ok ? resolved.Address : RegisterValue(_threadId, "rax");
+            if (at != 0 && AddBreakpoint(at))
+            {
+                lock (_pendingManaged)
+                {
+                    _pendingManaged.Remove(cold);
+                }
+
+                Report("module", $"{cold.Label} caught at its first call; its breakpoint is planted at 0x{ToStatic(at):X}");
+            }
+        }
+
+        // Keep watching the worker if other cold breakpoints are still waiting.
+        ArmPrestubIfPending();
+        return false;
+    }
+
     private bool HitBreakpoint(ulong address)
     {
+        // The first-call machinery, before anything else and never reported: the JIT's shared prestub
+        // worker (armed while a cold managed breakpoint waits) and the return one-shot of a dance in
+        // progress. Each does its mechanical part and continues; the stop the analyst sees is the managed
+        // breakpoint that gets planted at the end of it.
+        if (_danceReturn != 0 && address == _danceReturn)
+        {
+            return DanceReturnHit(address);
+        }
+
+        if (_prestubVa != 0 && address == _prestubVa)
+        {
+            return PrestubHit(address);
+        }
+
         // A one-shot first: step-over and run-to-cursor put it there to get here, and it goes away
         // whether or not a real breakpoint happens to be at the same address.
         if (_temporary == address)
         {
+            bool oursToLift = _temporaryPlanted;
             _temporary = null;
+            _temporaryPlanted = false;
 
-            // Nothing tracks this byte any more — the one-shot has just been forgotten — so a restore
-            // that fails leaves an int3 in the program for the rest of the run, with no record left of
-            // what it replaced and nothing that could put it back.
-            if (!WriteByte(address, _temporaryOriginal))
+            // A one-shot that rode an int3 already here does not own the byte under it — a breakpoint
+            // the analyst set, or the program's own. It restores nothing; control falls through to the
+            // breakpoint path below, which knows the true byte and re-arms it. The one-shot's whole job,
+            // stopping here, the same int3 already did.
+            if (oursToLift)
             {
-                Report("problem", $"the one-shot breakpoint at 0x{ToStatic(address):X} could not be taken back out");
+                // Nothing tracks this byte any more — the one-shot has just been forgotten — so a
+                // restore that fails leaves an int3 in the program for the rest of the run, with no
+                // record left of what it replaced and nothing that could put it back.
+                if (!WriteByte(address, _temporaryOriginal))
+                {
+                    Report("problem", $"the one-shot breakpoint at 0x{ToStatic(address):X} could not be taken back out");
+                }
+
+                Rewind(address, thenStep: false);
+
+                // A managed step's one-shot — planted after a call to step over it, or at the return for
+                // a step out. It goes back into the step rather than reporting a stop of its own: the
+                // step is over only when the IL offset has changed or the method has returned.
+                if (_managedStep is { } stepping && stepping.Thread == _threadId && !AdvanceManagedStep(address))
+                {
+                    return false;
+                }
+
+                // Not re-armed — that is the whole difference from a breakpoint someone set.
+                CurrentAddress = address;
+                Report("stopped", $"stopped at 0x{ToStatic(address):X}", Reportable(address));
+                return true;
             }
-
-            Rewind(address, thenStep: false);
-
-            // Not re-armed — that is the whole difference from a breakpoint someone set.
-            CurrentAddress = address;
-            Report("stopped", $"stopped at 0x{ToStatic(address):X}", Reportable(address));
-            return true;
         }
 
-        // Looked up by the address in the listing, which is how they are kept: the int3 is at a
-        // runtime address, and the same static address is a different runtime one every run.
-        ulong staticVa = ToStatic(address);
-        Breakpoint? hit;
-        lock (_breakpoints)
+        // Found by which breakpoint resolves to this runtime address, rather than by keying on the
+        // static one. The int3 is at a runtime address; what that translates back to is only unique
+        // when there is a single module in play, and the whole point of naming modules is that there
+        // is not.
+        BreakpointAt? found = Find(address);
+        Breakpoint? hit = null;
+        if (found is { } key)
         {
-            _breakpoints.TryGetValue(staticVa, out hit);
+            lock (_breakpoints)
+            {
+                _breakpoints.TryGetValue(key, out hit);
+            }
         }
 
         if (hit is null)
@@ -1422,7 +2632,7 @@ public sealed class DebugSession : IDisposable
         // however many times it is continued, which reads as stepping that refuses to move.
         if (!WriteByte(address, hit.Original))
         {
-            Report("problem", $"the breakpoint byte at 0x{ToStatic(address):X} could not be lifted to step off it");
+            Report("problem", $"the breakpoint byte at {Describe(address)} could not be lifted to step off it");
         }
 
         Rewind(address, thenStep: true);
@@ -1435,7 +2645,11 @@ public sealed class DebugSession : IDisposable
         // then nobody is waiting for it.
         _stepThread = null;
         CurrentAddress = address;
-        Report("stopped", $"breakpoint at 0x{ToStatic(address):X}", Reportable(address));
+
+        // Named as it was set. Reportable is still the listing's own address and still null outside
+        // the image, so a breakpoint in another module stops without pretending to be a place in the
+        // one being read.
+        Report("stopped", $"breakpoint at {Where(found!.Value)}", Reportable(address));
         return true;
     }
 
@@ -1478,37 +2692,109 @@ public sealed class DebugSession : IDisposable
     /// </summary>
     private void PlantAll()
     {
-        if (!TargetLoaded)
-        {
-            return;
-        }
-
         // Patches first, breakpoints on top: see WritePatches for why the order is the whole point.
+        // Every patch whose module is loaded, which is no longer only the target's — WritePatches
+        // skips the ones with nowhere to go yet.
         WritePatches();
 
-        foreach (var breakpoint in Breakpoints)
+        // Every breakpoint whose module is here, which is no longer the same question as whether the
+        // target is. One naming another module goes in when that module arrives; one naming the target
+        // still waits for the target; and RuntimeOf is what tells the two apart.
+        foreach (var at in Keys())
         {
-            PlantStatic(breakpoint.Address);
+            PlantOne(at);
         }
     }
 
-    /// <summary>Plants the breakpoint held for a static address, at wherever that is right now.</summary>
-    private bool PlantStatic(ulong staticVa) => Plant(ToRuntime(staticVa));
+    /// <summary>Plants one breakpoint wherever it is right now, if it is anywhere yet.</summary>
+    private bool PlantOne(BreakpointAt at)
+    {
+        ulong runtime = RuntimeOf(at);
+        return runtime != 0 && Plant(runtime);
+    }
 
     /// <summary>
-    /// Forgets where every breakpoint was, without forgetting the breakpoints.
+    /// Plants every breakpoint that names a module, for the moment it loads. Returns how many went in.
     ///
-    /// Used when the module goes away. The bytes they saved belong to a mapping that no longer
-    /// exists, and writing one back later would put a byte from the last load into whatever occupies
-    /// that address now.
+    /// This is what makes a breakpoint in a second or third DLL possible at all: the loader announces
+    /// each mapping before it runs any of that module's code, so a breakpoint planted here is already
+    /// standing in the module's entry point the first time it is entered.
     /// </summary>
-    private void Unplant()
+    private int PlantNaming(string module)
+    {
+        int armed = 0;
+        foreach (var at in Keys())
+        {
+            if (at.Module is not null
+                && string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase)
+                && PlantOne(at))
+            {
+                armed++;
+            }
+        }
+
+        return armed;
+    }
+
+    /// <summary>
+    /// Writes the patches that name a module, for the moment it loads.
+    ///
+    /// Called before that module's breakpoints are planted, for the reason
+    /// <see cref="WritePatches"/> gives: a breakpoint landing on a patched byte has to save the
+    /// patched byte, so that a removal puts the patch back rather than the file's own byte.
+    /// </summary>
+    private void WritePatchesNaming(string module)
+    {
+        List<PatchAt> held;
+        lock (_patches)
+        {
+            held = _patches.Keys.ToList();
+        }
+
+        foreach (var at in held)
+        {
+            if (at.Module is null || !string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            LivePatch? patch;
+            lock (_patches)
+            {
+                _patches.TryGetValue(at, out patch);
+            }
+
+            ulong start = RuntimeOf(at);
+            if (patch is not null && start != 0 && !WriteBytes(start, patch.Bytes))
+            {
+                Report("problem", $"the patch at {Where(at)} could not be written");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forgets where a module's breakpoints were, without forgetting the breakpoints.
+    ///
+    /// Used when that module goes away. The bytes they saved belong to a mapping that no longer
+    /// exists, and writing one back later would put a byte from the last load into whatever occupies
+    /// that address now. Only that module's: a breakpoint in another one is still exactly where it
+    /// was, and forgetting its byte would mean restoring a zero over a live instruction later.
+    /// </summary>
+    /// <param name="module">The module that went, or null for the one the listing is about.</param>
+    private void Unplant(string? module)
     {
         lock (_breakpoints)
         {
-            foreach (ulong address in _breakpoints.Keys.ToList())
+            foreach (var at in _breakpoints.Keys.ToList())
             {
-                _breakpoints[address] = _breakpoints[address] with { Original = 0, Planted = false };
+                bool theirs = module is null
+                    ? at.Module is null
+                    : string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase);
+
+                if (theirs)
+                {
+                    _breakpoints[at] = _breakpoints[at] with { Original = 0, Planted = false };
+                }
             }
         }
     }
@@ -1522,8 +2808,22 @@ public sealed class DebugSession : IDisposable
         byte[] existing = ReadMemory(address, 1);
         if (existing.Length != 1)
         {
-            Report("problem", $"could not read 0x{ToStatic(address):X} to put a breakpoint there");
+            Report("problem", $"could not read {Describe(address)} to put a breakpoint there");
             return false;
+        }
+
+        // Which breakpoint this address belongs to, resolved once. A one-shot belongs to none of them,
+        // which is the whole difference between it and a breakpoint somebody set.
+        BreakpointAt? key = temporary ? null : Find(address);
+
+        // A one-shot replacing one that was set but never hit — a run-to abandoned when another stop
+        // came first, a step begun over the top of it. Its int3 goes back now, before this plant
+        // overwrites the record of what it replaced, so it is not left orphaned in the code.
+        if (temporary && _temporary is { } pending && pending != address && _temporaryPlanted)
+        {
+            WriteByte(pending, _temporaryOriginal);
+            _temporary = null;
+            _temporaryPlanted = false;
         }
 
         if (existing[0] == 0xCC)
@@ -1533,16 +2833,22 @@ public sealed class DebugSession : IDisposable
             // 0xCC is genuinely what belongs here and is what has to go back when this is hit or
             // removed. Recording nothing left Original at zero, and restoring it wrote a zero byte
             // over the program's instruction — a debugger corrupting the thing it is watching.
-            if (!temporary)
+            if (key is { } already)
             {
-                ulong at = ToStatic(address);
                 lock (_breakpoints)
                 {
-                    if (_breakpoints.TryGetValue(at, out var already) && !already.Planted)
+                    if (_breakpoints.TryGetValue(already, out var had) && !had.Planted)
                     {
-                        _breakpoints[at] = already with { Original = 0xCC, Planted = true };
+                        _breakpoints[already] = had with { Original = 0xCC, Planted = true };
                     }
                 }
+            }
+
+            // A one-shot onto an int3 already here plants nothing and records nothing: the byte under
+            // it is the owner's, not the one-shot's to restore.
+            if (temporary)
+            {
+                _temporaryPlanted = false;
             }
 
             return true;
@@ -1551,19 +2857,14 @@ public sealed class DebugSession : IDisposable
         if (temporary)
         {
             _temporaryOriginal = existing[0];
+            _temporaryPlanted = true;
         }
-        else
+        else if (key is null)
         {
             // Asked before the write, not after. Nothing to record the byte against means nothing may
             // replace it: an int3 whose original is kept nowhere is a byte of the program lost for
             // good.
-            lock (_breakpoints)
-            {
-                if (!_breakpoints.ContainsKey(ToStatic(address)))
-                {
-                    return false;
-                }
-            }
+            return false;
         }
 
         // Said rather than assumed. This used to write and return true regardless, because WriteByte
@@ -1571,20 +2872,19 @@ public sealed class DebugSession : IDisposable
         // a breakpoint that listed as planted, never fired, and gave nobody a reason why.
         if (!WriteByte(address, 0xCC))
         {
-            Report("problem", $"could not put a breakpoint at 0x{ToStatic(address):X}: the write was refused");
+            Report("problem", $"could not put a breakpoint at {Describe(address)}: the write was refused");
             return false;
         }
 
         // Marked planted only now that the int3 is really there, and the byte it replaced recorded
         // beside it — which is what a removal puts back.
-        if (!temporary)
+        if (key is { } mine)
         {
-            ulong staticVa = ToStatic(address);
             lock (_breakpoints)
             {
-                if (_breakpoints.TryGetValue(staticVa, out var breakpoint))
+                if (_breakpoints.TryGetValue(mine, out var breakpoint))
                 {
-                    _breakpoints[staticVa] = breakpoint with { Original = existing[0], Planted = true };
+                    _breakpoints[mine] = breakpoint with { Original = existing[0], Planted = true };
                 }
             }
         }

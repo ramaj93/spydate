@@ -28,6 +28,7 @@ public partial class ProviderSettingsWindow : Window
         ArgumentNullException.ThrowIfNull(settings);
         _secrets = secrets;
         InitializeComponent();
+        DarkChrome.Apply(this);
 
         Result = new AgentSettings
         {

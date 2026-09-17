@@ -38,6 +38,7 @@
                              BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                              ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                              ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                             RevealLine="{Binding RevealLine, Mode=OneWay}"
                              References="{Binding References, Mode=OneWay}"
                              GoToDefinitionCommand="{Binding GoToDefinitionCommand}" />
     </Grid>

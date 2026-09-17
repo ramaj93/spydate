@@ -150,8 +150,17 @@
                 <!-- F5 is already Re-analyze and has been since before there was a debugger, so
                      these avoid it rather than quietly changing what a familiar key does. -->
                 <MenuItem Header="_Debug">
-                    <MenuItem Header="_Run under the debugger…" Command="{Binding Debugger.StartCommand}"
-                              ToolTip="Starts the open binary on this machine. It will do whatever it does." />
+                    <!-- Opens the run configuration rather than starting straight away: which
+                         engine, what to start, its arguments and where it should stop are all one
+                         decision, made in one place, and the dialog comes up with whatever was used
+                         for this binary last time. -->
+                    <MenuItem Header="_Start Debugging…" Command="{Binding Debugger.StartCommand}"
+                              ToolTip="Choose how to run the open binary, then start it on this machine. It will do whatever it does." />
+                    <!-- Not built yet, and shown rather than hidden so the gap is visible instead of
+                         looking like an oversight. The debug loop can only launch a process today;
+                         attaching to one already running is its own piece of work (see ROADMAP). -->
+                    <MenuItem Header="Attach to _Process…" IsEnabled="False"
+                              ToolTip="Not yet: the debugger can only start a process, not attach to one that is already running." />
                     <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
                     <Separator />
                     <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
@@ -394,7 +403,7 @@
                                     </ListBox.ItemTemplate>
                                 </ListBox>
                             </TabItem>
-                            <TabItem Header="Debug">
+                            <TabItem Header="Debug" x:Name="DebugTab">
                                 <Grid DataContext="{Binding Debugger}">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
@@ -447,7 +456,7 @@
                                                  about the program. The runtime already knows. -->
                                             <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
                                                     Command="{Binding StepOutCommand}"
-                                                    Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                    Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                     ToolTip="Step out — run to the end of this method"
                                                     AutomationProperties.Name="Step out">
                                                 <ui:SymbolIcon Symbol="ArrowStepOut20" />
@@ -469,6 +478,7 @@
                                                 <ui:SymbolIcon Symbol="MoreVertical20" />
                                             </Button>
 
+
                                             <Border DockPanel.Dock="Left" Width="1" Margin="6,4"
                                                     Background="{DynamicResource Chrome.Border}" />
 
@@ -486,18 +496,18 @@
                                                          AutomationProperties.Name="Threads and registers" />
                                             <RadioButton x:Name="PaneLocals" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Locals"
-                                                         IsChecked="{Binding IsManaged, Mode=OneWay}"
-                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         IsChecked="{Binding UsesManagedDebugger, Mode=OneWay}"
+                                                         Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                          ToolTip="Arguments and locals of the frame being looked at. Open a row to see inside it."
                                                          AutomationProperties.Name="Locals pane" />
                                             <RadioButton x:Name="PaneCallStack" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Call stack"
-                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
-                                                         ToolTip="The frames of the thread being looked at. Pick one to read its locals."
+                                                         Visibility="{Binding ShowsManagedContext, Converter={StaticResource BoolToVisibility}}"
+                                                         ToolTip="The managed frames of the thread being looked at — walked by the DAC in mixed mode, beside the native registers."
                                                          AutomationProperties.Name="Call stack pane" />
                                             <RadioButton x:Name="PaneManagedThreads" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Threads"
-                                                         Visibility="{Binding IsManaged, Converter={StaticResource BoolToVisibility}}"
+                                                         Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
                                                          ToolTip="Every thread in the process. Pick one to read its values and step it."
                                                          AutomationProperties.Name="Managed threads pane" />
                                             <RadioButton x:Name="PaneModules" DockPanel.Dock="Left"
@@ -611,6 +621,7 @@
                                                   IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
                                                   CanUserSortColumns="False" SelectionMode="Single" SelectionUnit="FullRow"
                                                   EnableRowVirtualization="True"
+                                                  PreviewMouseRightButtonDown="SelectRowOnRightClick"
                                                   Visibility="{Binding IsChecked, ElementName=PaneLocals, Converter={StaticResource BoolToVisibility}}"
                                                   AutomationProperties.Name="Locals and arguments">
                                             <DataGrid.Columns>

@@ -32,6 +32,8 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     private readonly Func<ManagedImage?>? _image;
     private readonly Action<SourceReference, ManagedAssembly>? _navigate;
     private IReadOnlyList<SourceReference> _lastReferences = Array.Empty<SourceReference>();
+    private IReadOnlyList<SourceDeclaration> _lastDeclarations = Array.Empty<SourceDeclaration>();
+    private int? _pendingReveal;
 
     private ManagedCodeDocumentViewModel(
         string key,
@@ -69,13 +71,48 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
         Action<SourceReference, ManagedAssembly>? navigate = null)
         => new($"managed:member:{assembly.Name}:{type.FullName}::{member.Handle.GetHashCode():X}", $"{type.Name}.{member.Name}", SymbolRegular.Code24, assembly, type, member, image, navigate);
 
-    /// <summary>Identifiers in the current C# that name a type or member, for Ctrl+click.</summary>
+    /// <summary>Identifiers in the current C# that name a type or member, for click-to-navigate.</summary>
     [ObservableProperty]
     private IReadOnlyList<SourceReference> _references = Array.Empty<SourceReference>();
+
+    /// <summary>Line to scroll to and mark, 1-based; zero leaves the view where it is.</summary>
+    [ObservableProperty]
+    private int _revealLine;
 
     /// <summary>Follows a clicked reference to its definition, through the assembly that owns it.</summary>
     [RelayCommand]
     private void GoToDefinition(SourceReference reference) => _navigate?.Invoke(reference, _assembly);
+
+    /// <summary>
+    /// Stops on the line where a member of this type is declared, the way dnSpy opens a member into
+    /// its class. The token is a metadata token in this document's assembly. If the C# has not been
+    /// produced yet the request is held and applied when it lands; the IL view carries no declarations,
+    /// so a reveal switches to C# first.
+    /// </summary>
+    public void RevealMember(int token)
+    {
+        _pendingReveal = token;
+        if (Language != ManagedLanguage.CSharp)
+        {
+            Language = ManagedLanguage.CSharp;   // reloads; the pending reveal is applied when it lands
+            return;
+        }
+
+        ApplyPendingReveal();
+    }
+
+    private void ApplyPendingReveal()
+    {
+        if (_pendingReveal is { } token
+            && _lastDeclarations.FirstOrDefault(d => d.Token == token) is { Line: > 0 } declaration)
+        {
+            // Reset first so re-revealing the line the view is already on still scrolls to it: the
+            // editor's RevealLine only acts on a change, and zero means "leave it alone".
+            RevealLine = 0;
+            RevealLine = declaration.Line;
+            _pendingReveal = null;
+        }
+    }
 
     public IReadOnlyList<ManagedLanguage> Languages { get; } = new[] { ManagedLanguage.CSharp, ManagedLanguage.IL };
 
@@ -108,6 +145,7 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             {
                 Text = text;
                 References = _lastReferences;
+                ApplyPendingReveal();
             }
         }
         catch (OperationCanceledException)
@@ -156,8 +194,9 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
     {
         var d = _assembly.Decompiler;
         _lastReferences = Array.Empty<SourceReference>();
+        _lastDeclarations = Array.Empty<SourceDeclaration>();
 
-        // The C# member and type views carry references — the identifiers a Ctrl+click can follow.
+        // The C# member and type views carry references — the identifiers a click can follow.
         // The other views (IL, whole assembly) do not, so they leave the set empty.
         switch (language, _member, _type)
         {
@@ -165,6 +204,7 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             {
                 var source = d.SourceForMember(m, ct);
                 _lastReferences = source.References;
+                _lastDeclarations = source.Declarations;
                 return Addressed(source);
             }
 
@@ -172,6 +212,7 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             {
                 var source = d.SourceForType(t, ct);
                 _lastReferences = source.References;
+                _lastDeclarations = source.Declarations;
                 return Addressed(source);
             }
 

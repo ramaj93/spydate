@@ -393,4 +393,40 @@ public class McpManagedTests
             Assert.DoesNotContain("is not a type or member", read, StringComparison.Ordinal);
         }
     }
+
+    [Fact]
+    public void AManagedMethodIsAnnotatedByItsNameAtWhereItsIlBegins()
+    {
+        var store = Store();
+        var session = store.Current!;
+        var index = session.ManagedIndex!;
+
+        // An unambiguous method with a body — one overload of its name in its type — so it resolves
+        // without a signature and has an address to carry the note.
+        var (type, method) = index.Types
+            .SelectMany(t => t.Members.Where(m => m.Kind == ManagedMemberKind.Method).Select(m => (t, m)))
+            .First(tm => tm.t.Members.Count(x => x.Name == tm.m.Name) == 1
+                         && session.Bodies!.Of(tm.m.Handle) is not null);
+
+        ulong expected = session.Image.ImageBase + session.Bodies!.Of(method.Handle)!.RvaOf(0);
+
+        // Setting a name echoes the address it landed on, which is where the method's IL begins.
+        string result = new AnnotationTools(store, McpOptions.Default)
+            .Annotate($"{type.FullName}::{method.Name}", name: "GateChecked", comment: "gate check");
+
+        Assert.Contains($"0x{expected:X}", result, StringComparison.Ordinal);
+        Assert.Contains("GateChecked", result, StringComparison.Ordinal);
+        Assert.Contains("comment: gate check", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnnotatingAManagedTypeByNameSaysItHasNoSingleAddress()
+    {
+        var store = Store();
+        string typeName = store.Current!.ManagedIndex!.Types.First(t => t.FullName.Contains('.')).FullName;
+
+        string result = new AnnotationTools(store, McpOptions.Default).Annotate(typeName, comment: "x");
+
+        Assert.Contains("no single address", result, StringComparison.Ordinal);
+    }
 }

@@ -28,6 +28,13 @@ public sealed class SessionStore : IDisposable
     /// </summary>
     public IManagedDebugControl? ManagedDebug { get; set; }
 
+    /// <summary>
+    /// Reads and changes the run configuration — engine, executable, arguments and the rest — when the
+    /// host lets the agent settle how a binary runs. Switching a .NET target's engine here re-points
+    /// <see cref="Debug"/> and <see cref="ManagedDebug"/> to match, so a later run uses the chosen one.
+    /// </summary>
+    public IDebugSettings? DebugSettings { get; set; }
+
     /// <summary>Replaces whatever was open. The previous session is disposed once nothing is using it.</summary>
     public async Task<BinarySession> OpenAsync(Func<BinarySession> open, CancellationToken cancellationToken)
     {

@@ -31,6 +31,17 @@ public readonly record struct SourceLine(int Line, uint MethodToken, int Offset)
 public readonly record struct SourceReference(int Line, int Column, int Length, string Assembly, int Token);
 
 /// <summary>
+/// Where a member of this assembly is declared in the decompiled text — its <paramref name="Token"/>
+/// and the 1-based <paramref name="Line"/> its name is written on.
+///
+/// This is the other half of following a click: a reference says which member was clicked, and the
+/// declaration of that member is where the reader is taken. A field or an event has no readable body
+/// of its own, so opening it means opening its type and stopping on the line it is declared on — the
+/// way dnSpy does — rather than a document that is one line long.
+/// </summary>
+public readonly record struct SourceDeclaration(int Token, int Line);
+
+/// <summary>
 /// One statement's IL, from its first instruction to the first of the next.
 ///
 /// This is the unit a debugger moves in and the unit a breakpoint goes at. The boundaries are the
@@ -56,9 +67,10 @@ public sealed record ManagedSource(
     string Text,
     IReadOnlyList<SourceLine> Lines,
     IReadOnlyList<SourceStatement> Statements,
-    IReadOnlyList<SourceReference> References)
+    IReadOnlyList<SourceReference> References,
+    IReadOnlyList<SourceDeclaration> Declarations)
 {
-    public static ManagedSource Empty { get; } = new(string.Empty, Array.Empty<SourceLine>(), Array.Empty<SourceStatement>(), Array.Empty<SourceReference>());
+    public static ManagedSource Empty { get; } = new(string.Empty, Array.Empty<SourceLine>(), Array.Empty<SourceStatement>(), Array.Empty<SourceReference>(), Array.Empty<SourceDeclaration>());
 }
 
 /// <summary>
@@ -86,7 +98,9 @@ internal static class SequencePoints
         tree.AcceptVisitor(new CSharpOutputVisitor(recorder, settings.CSharpFormattingOptions));
 
         string text = output.ToString();
-        var references = ResolveReferences(recorder.Raw, text);
+        var lineStart = LineStarts(text);
+        var references = ResolveReferences(recorder.Raw, lineStart);
+        var declarations = ResolveDeclarations(recorder.RawDeclarations, lineStart);
 
         var statements = Statements(decompiler, tree);
 
@@ -104,22 +118,15 @@ internal static class SequencePoints
             }
         }
 
-        return new ManagedSource(text, lines, statements, references);
+        return new ManagedSource(text, lines, statements, references, declarations);
     }
 
     /// <summary>
-    /// Turns each identifier's absolute offset into the 1-based line and column the editor counts in,
-    /// so a reference survives the per-line address comments that get appended afterward.
+    /// The offset each line of the text begins at, so an absolute offset becomes a line and a column
+    /// in one pass rather than counting newlines per reference.
     /// </summary>
-    private static IReadOnlyList<SourceReference> ResolveReferences(IReadOnlyList<(int Start, int Length, string Assembly, int Token)> raw, string text)
+    private static List<int> LineStarts(string text)
     {
-        if (raw.Count == 0)
-        {
-            return Array.Empty<SourceReference>();
-        }
-
-        // Line starts, so an offset becomes a line and a column in one pass rather than counting
-        // newlines per reference.
         var lineStart = new List<int> { 0 };
         for (int i = 0; i < text.Length; i++)
         {
@@ -127,6 +134,20 @@ internal static class SequencePoints
             {
                 lineStart.Add(i + 1);
             }
+        }
+
+        return lineStart;
+    }
+
+    /// <summary>
+    /// Turns each identifier's absolute offset into the 1-based line and column the editor counts in,
+    /// so a reference survives the per-line address comments that get appended afterward.
+    /// </summary>
+    private static IReadOnlyList<SourceReference> ResolveReferences(IReadOnlyList<(int Start, int Length, string Assembly, int Token)> raw, List<int> lineStart)
+    {
+        if (raw.Count == 0)
+        {
+            return Array.Empty<SourceReference>();
         }
 
         var result = new List<SourceReference>(raw.Count);
@@ -139,6 +160,34 @@ internal static class SequencePoints
             // is always after the code, so it never falls inside an identifier — the column is the
             // editor's column as it stands.
             result.Add(new SourceReference(line + 1, column, length, assembly, token));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Turns each recorded declaration offset into the 1-based line it is on, so opening a member can
+    /// stop on the line it is declared. The first write of a token wins: a member is declared once,
+    /// and anything else the recorder caught with the same token is a use.
+    /// </summary>
+    private static IReadOnlyList<SourceDeclaration> ResolveDeclarations(IReadOnlyList<(int Start, int Token)> raw, List<int> lineStart)
+    {
+        if (raw.Count == 0)
+        {
+            return Array.Empty<SourceDeclaration>();
+        }
+
+        var seen = new HashSet<int>();
+        var result = new List<SourceDeclaration>();
+        foreach (var (start, token) in raw)
+        {
+            if (!seen.Add(token))
+            {
+                continue;
+            }
+
+            int line = lineStart.FindLastIndex(s => s <= start);
+            result.Add(new SourceDeclaration(token, line + 1));
         }
 
         return result;
@@ -263,6 +312,9 @@ internal static class SequencePoints
         /// <summary>Each identifier that names a type or member: its absolute offset, length, and target.</summary>
         internal List<(int Start, int Length, string Assembly, int Token)> Raw { get; } = new();
 
+        /// <summary>The offset and token of each identifier that <em>declares</em> a member, not merely uses it.</summary>
+        internal List<(int Start, int Token)> RawDeclarations { get; } = new();
+
         public override void EndNode(AstNode node)
         {
             base.EndNode(node);
@@ -301,7 +353,12 @@ internal static class SequencePoints
                 length++;
             }
 
-            if (start >= 0)
+            // A use, not the declaration. The name of a method, property, type or enum member is
+            // written while its own EntityDeclaration is the current node, and that occurrence is where
+            // the definition already is — following it goes nowhere, and a hand cursor over it is a lie.
+            // (A field's declaring name sits under a VariableInitializer whose symbol is null, so it
+            // never reaches here in the first place.) Only uses become navigable references.
+            if (start >= 0 && _nodes.Peek() is not EntityDeclaration)
             {
                 Raw.Add((start, length, module.AssemblyName, MetadataTokens.GetToken(entity.MetadataToken)));
             }
@@ -311,6 +368,19 @@ internal static class SequencePoints
         {
             base.StartNode(node);
             _nodes.Push(node);
+
+            // Where a member is declared, caught on the declaration node rather than on its name
+            // identifier. A field's name is written under a VariableInitializer whose symbol is null,
+            // so watching identifiers misses it; the FieldDeclaration — like every member declaration,
+            // an EntityDeclaration — is where the field's own symbol lives. The offset is the start of
+            // the declaration's line, which is where opening the member takes the reader, the way dnSpy
+            // stops on the line a field is declared on rather than in a document one line long.
+            if (node is EntityDeclaration declaration
+                && declaration.GetSymbol() is IEntity declared
+                && !declared.MetadataToken.IsNil)
+            {
+                RawDeclarations.Add((_text.Length, MetadataTokens.GetToken(declared.MetadataToken)));
+            }
 
             foreach (var instruction in node.Annotations.OfType<ILInstruction>())
             {

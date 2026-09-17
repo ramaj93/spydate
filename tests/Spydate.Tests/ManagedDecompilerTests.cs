@@ -7,6 +7,44 @@ public class ManagedDecompilerTests
 {
     private static string CoreAssemblyPath => typeof(PeImage).Assembly.Location;
 
+    /// <summary>The entry-point assembly copied next to the tests — a real program with a Main.</summary>
+    private static string McpAssemblyPath => Path.Combine(AppContext.BaseDirectory, "spydate-mcp.dll");
+
+    [Fact]
+    public void TheEntryPointResolvesToTheMainMethod()
+    {
+        if (!File.Exists(McpAssemblyPath))
+        {
+            return;
+        }
+
+        using var asm = ManagedAssembly.Load(McpAssemblyPath);
+        var entry = asm.EntryPoint;
+
+        Assert.NotNull(entry);
+        Assert.Equal(ManagedMemberKind.Method, entry!.Kind);
+        Assert.Contains("Main", entry.Name, StringComparison.Ordinal);
+
+        // A real MethodDef token, which is what a break-at at the entry point is set from.
+        int token = System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(entry.Handle);
+        Assert.Equal(System.Reflection.Metadata.HandleKind.MethodDefinition, entry.Handle.Kind);
+        Assert.NotEqual(0, token);
+    }
+
+    [Fact]
+    public void AnAssemblyWithNoModuleInitializerReportsNone()
+    {
+        // spydate-mcp has no [ModuleInitializer], so "Module cctor or Entry Point" falls back to the
+        // entry point — this is the accessor saying there is nothing to fall back from.
+        if (!File.Exists(McpAssemblyPath))
+        {
+            return;
+        }
+
+        using var asm = ManagedAssembly.Load(McpAssemblyPath);
+        Assert.Null(asm.ModuleInitializer);
+    }
+
     [Fact]
     public void LoadsNamespacesAndTypes()
     {
@@ -82,7 +120,7 @@ public class ManagedDecompilerTests
         Assert.NotEmpty(source.References);
 
         // Every reference's (line, column, length) must cut a real identifier out of the text — this
-        // is the mapping a Ctrl+click depends on, and an off-by-one would send it to the wrong word.
+        // is the mapping click-to-navigate depends on, and an off-by-one would send it to the wrong word.
         var lines = source.Text.Replace("\r", "", StringComparison.Ordinal).Split('\n');
         foreach (var r in source.References)
         {
@@ -98,6 +136,46 @@ public class ManagedDecompilerTests
 
         // And at least one names PeImage's own assembly — a same-assembly definition a click can open.
         Assert.Contains(source.References, r => r.Assembly.Equals("Spydate.Core", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void AFieldsDeclarationIsRecordedOnTheLineItIsWrittenOn()
+    {
+        using var asm = ManagedAssembly.Load(CoreAssemblyPath);
+
+        // Opening a field takes the reader to its declaring type and stops on the line it is declared,
+        // the way dnSpy does. That reveal is driven by SourceDeclaration: the field's token paired with
+        // the line its name is written on. Check that pairing lands on the field's name for every field
+        // the decompiler emits, and that at least one field was actually checked so this is not vacuous.
+        int checkedFields = 0;
+
+        foreach (var type in asm.Namespaces.SelectMany(n => n.Types))
+        {
+            var fields = type.Members.Where(m => m.Kind == ManagedMemberKind.Field).ToList();
+            if (fields.Count == 0)
+            {
+                continue;
+            }
+
+            var source = asm.Decompiler.SourceForType(type);
+            var lines = source.Text.Replace("\r", "", StringComparison.Ordinal).Split('\n');
+
+            foreach (var field in fields)
+            {
+                int token = System.Reflection.Metadata.Ecma335.MetadataTokens.GetToken(field.Handle);
+                var declaration = source.Declarations.FirstOrDefault(dcl => dcl.Token == token);
+                if (declaration.Line == 0)
+                {
+                    continue;   // a const the decompiler inlined, or a backing field it hid — nothing to reveal
+                }
+
+                Assert.InRange(declaration.Line, 1, lines.Length);
+                Assert.Contains(field.Name, lines[declaration.Line - 1], StringComparison.Ordinal);
+                checkedFields++;
+            }
+        }
+
+        Assert.True(checkedFields > 0, "no field declaration was found to check — the reveal has nothing to aim at");
     }
 
     [Fact]

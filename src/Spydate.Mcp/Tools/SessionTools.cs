@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
 using Spydate.Core.PE;
+using Spydate.Core.Strings;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
 
@@ -49,7 +50,14 @@ public sealed class SessionTools
         }
         catch (PeParseException ex)
         {
-            return $"{path} is not a PE file this can read: {ex.Message}";
+            // Name the way out. open_binary parses a PE into an image and cannot do anything with a
+            // file that is not one, and an agent that hits only this wall concludes non-PEs are
+            // unreadable and goes off to reconstruct the bytes from process memory. read_file reads
+            // any file's raw bytes and is the answer — the path is already inside --root, since that
+            // was checked above, so it is allowed here.
+            return $"{path} is not a PE file open_binary can read ({ex.Message}). "
+                + "It is still a file: read_file(path) reads its raw bytes as hex or text, which is how "
+                + "to look at a non-PE like this — a resource, a .inx, an unknown container.";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -61,6 +69,79 @@ public sealed class SessionTools
     [Description("Re-print the summary of the binary that is currently open: architecture, sections, imports, counts, and what analysis found.")]
     public string GetOverview()
         => _store.Current is { } session ? Overview(session, opened: false) : NothingOpen;
+
+    [McpServerTool(Name = "read_file")]
+    [Description("Read raw bytes of any file on disk - not only a PE - as hex or text, to probe a blob open_binary cannot open (a resource, a .inx, an unknown container). A window of at most 4096 bytes; within --root.")]
+    public string ReadFile(
+        [Description("Full path to the file.")] string path,
+        [Description("Byte offset to start at.")] long offset = 0,
+        [Description("Bytes to read, at most 4096.")] int length = 256,
+        [Description("\"hex\" (default), \"utf8\" or \"utf16\".")] string @as = "hex")
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return "give a path to a file to read";
+        }
+
+        if (!_options.Allows(path))
+        {
+            return $"this server was started with --root {_options.Root} and will not read files outside it";
+        }
+
+        if (!File.Exists(path))
+        {
+            return $"there is no file at {path}";
+        }
+
+        try
+        {
+            long size = new FileInfo(path).Length;
+            if (offset < 0)
+            {
+                offset = 0;
+            }
+
+            if (offset > size)
+            {
+                return $"{Path.GetFileName(path)} is {size} bytes; offset 0x{offset:X} is past its end";
+            }
+
+            int want = Math.Clamp(length, 1, 4096);
+            int can = (int)Math.Min(want, size - offset);
+            byte[] bytes = new byte[can];
+
+            using (var stream = File.OpenRead(path))
+            {
+                stream.Seek(offset, SeekOrigin.Begin);
+                int got = 0;
+                while (got < can && stream.Read(bytes, got, can - got) is var n and > 0)
+                {
+                    got += n;
+                }
+
+                if (got < can)
+                {
+                    bytes = bytes[..got];
+                }
+            }
+
+            string header = $"{Path.GetFileName(path)}: {size} bytes; showing {bytes.Length} at offset 0x{offset:X}"
+                            + ((ulong)offset + (ulong)bytes.Length < (ulong)size ? " (more follows)" : string.Empty) + "\n";
+
+            string body = @as switch
+            {
+                "utf8" => StringLiterals.Escape(Encoding.UTF8.GetString(bytes)),
+                "utf16" => StringLiterals.Escape(Encoding.Unicode.GetString(bytes)),
+                _ => HexDump.Render(bytes, (ulong)offset),
+            };
+
+            return Budget.Clip(header + body);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"could not read {Path.GetFileName(path)}: {ex.Message}";
+        }
+    }
 
     internal const string NothingOpen = "no binary is open - call open_binary(path) first";
 

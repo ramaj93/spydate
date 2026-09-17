@@ -643,10 +643,38 @@ managed stacks while the loop held the port, an int3 at a DAC-resolved address f
 the managed frame and the native registers were both readable at that stop — a managed argument read
 out of `rcx`. `MIXED-MODE.md` carries the measurements and the plan.
 
-Two things are given up or left open. `funceval` does not come along: running a property getter inside
-the debuggee is an ICorDebug feature with no DAC equivalent, so fields are read out of memory instead,
-which for an obfuscated target is the more truthful answer anyway. And a cold method's first call
-cannot be caught — before the JIT has run there is no address to break at, and the CLR's DAC
-notifications, which is how SOS's `!bpmd` manages it, stay off unless a debugger turns them on. Native
-code has no such gap: it has a static address the moment its module maps, and a breakpoint planted on
-`LOAD_DLL` is standing in `DllMain` before its body runs.
+One thing is given up. `funceval` does not come along: running a property getter inside the debuggee is
+an ICorDebug feature with no DAC equivalent, so fields are read out of memory instead, which for an
+obfuscated target is the more truthful answer anyway.
+
+A cold method's *first* call looked like a second thing given up, and for a while it was. Before the JIT
+has run there is no address to break at, so the breakpoint is held and planted the instant the method
+has native code — which catches every later call and misses only a method called exactly once. The
+obvious deterministic route, the CLR's DAC JIT notification (how SOS's `!bpmd` does it), *is* closed to
+this design: it is armed only by the DAC writing a notification table through
+`IXCLRDataProcess::SetCodeNotifications`, which needs a *writable* DAC — and disassembling the runtime
+against its public PDB confirmed the table has no in-process writer and the flag an earlier guess would
+have written (`g_dacNotificationFlags`) has no JIT bit at all. But that route is not the only door. A
+real debugger catches a not-yet-jitted method the way this one now does: an int3 on the JIT's shared
+prestub worker, identifying the compiling method by the MethodDesc the worker is passed, then planting
+the real breakpoint at the worker's return where the method has just gained native code. The DAC stays
+read-only throughout — it names the method and the address; the native loop writes the int3. So the
+first-call catch *is* reachable read-only after all; `MIXED-MODE.md` §Phase 7 carries the evidence, on
+CoreCLR and .NET Framework alike. Native code never had the gap: it has a static address the moment its
+module maps, and a breakpoint planted on `LOAD_DLL` is standing in `DllMain` before its body runs.
+
+## The first-call catch fetches the runtime's PDB from the symbol server, once, and caches it
+
+The prestub catch (above, and `MIXED-MODE.md` §Phase 7) needs one address the runtime does not carry in
+its exports: `PreStubWorker`. It lives in the runtime's PDB, which is not shipped. So `CoreClrSymbols`
+does what every native debugger does — reads the loaded runtime's debug directory for its exact build id
+and fetches the matching PDB from the Microsoft symbol server (`msdl.microsoft.com`), caching it on disk
+in the server's own layout so a build is fetched once per machine and the cache interoperates with other
+tools'. This is the first time the app reaches the network for anything, so it is worth stating plainly
+what does and does not leave the machine: the request is the build hash from the image's own header and
+nothing else — no code, no memory, no path from the target. It happens only when a cold managed
+breakpoint is actually set in mixed mode, never at startup or on a whim, and it is best-effort: no PDB,
+no network, or a server that does not have that build, and the catch silently falls back to planting on
+a later call. A PDB already beside the runtime, or already in the cache, needs no download at all. The
+match is on the build GUID rather than GUID-and-age, because a PE's debug directory and the PDB the
+server returns for it legitimately carry different ages for one build.

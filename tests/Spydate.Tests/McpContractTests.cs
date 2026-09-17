@@ -28,8 +28,29 @@ public class McpContractTests
     /// chose for this reason. It bought a mention of C#/IL in two tools and nothing else: Phase 5
     /// deliberately adds no new tool, because a schema only the .NET sessions use is still sent to
     /// every session that never opens one.
+    ///
+    /// Raised again to 6,600 for mixed mode — debugging a .NET program with the native loop, so a
+    /// breakpoint can go into one of its own managed methods or a native DLL it loads. That is a third
+    /// thing a binary can be to this server, and by the same argument it earns one sentence in
+    /// debug_break — a managed address becomes a managed breakpoint over the native loop — rather than
+    /// a shaved description elsewhere. Still no new tool: debug_break already routes by address, and
+    /// mixed mode only changes what a managed address there means.
+    ///
+    /// Raised to 7,300 for debug_config — the first new tool since these were counted, and the reason
+    /// the rule bends here rather than breaks. It gives the agent the run configuration itself: reading
+    /// and changing the engine, executable, arguments, working directory and break point that a person
+    /// otherwise sets in the Debug Program dialog — including switching a .NET target between the
+    /// managed and native engines. That is a capability, not a description, and no sentence shaved off
+    /// another tool would have bought it; a whole tool is the honest cost, paid once and on purpose.
+    ///
+    /// Raised to 7,700 for read_file — a raw-bytes reader for a file that is not a PE, so a blob the
+    /// analyst points at (a resource, a .inx, an unknown container beside the binary) can be probed as
+    /// hex or text instead of being a wall. Everything else here assumes a PE has been parsed into an
+    /// image; this is the one tool that reads a file the server cannot open, which is a fourth thing a
+    /// file can be to it and, like the engines, earns its own tool rather than a strained overload of
+    /// read_data.
     /// </summary>
-    private const int MaxManifestChars = 6_400;
+    private const int MaxManifestChars = 7_700;
 
     private const int MaxDescriptionChars = 400;
 

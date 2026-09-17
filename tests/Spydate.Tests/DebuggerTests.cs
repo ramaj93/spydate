@@ -599,6 +599,44 @@ public sealed class DebuggerTests
         Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
     }
 
+    /// <summary>
+    /// A run-to whose target already carries a breakpoint. The one-shot lands on an int3 that is
+    /// already there, so it never recorded a byte of its own — and used to restore a stale zero in its
+    /// place when it was hit, leaving 0x00 over the program's instruction and faulting the process a few
+    /// bytes on. The byte under the target must be the program's own after the stop, not corrupted.
+    /// </summary>
+    [Fact]
+    public void ARunToOntoABreakpointDoesNotCorruptTheByteUnderIt()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        ulong entry = image.ImageBase + image.EntryPointRva;
+
+        using var session = Headless();
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong runtime = session.ToRuntime(entry);
+        byte original = session.ReadMemory(runtime, 1)[0];
+        Assert.NotEqual(0xCC, original);
+
+        // A real breakpoint at the entry, then a run-to onto the same address: the one-shot rides the
+        // breakpoint's int3 rather than planting its own.
+        Assert.True(session.AddBreakpoint(entry));
+        session.RunTo(entry);
+        session.Continue();
+
+        Assert.True(Wait(() => session.State == DebugState.Stopped && session.CurrentAddress == runtime),
+            "never stopped at the entry");
+
+        // The instruction, not a zero the one-shot wrote where the breakpoint's byte belonged.
+        Assert.Equal(original, session.ReadMemory(runtime, 1)[0]);
+    }
+
     // ------------------------------------------------------------------
     // 32-bit, which runs under WOW64 and is read with different calls
     // ------------------------------------------------------------------
@@ -1074,6 +1112,52 @@ public sealed class DebuggerTests
     }
 
     /// <summary>
+    /// A write onto a readable-but-unwritable page is refused, not faked — the other half of write
+    /// honesty from the unmapped case above.
+    ///
+    /// The unmapped test fails at the read: there is no byte to save, so <c>Plant</c> never reaches the
+    /// write. This one gets past the read and fails at the write, which is the branch that matters once
+    /// W^X made a protect-and-retry necessary — a page that can be read, cannot be written, and cannot
+    /// be made writable either. <c>KUSER_SHARED_DATA</c> at <c>0x7FFE0000</c> is exactly that: mapped
+    /// read-only into every process and refused by <c>VirtualProtectEx</c>. So the int3 cannot go in,
+    /// even after the retry, and the breakpoint must say so rather than list as planted.
+    /// </summary>
+    [Fact]
+    public void AWriteOntoAReadableButUnwritablePageIsRefusedNotFakedAsPlanted()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        var problems = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "problem")
+            {
+                lock (problems) { problems.Add(e.Text); }
+            }
+        };
+
+        const ulong ReadOnlyShared = 0x7FFE0000;
+        Assert.True(session.AddBreakpoint(ReadOnlyShared));
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        var breakpoint = Assert.Single(session.Breakpoints);
+        Assert.False(breakpoint.Planted, "it claims to be planted where the write is refused");
+
+        lock (problems)
+        {
+            Assert.Contains(problems, p => p.Contains("the write was refused", StringComparison.Ordinal));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
     /// A live patch that could not be written reports that, instead of reporting success.
     ///
     /// This one used to come back null. The write went out through a helper that looked at the result
@@ -1101,6 +1185,403 @@ public sealed class DebuggerTests
 
         Assert.NotNull(refused);
         Assert.Contains("could not be written", refused, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// Breakpoints in two different modules at once, which is the whole point of naming a module.
+    ///
+    /// They are kept apart by (module, RVA) rather than by a static address, because a static address
+    /// cannot say which module is meant: 0x180000000 is the default base for an x64 DLL and most of
+    /// them keep it, so in a real process several modules claim the same numbers. Aimed at each
+    /// module's first byte — the "MZ" of its mapped header, which is read-only and never executed — so
+    /// this proves the bookkeeping without depending on either module running anything.
+    /// </summary>
+    [Fact]
+    public void BreakpointsSitInTwoModulesAtOnce()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        Assert.True(session.AddBreakpoint("where.exe", 0));
+        Assert.True(session.AddBreakpoint("ntdll.dll", 0));
+
+        Assert.Equal(2, session.Breakpoints.Count);
+        Assert.All(session.Breakpoints, b => Assert.True(b.Planted, $"{b.Module} was not planted"));
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        ulong ntdll = session.Modules.Single(m => m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.NotEqual(exe, ntdll);
+
+        Assert.Equal(0xCC, session.ReadMemory(exe, 1).Single());
+        Assert.Equal(0xCC, session.ReadMemory(ntdll, 1).Single());
+
+        // And each comes out on its own, restoring that module's own byte rather than the other's.
+        Assert.True(session.RemoveBreakpoint("where.exe", 0));
+        Assert.Equal((byte)'M', session.ReadMemory(exe, 1).Single());
+        Assert.Equal(0xCC, session.ReadMemory(ntdll, 1).Single());
+
+        Assert.True(session.RemoveBreakpoint("ntdll.dll", 0));
+        Assert.Equal((byte)'M', session.ReadMemory(ntdll, 1).Single());
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A breakpoint named by module and RVA before the run fires when that module's code reaches it,
+    /// and is reported the way it was set.
+    ///
+    /// Set on the executable's own entry point, which always runs. Named before anything is launched,
+    /// when the module does not exist and there is no address to put a byte at — the loader event is
+    /// what redeems it.
+    /// </summary>
+    [Fact]
+    public void ABreakpointNamedByModuleAndRvaFires()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+
+        using var session = Headless();
+        var stops = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops)
+                {
+                    stops.Add(e.Text);
+                }
+            }
+        };
+
+        Assert.True(session.AddBreakpoint("where.exe", image.EntryPointRva));
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        ulong expected = exe + image.EntryPointRva;
+
+        // Waited for by where it landed, not merely by it having stopped: continuing takes a moment to
+        // leave the stopped state, and "is it stopped" is true again the instant before it moves.
+        session.Continue();
+        Assert.True(
+            Wait(() => session.State == DebugState.Stopped && session.CurrentAddress == expected),
+            "the entry-point breakpoint never hit");
+
+        lock (stops)
+        {
+            Assert.Contains(stops, s => s.Contains("where.exe+0x", StringComparison.OrdinalIgnoreCase));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// "Entry Point" runs past the loader break and stops at the launched program's own entry, with
+    /// nothing planted by anyone — the stop is the break-at itself.
+    /// </summary>
+    [Fact]
+    public void EntryPointBreakStopsAtTheProcessEntryAndNotTheLoaderBreak()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        using var session = Headless();
+        var stops = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops) { stops.Add(e.Text); }
+            }
+        };
+
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage,
+            arguments: "where.exe", entryStop: EntryStop.ProcessEntry);
+
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped at the entry point");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.Equal(exe + image.EntryPointRva, session.CurrentAddress);
+
+        // The loader break was run past, not reported: the only stop is the entry.
+        lock (stops)
+        {
+            Assert.DoesNotContain(stops, s => s.Contains("loader break", StringComparison.OrdinalIgnoreCase));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// "Module cctor or Entry Point" for native code — which has no static constructor — stops at the
+    /// entry point of the module being read. For a standalone target that module is the main image.
+    /// </summary>
+    [Fact]
+    public void ModuleEntryBreakStopsAtTheModuleEntryPoint()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        using var session = Headless();
+
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage,
+            arguments: "where.exe", entryStop: EntryStop.ModuleEntry, entryRva: image.EntryPointRva);
+
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped at the module entry");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.Equal(exe + image.EntryPointRva, session.CurrentAddress);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// "Don't break" lets go of the loader break the instant it arrives and never stops of its own
+    /// accord: the process runs to its own exit with no stop reported.
+    /// </summary>
+    [Fact]
+    public void DontBreakRunsToExitWithoutStopping()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        using var session = Headless();
+        var stops = new List<string>();
+        var exited = new ManualResetEventSlim();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops) { stops.Add(e.Text); }
+            }
+            else if (e.Kind == "exited")
+            {
+                exited.Set();
+            }
+        };
+
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage,
+            arguments: "where.exe", entryStop: EntryStop.DontBreak);
+
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(20)), "the process never exited");
+        lock (stops)
+        {
+            Assert.Empty(stops);
+        }
+    }
+
+    /// <summary>
+    /// A breakpoint named by a module that is not present at startup but arrives partway through the
+    /// run — the loader-event path — fires at that module's entry point, before its own code runs, with
+    /// the DllMain reason code readable at the stop.
+    ///
+    /// This is the case the whole mixed-mode design turned on: a DLL that loads late (a protection
+    /// module, say) and runs code in its own entry point. It needs no custom fixture — rundll32 does a
+    /// LoadLibrary of winmm.dll from its command line, and winmm is not statically linked into it, so
+    /// the load is a genuine LOAD_DLL event after the process is already up. The entry argument is never
+    /// reached: the stop is at winmm's DllMain during the load, and the process is terminated there,
+    /// long before rundll32 looks for the export that does not exist.
+    /// </summary>
+    [Fact]
+    public void ABreakpointInALateLoadingDllFiresAtItsEntryWithTheDllMainReason()
+    {
+        string rundll32 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "rundll32.exe");
+        string winmm = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "winmm.dll");
+        if (!OperatingSystem.IsWindows() || !File.Exists(rundll32) || !File.Exists(winmm))
+        {
+            return;
+        }
+
+        uint entryRva = Spydate.Core.PE.PeImage.Load(winmm).EntryPointRva;
+
+        using var session = Headless();
+        var stops = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "stopped")
+            {
+                lock (stops) { stops.Add(e.Text); }
+            }
+        };
+
+        // Named by the module, not by a static address: winmm is nowhere at the loader break, so its
+        // breakpoint waits and is planted when the module lands.
+        Assert.True(session.AddBreakpoint("winmm.dll", entryRva));
+
+        // Don't break at the loader break: let it run on so the one stop is winmm's own entry, not
+        // rundll32's start. The named breakpoint is still planted when winmm lands.
+        session.Start(rundll32, imageBase: 0, imageSize: 0,
+            arguments: "winmm.dll,SpydateProbeEntryThatDoesNotExist", entryStop: EntryStop.DontBreak);
+
+        Assert.True(
+            Wait(() => session.State == DebugState.Stopped
+                       && session.Modules.Any(m => m.Name.Equals("winmm.dll", StringComparison.OrdinalIgnoreCase))),
+            "the late-loading DLL's entry breakpoint never fired");
+
+        ulong winmmBase = session.Modules.Single(m => m.Name.Equals("winmm.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.Equal(winmmBase + entryRva, session.CurrentAddress);
+
+        // DllMain(hinstance, reason, reserved): on x64 the reason is the second argument and sits in
+        // rdx at the entry point the loader jumps to. DLL_PROCESS_ATTACH is 1.
+        ulong rdx = session.Registers()!.Single(r => r.Name == "rdx").Value;
+        Assert.Equal(1u, (uint)rdx);
+
+        lock (stops)
+        {
+            Assert.Contains(stops, s => s.Contains("winmm.dll+0x", StringComparison.OrdinalIgnoreCase));
+        }
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A breakpoint naming a module the process never loads waits, and does not claim to be anywhere.
+    /// </summary>
+    [Fact]
+    public void ABreakpointNamingAModuleThatNeverLoadsStaysUnplanted()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        Assert.True(session.AddBreakpoint("no-such-module-of-ours.dll", 0x1000));
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        var waiting = Assert.Single(session.Breakpoints);
+        Assert.Equal("no-such-module-of-ours.dll", waiting.Module);
+        Assert.False(waiting.Planted, "it claims to be planted in a module that is not loaded");
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A live patch goes into a module other than the one being read.
+    ///
+    /// This is the half of patching that was missing: an RVA was always module-relative, but there was
+    /// no way to say which module, so every patch went into the program itself. Aimed at ntdll's first
+    /// byte — the "MZ" of its mapped header, read-only and never executed — so it proves the addressing
+    /// without changing anything the process will run.
+    /// </summary>
+    [Fact]
+    public void APatchGoesIntoAModuleOtherThanTheOneBeingRead()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong ntdll = session.Modules.Single(m => m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        byte original = session.ReadMemory(ntdll, 1).Single();
+        Assert.Equal((byte)'M', original);
+
+        Assert.Null(session.SetPatch(new LivePatch(0, [0x90], [original]) { Module = "ntdll.dll" }));
+        Assert.Equal(0x90, session.ReadMemory(ntdll, 1).Single());
+        Assert.Contains(session.LivePatches, p => p.Module == "ntdll.dll" && p.Rva == 0);
+
+        Assert.Null(session.ClearPatch("ntdll.dll", 0));
+        Assert.Equal(original, session.ReadMemory(ntdll, 1).Single());
+        Assert.DoesNotContain(session.LivePatches, p => p.Module == "ntdll.dll");
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// Two modules hold a patch at the same RVA at once, and clearing one leaves the other alone.
+    ///
+    /// The case a table keyed by RVA alone could not represent at all: the second patch was the first
+    /// one, and removing either restored whichever bytes happened to be recorded. RVA 0 in both, so the
+    /// two keys differ only by module — which is the whole of what was added.
+    /// </summary>
+    [Fact]
+    public void PatchesAtTheSameRvaInTwoModulesDoNotCollide()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        ulong exe = session.Modules.Single(m => m.Name.Equals("where.exe", StringComparison.OrdinalIgnoreCase)).Base;
+        ulong ntdll = session.Modules.Single(m => m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.NotEqual(exe, ntdll);
+
+        byte exeWas = session.ReadMemory(exe, 1).Single();
+        byte ntdllWas = session.ReadMemory(ntdll, 1).Single();
+
+        Assert.Null(session.SetPatch(new LivePatch(0, [0x90], [exeWas]) { Module = "where.exe" }));
+        Assert.Null(session.SetPatch(new LivePatch(0, [0x91], [ntdllWas]) { Module = "ntdll.dll" }));
+
+        Assert.Equal(2, session.LivePatches.Count);
+        Assert.Equal(0x90, session.ReadMemory(exe, 1).Single());
+        Assert.Equal(0x91, session.ReadMemory(ntdll, 1).Single());
+
+        // Each comes out on its own, restoring that module's own byte and leaving the other patched.
+        Assert.Null(session.ClearPatch("where.exe", 0));
+        Assert.Equal(exeWas, session.ReadMemory(exe, 1).Single());
+        Assert.Equal(0x91, session.ReadMemory(ntdll, 1).Single());
+
+        Assert.Null(session.ClearPatch("ntdll.dll", 0));
+        Assert.Equal(ntdllWas, session.ReadMemory(ntdll, 1).Single());
+        Assert.Empty(session.LivePatches);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A patch naming a module the process never loads is held rather than refused, and nothing is
+    /// written anywhere on its behalf. Held is the same answer a patch gets before its module arrives,
+    /// which is the normal case for a DLL.
+    /// </summary>
+    [Fact]
+    public void APatchNamingAModuleThatNeverLoadsIsHeldAndNotWritten()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        Assert.Null(session.SetPatch(new LivePatch(0x1000, [0x90], [0x00]) { Module = "no-such-module-of-ours.dll" }));
+
+        var held = Assert.Single(session.LivePatches);
+        Assert.Equal("no-such-module-of-ours.dll", held.Module);
+        Assert.Equal(0x1000u, held.Rva);
 
         session.Stop();
     }

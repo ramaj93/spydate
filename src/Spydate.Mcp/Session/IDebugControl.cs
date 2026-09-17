@@ -50,6 +50,14 @@ public sealed record DebugSnapshot
     public IReadOnlyList<ulong> Breakpoints { get; init; } = [];
 
     /// <summary>
+    /// The managed call stack, innermost first, when the native engine is driving a .NET target —
+    /// mixed mode. Empty for a purely native target and for the managed (.NET CLR) engine, which has
+    /// its own snapshot. Its presence is how a snapshot says it is a .NET process under the native
+    /// loop: managed breakpoints and this stack are available, but not local variables.
+    /// </summary>
+    public IReadOnlyList<string> ManagedFrames { get; init; } = [];
+
+    /// <summary>
     /// The last things the debuggee did, oldest first — modules loading, breakpoints being hit,
     /// exceptions, how it ended.
     ///

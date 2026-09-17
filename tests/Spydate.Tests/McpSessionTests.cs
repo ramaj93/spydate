@@ -1,3 +1,4 @@
+using System.Text;
 using Spydate.Core.PE;
 using Spydate.Disassembly;
 using Spydate.Mcp;
@@ -80,6 +81,11 @@ public class McpSessionTests
 
         Assert.Contains("no file at", missing, StringComparison.Ordinal);
         Assert.DoesNotContain("Exception", notPe, StringComparison.Ordinal);
+
+        // A next move, not just a refusal. Told only that it is not a PE, an agent decides non-PEs
+        // cannot be read and goes to reconstruct the bytes from process memory; the refusal names
+        // read_file so the blob can be read where it sits.
+        Assert.Contains("read_file", notPe, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -282,5 +288,288 @@ public class McpSessionTests
 
         // The over-long name was cut to the column's limit rather than pushing everything sideways.
         Assert.Equal(8, lines[2][..column].TrimEnd().Length);
+    }
+
+    // ------------------------------------------------------------------
+    // read_file — probing a raw blob that is not a PE
+    // ------------------------------------------------------------------
+
+    private static string TempBlob(byte[] bytes)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"spydate-blob-{Guid.NewGuid():N}.inx");
+        File.WriteAllBytes(path, bytes);
+        return path;
+    }
+
+    [Fact]
+    public void ReadFileShowsARawBlobAsHexWithItsSizeAndAsciiColumn()
+    {
+        string path = TempBlob([0x49, 0x4E, 0x58, 0x01, 0xFF, 0x00]);   // "INX" then non-printable
+        try
+        {
+            string text = new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path);
+
+            Assert.Contains("6 bytes", text, StringComparison.Ordinal);
+            Assert.Contains("49 4E 58 01 FF 00", text, StringComparison.Ordinal);   // the hex
+            Assert.Contains("INX...", text, StringComparison.Ordinal);              // the ascii column
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileDecodesTextWhenAsked()
+    {
+        string path = TempBlob(Encoding.UTF8.GetBytes("workset index v3"));
+        try
+        {
+            Assert.Contains("workset index v3", new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path, @as: "utf8"), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileWindowsByOffsetAndSaysMoreFollows()
+    {
+        string path = TempBlob([.. Enumerable.Range(0, 40).Select(i => (byte)i)]);
+        try
+        {
+            string text = new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path, offset: 8, length: 8);
+
+            Assert.Contains("showing 8 at offset 0x8", text, StringComparison.Ordinal);
+            Assert.Contains("more follows", text, StringComparison.Ordinal);   // 40-byte file, 8 shown from 8
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileSaysWhenTheOffsetIsPastTheEnd()
+    {
+        string path = TempBlob([1, 2, 3]);
+        try
+        {
+            Assert.Contains("past its end", new SessionTools(new SessionStore(), McpOptions.Default).ReadFile(path, offset: 100), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ReadFileRefusesAPathOutsideTheRoot()
+    {
+        // A server rooted somewhere the target is not: the read is refused before the file is touched.
+        var options = new McpOptions { Root = Path.Combine(Path.GetTempPath(), "spydate-root-" + Guid.NewGuid().ToString("N")) };
+        string text = new SessionTools(new SessionStore(), options).ReadFile(@"C:\Windows\System32\drivers\etc\hosts");
+
+        Assert.Contains("will not read files outside it", text, StringComparison.Ordinal);
+    }
+
+    // ------------------------------------------------------------------
+    // debug_config — reading and changing the run configuration
+    // ------------------------------------------------------------------
+
+    private sealed class FakeSettings : IDebugSettings
+    {
+        public DebugSettingsSnapshot Snapshot { get; set; } = new()
+        {
+            Engine = "managed",
+            TargetIsManaged = true,
+            Running = false,
+            ExecutableEditable = true,
+            Executable = "host.exe",
+            BreakAt = "Create Process",
+            EngineOptions = ["managed", "native"],
+            BreakAtOptions = ["Don't break", "Create Process"],
+        };
+
+        public (string? Engine, string? Exe, string? Args, string? Dir, string? Break)? Applied { get; private set; }
+
+        public string? Problem { get; set; }
+
+        public DebugSettingsSnapshot Read() => Snapshot;
+
+        public string? Apply(string? engine, string? executable, string? arguments, string? workingDirectory, string? breakAt)
+        {
+            Applied = (engine, executable, arguments, workingDirectory, breakAt);
+            return Problem;
+        }
+    }
+
+    private static DebugTools DebugToolsWith(SessionStore store)
+        => new(store, McpOptions.Default with { AllowDebug = true });
+
+    private static SessionStore ConfigurableStore(FakeSettings settings)
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return new SessionStore();
+        }
+
+        var store = new SessionStore { DebugSettings = settings };
+        store.Set(Session(Corpus.NotepadX64));
+        return store;
+    }
+
+    [Fact]
+    public void DebugConfigReadsTheSettingsWithoutChangingThem()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var settings = new FakeSettings();
+        string text = DebugToolsWith(ConfigurableStore(settings)).Config();
+
+        Assert.Null(settings.Applied);   // a read touched nothing
+        Assert.Contains("engine: managed", text, StringComparison.Ordinal);
+        Assert.Contains("native", text, StringComparison.Ordinal);   // offered as the other option
+        Assert.Contains("Create Process", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugConfigChangesOnlyTheFieldGivenAndReportsTheResult()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var settings = new FakeSettings();
+        settings.Snapshot = settings.Snapshot with { Engine = "native" };
+
+        string text = DebugToolsWith(ConfigurableStore(settings)).Config(engine: "native");
+
+        Assert.Equal(("native", null, null, null, null), settings.Applied);
+        Assert.Contains("engine: native", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugConfigReturnsTheProblemWhenAChangeIsRefused()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var settings = new FakeSettings { Problem = "a run is in progress; stop it before changing how it starts." };
+
+        string text = DebugToolsWith(ConfigurableStore(settings)).Config(engine: "managed");
+
+        Assert.Equal("a run is in progress; stop it before changing how it starts.", text);
+        Assert.DoesNotContain("engine:", text, StringComparison.Ordinal);   // not the rendered snapshot
+    }
+
+    private sealed class FakeDebug(DebugSnapshot snapshot) : IDebugControl
+    {
+        public DebugSnapshot Snapshot() => snapshot;
+        public string? Start() => throw new NotSupportedException();
+        public void Stop() => throw new NotSupportedException();
+        public void Continue() => throw new NotSupportedException();
+        public void Pause() => throw new NotSupportedException();
+        public void StepInstruction() => throw new NotSupportedException();
+        public void StepOver() => throw new NotSupportedException();
+        public void RunTo(ulong staticVa) => throw new NotSupportedException();
+        public bool SetBreakpoint(ulong staticVa, bool on) => throw new NotSupportedException();
+        public bool SelectThread(uint threadId) => throw new NotSupportedException();
+        public string? TryPatch(ulong va, string instruction, string? comment) => throw new NotSupportedException();
+        public bool UndoPatch(uint rva) => throw new NotSupportedException();
+        public byte[] ReadMemory(ulong staticVa, int length) => throw new NotSupportedException();
+        public bool WaitUntilStopped(TimeSpan timeout) => throw new NotSupportedException();
+    }
+
+    private static DebugTools? DebugToolsWithModules(params (string Name, ulong Base, bool IsTarget)[] modules)
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return null;
+        }
+
+        var snapshot = new DebugSnapshot { State = "stopped", Modules = modules.ToList() };
+        var store = new SessionStore { Debug = new FakeDebug(snapshot) };
+        store.Set(Session(Corpus.NotepadX64));
+        return new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+    }
+
+    [Fact]
+    public void DebugStateSummarisesModulesByDefaultButOffersToListThem()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true), ("kernel32.dll", 0x7FF000000, false)) is not { } tools)
+        {
+            return;
+        }
+
+        string text = tools.State();
+
+        Assert.Contains("2 modules loaded", text, StringComparison.Ordinal);
+        Assert.Contains("modules=", text, StringComparison.Ordinal);   // tells the agent it can list them
+        Assert.DoesNotContain("0x7FF000000", text, StringComparison.Ordinal);   // not dumped by default
+    }
+
+    [Fact]
+    public void DebugStateGivesALoadedModulesRuntimeBaseByName()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true), ("KCSKRNx64.dll", 0x7FFAB000000, false)) is not { } tools)
+        {
+            return;
+        }
+
+        string text = tools.State(modules: "kcskrn");   // case-insensitive substring
+
+        Assert.Contains("KCSKRNx64.dll", text, StringComparison.Ordinal);
+        Assert.Contains("0x7FFAB000000", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("app.exe", text, StringComparison.Ordinal);   // only the match
+    }
+
+    [Fact]
+    public void DebugStateSaysWhenNoLoadedModuleMatches()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true)) is not { } tools)
+        {
+            return;
+        }
+
+        Assert.Contains("no loaded module matches", tools.State(modules: "sqlite"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugStateListsEveryModuleForAStar()
+    {
+        if (DebugToolsWithModules(("app.exe", 0x140000000, true), ("kernel32.dll", 0x7FF000000, false)) is not { } tools)
+        {
+            return;
+        }
+
+        string text = tools.State(modules: "*");
+
+        Assert.Contains("app.exe", text, StringComparison.Ordinal);
+        Assert.Contains("kernel32.dll", text, StringComparison.Ordinal);
+        Assert.Contains("0x7FF000000", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DebugConfigSaysSoWhenTheHostHasNoRunConfiguration()
+    {
+        if (!Corpus.Has(Corpus.NotepadX64))
+        {
+            return;
+        }
+
+        var store = new SessionStore();   // no DebugSettings wired
+        store.Set(Session(Corpus.NotepadX64));
+
+        string text = DebugToolsWith(store).Config();
+
+        Assert.Contains("does not let its run configuration be changed", text, StringComparison.Ordinal);
     }
 }

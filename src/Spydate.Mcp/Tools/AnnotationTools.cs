@@ -30,7 +30,7 @@ public sealed class AnnotationTools
     [McpServerTool(Name = "annotate")]
     [Description("Name an address, comment on it, or both. Saves immediately, and the window reads the same file. Pass an empty name or comment to clear it and go back to what analysis found.")]
     public string Annotate(
-        [Description("Address, sub_XXXX, or an existing name.")] string target,
+        [Description("Address, sub_XXXX, an existing name, or a .NET Type::Method.")] string target,
         [Description("New name. Omit to leave it; pass \"\" to clear it.")] string? name = null,
         [Description("New comment. Omit to leave it; pass \"\" to clear it.")] string? comment = null)
     {
@@ -52,7 +52,23 @@ public sealed class AnnotationTools
         var resolved = Targets.Resolve(session, target);
         if (!resolved.Found)
         {
-            return resolved.Problem!;
+            // Not an address — but a .NET method named the way read_function and debug_break take it,
+            // Namespace.Type::Method, has one all the same: the VA where its IL begins, which is where
+            // the C# listing and the gutter address it. Resolving it here means an agent annotates a
+            // method by the name it already has, instead of hand-computing an RVA for it.
+            if (ManagedMethodVa(session, target) is { } managedVa)
+            {
+                resolved = TargetResult.Of(managedVa);
+            }
+            else if (session.ManagedIndex is not null && ManagedTargets.Resolve(session, target) is { Found: true } named)
+            {
+                return $"{named.Describe()} has no single address to annotate; name a method as "
+                       + "Namespace.Type::Method, or give an address";
+            }
+            else
+            {
+                return resolved.Problem!;
+            }
         }
 
         if (!InsideImage(session, resolved.Va))
@@ -186,6 +202,24 @@ public sealed class AnnotationTools
     /// </summary>
     private static bool InsideImage(BinarySession session, ulong va)
         => session.Image.VaToRva(va) is { } rva && rva < session.Image.OptionalHeader.SizeOfImage;
+
+    /// <summary>
+    /// The VA where a <c>Namespace.Type::Method</c>'s IL begins, or null when the text is not a managed
+    /// method of this assembly — a native binary, a type or a field, or a name that resolves to nothing.
+    /// The same base-plus-RVA the listing addresses a method body by, so a note lands on its first line.
+    /// </summary>
+    private static ulong? ManagedMethodVa(BinarySession session, string target)
+    {
+        if (session.Bodies is not { } bodies)
+        {
+            return null;
+        }
+
+        var resolved = ManagedTargets.Resolve(session, target);
+        return resolved.Member is { Handle: var handle } && bodies.Of(handle) is { } body
+            ? session.Image.ImageBase + body.RvaOf(0)
+            : null;
+    }
 
     internal const string ReadOnlyRefusal =
         "this server was started with --read-only, so nothing can be renamed or commented. Everything else still works.";

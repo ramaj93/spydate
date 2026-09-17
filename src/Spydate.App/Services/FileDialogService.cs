@@ -10,6 +10,12 @@ public interface IFileDialogService
     string? OpenPeFile();
 
     /// <summary>
+    /// Asks for a folder; returns the chosen path or null when cancelled. Opens at
+    /// <paramref name="initialDirectory"/> when it names one that exists.
+    /// </summary>
+    string? OpenFolder(string? initialDirectory = null);
+
+    /// <summary>
     /// Asks for one line of text. Returns null when the user cancels, which is different from an empty
     /// string: empty means "clear it".
     /// </summary>
@@ -31,6 +37,21 @@ public sealed class FileDialogService : IFileDialogService
             Multiselect = false,
         };
         return dialog.ShowDialog() == true ? dialog.FileName : null;
+    }
+
+    public string? OpenFolder(string? initialDirectory = null)
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Working directory",
+        };
+
+        if (initialDirectory is { Length: > 0 } start && System.IO.Directory.Exists(start))
+        {
+            dialog.InitialDirectory = start;
+        }
+
+        return dialog.ShowDialog() == true ? dialog.FolderName : null;
     }
 
     public string? AskForText(string title, string label, string? hint = null, string? initial = null)
