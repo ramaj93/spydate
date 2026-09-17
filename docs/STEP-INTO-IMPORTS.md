@@ -6,13 +6,22 @@ binary. Today it steps in but has nothing to display, so the reader loses the th
 call that leaves the file. This document is the design for closing that, for review before any of it
 is built.
 
-Status: **Phase 1 is done** (commit "Show imported-module code when execution steps into it"),
-verified in the window — stepping where.exe into a call to `KERNEL32!GetModuleHandleW` opens
-`kernel32.dll!GetModuleHandleW` with the execution arrow on it. Phase 1 is disassembly only, on the
-§4 defaults (module file bytes, translated through the run-time base; on-demand cached per-module
-analysis; step-into everything, no skip-list yet). Phases 2–3 (§5) are not started. The forks in §4
-were resolved as the recommended defaults for Phase 1; the skip-list and the file-vs-memory question
-can still be revisited for later phases.
+Status: **Phases 1 and 2 are done**, both verified in the window.
+
+- **Phase 1** (commit "Show imported-module code when execution steps into it"): stepping where.exe
+  into a call to `KERNEL32!GetModuleHandleW` opens `kernel32.dll!GetModuleHandleW` with the execution
+  arrow on it. Disassembly only, on the §4 defaults (module file bytes translated through the
+  run-time base; on-demand cached per-module analysis; step-into everything, no skip-list yet).
+- **Phase 2** (commit "Name imported modules from their PDBs and open their functions on a click"):
+  (a) clicking an import name in the opened binary — `KERNEL32!GetSystemTimeAsFileTime` — opens that
+  function statically from the on-disk DLL, the same document a step-into would; and (b) a module's
+  PDB is fetched from the Microsoft symbol server in the background (reusing `CoreClrSymbols`) and its
+  functions folded into that module's analysis — verified by "Loaded 3210 symbols for KERNEL32.dll
+  from its PDB" and the open document reloading with the richer names.
+
+Phase 3 (§5 — decompiled C for foreign functions; fold into a general multi-binary view) is not
+started, nor is the stepping skip-list for noisy system modules (§4/§6). Click-to-navigate inside a
+foreign-module document still resolves against the opened binary, not that module — a Phase 3 item.
 
 ## 1. What the debugger already does, and what it doesn't
 

@@ -926,6 +926,27 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         return found;
     }
 
+    /// <summary>The on-disk path of a loaded module by file name, or null when it is not loaded (or
+    /// nothing is running). The exact file the running process mapped, which beats guessing at
+    /// System32 for a module that could have come from anywhere.</summary>
+    public string? ModulePath(string name)
+    {
+        if (_session is not { } session)
+        {
+            return null;
+        }
+
+        foreach (var module in session.Modules)
+        {
+            if (string.Equals(module.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return module.Path;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Runs until execution reaches an address, without keeping a breakpoint there.</summary>
     public void RunTo(ulong staticVa)
     {

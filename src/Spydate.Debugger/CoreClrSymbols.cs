@@ -94,6 +94,32 @@ public static class CoreClrSymbols
         return rva;
     }
 
+    /// <summary>
+    /// The PDB file for a module, from the shared cache or fetched from the symbol server into it —
+    /// the same machinery the runtime symbols use, for any module. A file path, for a caller that
+    /// wants to read the whole PDB (all its functions), not one symbol's RVA. Null when the module has
+    /// no CodeView record, no PDB is to be had, or a fetch was disallowed and none is cached. The
+    /// caller reads and matches it (GUID) itself, since matching depends on what it is for.
+    /// </summary>
+    public static string? PdbFor(string modulePath, bool allowFetch = true)
+    {
+        try
+        {
+            if (!File.Exists(modulePath))
+            {
+                return null;
+            }
+
+            var image = PeImage.Load(modulePath);
+            var codeView = image.Debug.Select(d => d.CodeView).FirstOrDefault(c => c is not null);
+            return codeView is null ? null : LocalPdb(codeView, allowFetch);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return null;
+        }
+    }
+
     private static uint Resolve(string runtimePath, string symbol, bool allowFetch)
     {
         try
