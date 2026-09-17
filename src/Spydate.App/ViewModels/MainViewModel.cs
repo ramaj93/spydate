@@ -73,6 +73,10 @@ public sealed partial class MainViewModel : ObservableObject
             }
         };
         debugger.StoppedAt += (_, va) => ShowWhereItStopped(va);
+
+        // Double-clicking a breakpoint in the pane opens the code it is in — the same "show me where"
+        // as a stop, but moving no arrow, since the program is not there.
+        debugger.NavigateRequested += (_, va) => ShowWhereItStopped(va);
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
         RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
@@ -292,8 +296,30 @@ public sealed partial class MainViewModel : ObservableObject
         // so this does not walk the whole DLL.
         var function = analysis.FunctionContaining(listingVa)
                        ?? analysis.GetOrDiscoverFunction(listingVa);
+        string moduleName = System.IO.Path.GetFileName(module.Path);
 
-        ShowModuleDisassembly(moduleBinary, System.IO.Path.GetFileName(module.Path), function);
+        // Already reading this foreign function where the arrow can follow it — its disassembly or its
+        // decompiled C? Leave the reader on it: only the arrow moves. Without this a step inside a
+        // foreign module reopened the disassembly on every press, snapping a decompiled foreign tab
+        // back to assembly — the same trap the opened-binary path fixed above. Otherwise open it in the
+        // view the reader is already in (decompiled carries forward), matching a fresh foreign stop to
+        // where the reader was looking rather than always dropping to disassembly.
+        bool alreadyHere = ActiveDocument is CodeDocumentViewModel { OwningFunctionVa: { } owning }
+            && owning == function.EntryVa
+            && ModuleNameOf(ActiveDocument.Key) is { } activeModule
+            && string.Equals(activeModule, moduleName, StringComparison.OrdinalIgnoreCase);
+
+        if (!alreadyHere)
+        {
+            if (PreferredCodeView() == CodeView.Decompiled && moduleBinary.NativeDecompiler is not null)
+            {
+                ShowModulePseudoC(moduleBinary, moduleName, function);
+            }
+            else
+            {
+                ShowModuleDisassembly(moduleBinary, moduleName, function);
+            }
+        }
 
         // The arrow lives on a single shared address. Set it into this module's listing space; the
         // opened binary's own documents draw no arrow for it, since it is not in their range.
@@ -1603,11 +1629,13 @@ public sealed partial class MainViewModel : ObservableObject
 
     /// <summary>
     /// The view the reader is in now, so a newly opened function can match it. Only the decompiled
-    /// (pseudo-C) tab carries forward; the disassembly, side by side, and everything else default to
-    /// disassembly — side by side because it is a per-function choice, not a mode to carry along.
+    /// (pseudo-C) tab carries forward — the opened binary's <c>pseudoc:</c> or a foreign module's
+    /// <c>modulec:</c>; the disassembly, side by side, and everything else default to disassembly —
+    /// side by side because it is a per-function choice, not a mode to carry along.
     /// </summary>
     private CodeView PreferredCodeView()
-        => ActiveDocument?.Key is { } key && key.StartsWith("pseudoc:", StringComparison.Ordinal)
+        => ActiveDocument?.Key is { } key
+           && (key.StartsWith("pseudoc:", StringComparison.Ordinal) || key.StartsWith("modulec:", StringComparison.Ordinal))
             ? CodeView.Decompiled
             : CodeView.Disassembly;
 

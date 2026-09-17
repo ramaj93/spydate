@@ -38,6 +38,11 @@ public sealed class CodeEditor : TextEditor
         nameof(BreakpointAddresses), typeof(IReadOnlySet<ulong>), typeof(CodeEditor),
         new FrameworkPropertyMetadata(null, OnMarginDataChanged));
 
+    /// <summary>The subset of breakpoints that are disabled, drawn hollow rather than filled.</summary>
+    public static readonly DependencyProperty DisabledBreakpointAddressesProperty = DependencyProperty.Register(
+        nameof(DisabledBreakpointAddresses), typeof(IReadOnlySet<ulong>), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null, OnMarginDataChanged));
+
     /// <summary>Where execution is stopped, marked with an arrow. Null when nothing is running.</summary>
     public static readonly DependencyProperty ExecutionAddressProperty = DependencyProperty.Register(
         nameof(ExecutionAddress), typeof(ulong?), typeof(CodeEditor),
@@ -296,6 +301,12 @@ public sealed class CodeEditor : TextEditor
     {
         get => (IReadOnlySet<ulong>?)GetValue(BreakpointAddressesProperty);
         set => SetValue(BreakpointAddressesProperty, value);
+    }
+
+    public IReadOnlySet<ulong>? DisabledBreakpointAddresses
+    {
+        get => (IReadOnlySet<ulong>?)GetValue(DisabledBreakpointAddressesProperty);
+        set => SetValue(DisabledBreakpointAddressesProperty, value);
     }
 
     public ulong? ExecutionAddress

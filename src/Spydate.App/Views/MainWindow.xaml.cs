@@ -223,6 +223,15 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    /// <summary>Double-clicking a breakpoint in the pane opens the code it is in.</summary>
+    private void OpenBreakpointRow(object sender, MouseButtonEventArgs e)
+    {
+        if (BreakpointsGrid.SelectedItem is BreakpointRow row)
+        {
+            _viewModel.Debugger.GoToBreakpointCommand.Execute(row);
+        }
+    }
+
     private void OnHideExplorerClick(object sender, RoutedEventArgs e) => IsExplorerVisible = false;
 
     private void OnHideOutputClick(object sender, RoutedEventArgs e) => IsOutputVisible = false;

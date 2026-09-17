@@ -513,6 +513,10 @@
                                             <RadioButton x:Name="PaneModules" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Modules"
                                                          AutomationProperties.Name="Modules pane" />
+                                            <RadioButton x:Name="PaneBreakpoints" DockPanel.Dock="Left"
+                                                         Style="{StaticResource StripTab}" Content="Breakpoints"
+                                                         ToolTip="Every breakpoint, managed and native. Tick to enable or disable one; double-click to open its code."
+                                                         AutomationProperties.Name="Breakpoints pane" />
                                             <RadioButton x:Name="PaneLog" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Log"
                                                          AutomationProperties.Name="Log pane" />
@@ -818,6 +822,58 @@
                                                                     FontFamily="{DynamicResource Mono.FontFamily}" />
                                                 <DataGridTextColumn Header="path" Binding="{Binding Path}" Width="*" />
                                             </DataGrid.Columns>
+                                        </DataGrid>
+
+                                        <!-- Every breakpoint, managed and native, in one place. The tick
+                                             enables or disables one without forgetting it (it stays in
+                                             the gutter, drawn hollow); a double-click opens the code it
+                                             is in. -->
+                                        <DataGrid x:Name="BreakpointsGrid" ItemsSource="{Binding Breakpoints}" AutoGenerateColumns="False"
+                                                  IsReadOnly="False" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                  CanUserSortColumns="False" SelectionMode="Single" SelectionUnit="FullRow"
+                                                  MouseDoubleClick="OpenBreakpointRow"
+                                                  Visibility="{Binding IsChecked, ElementName=PaneBreakpoints, Converter={StaticResource BoolToVisibility}}"
+                                                  AutomationProperties.Name="Breakpoints">
+                                            <DataGrid.Columns>
+                                                <DataGridTemplateColumn Header="On" Width="40">
+                                                    <DataGridTemplateColumn.CellTemplate>
+                                                        <DataTemplate>
+                                                            <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                      HorizontalAlignment="Center" Cursor="Hand"
+                                                                      ToolTip="Enable or disable this breakpoint"
+                                                                      AutomationProperties.Name="Enabled" />
+                                                        </DataTemplate>
+                                                    </DataGridTemplateColumn.CellTemplate>
+                                                </DataGridTemplateColumn>
+                                                <DataGridTextColumn Header="location" Binding="{Binding Location}" Width="*"
+                                                                    IsReadOnly="True">
+                                                    <DataGridTextColumn.CellStyle>
+                                                        <Style TargetType="DataGridCell">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Enabled}" Value="False">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource Text.Tertiary}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </DataGridTextColumn.CellStyle>
+                                                </DataGridTextColumn>
+                                                <DataGridTextColumn Header="address" Binding="{Binding Where}" Width="150"
+                                                                    IsReadOnly="True"
+                                                                    FontFamily="{DynamicResource Mono.FontFamily}" />
+                                                <DataGridTextColumn Header="kind" Binding="{Binding Kind}" Width="90"
+                                                                    IsReadOnly="True"
+                                                                    Foreground="{DynamicResource Text.Tertiary}" />
+                                            </DataGrid.Columns>
+                                            <DataGrid.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Go to code"
+                                                              Command="{Binding PlacementTarget.DataContext.GoToBreakpointCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                    <MenuItem Header="Remove"
+                                                              Command="{Binding PlacementTarget.DataContext.RemoveBreakpointCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                </ContextMenu>
+                                            </DataGrid.ContextMenu>
                                         </DataGrid>
 
                                         <ListBox ItemsSource="{Binding Log}"

@@ -48,6 +48,48 @@ public sealed record LivePatchRow(uint Rva, ulong Va, string Was, string Now, st
 }
 
 /// <summary>
+/// One breakpoint as the Breakpoints pane lists it: where it is, what names it, and whether it is
+/// planted. <see cref="Enabled"/> is two-way — unticking it keeps the breakpoint in the list and the
+/// gutter but takes it out of the running process, the way dnSpy disables one without forgetting it.
+/// Managed and native breakpoints both appear here; <see cref="Kind"/> says which.
+/// </summary>
+public sealed partial class BreakpointRow : ObservableObject
+{
+    private readonly Action<ulong, bool>? _onEnabledChanged;
+    private readonly bool _wired;
+
+    public BreakpointRow(ulong address, string location, string kind, bool enabled, Action<ulong, bool>? onEnabledChanged)
+    {
+        Address = address;
+        Location = location;
+        Kind = kind;
+        _enabled = enabled;                 // set the backing field directly, so building the row does not fire the toggle
+        _onEnabledChanged = onEnabledChanged;
+        _wired = true;
+    }
+
+    public ulong Address { get; }
+
+    public string Where => $"0x{Address:X}";
+
+    public string Location { get; }
+
+    public string Kind { get; }
+
+    [ObservableProperty]
+    private bool _enabled;
+
+    partial void OnEnabledChanged(bool value)
+    {
+        // Only a person ticking the box calls out; the constructor set the field, not the property.
+        if (_wired)
+        {
+            _onEnabledChanged?.Invoke(Address, value);
+        }
+    }
+}
+
+/// <summary>
 /// The debugger panel: starting the open binary, stopping it, and reading it while it is stopped.
 ///
 /// It holds a <see cref="DebugSession"/> rather than being one. The session reports from its own
@@ -436,7 +478,19 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>Breakpoints by static address — the ones in the listing, set before anything runs.</summary>
     public HashSet<ulong> BreakpointAddresses { get; } = new();
 
-    public ObservableCollection<string> Breakpoints { get; } = new();
+    /// <summary>
+    /// Breakpoints kept in the listing but taken out of the running process — disabled, not cleared.
+    /// A disabled one still draws in the gutter (hollow) and stays in the Breakpoints pane, so it can
+    /// be switched back on, but it is not planted and does not stop the program. Not persisted: a
+    /// reopened binary brings its breakpoints back enabled, the way a fresh session starts them.
+    /// </summary>
+    private readonly HashSet<ulong> _disabledBreakpoints = new();
+
+    /// <summary>The disabled breakpoints, for the gutter to draw them apart from the live ones.</summary>
+    public IReadOnlySet<ulong> DisabledBreakpointAddresses => _disabledBreakpoints;
+
+    /// <summary>Every breakpoint, for the Breakpoints pane — managed and native alike.</summary>
+    public ObservableCollection<BreakpointRow> Breakpoints { get; } = new();
 
     /// <summary>
     /// Bumped whenever the set changes. The margin binds a set, which raises nothing when it gains
@@ -474,6 +528,119 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>Raised when execution stops somewhere, so the window can show where.</summary>
     public event EventHandler<ulong>? StoppedAt;
+
+    /// <summary>
+    /// Raised when a breakpoint in the pane is double-clicked, so the window opens the code it is in.
+    /// Unlike <see cref="StoppedAt"/> it moves no arrow: it is "show me where this breakpoint is", not
+    /// "the program stopped here".
+    /// </summary>
+    public event EventHandler<ulong>? NavigateRequested;
+
+    /// <summary>Opens the code a breakpoint sits in — the pane's double-click and its context menu.</summary>
+    [RelayCommand]
+    private void GoToBreakpoint(BreakpointRow? row)
+    {
+        if (row is not null)
+        {
+            NavigateRequested?.Invoke(this, row.Address);
+        }
+    }
+
+    /// <summary>Clears a breakpoint from the pane, the same as toggling it off in the listing.</summary>
+    [RelayCommand]
+    private void RemoveBreakpoint(BreakpointRow? row)
+    {
+        if (row is not null)
+        {
+            ToggleBreakpoint(row.Address);
+        }
+    }
+
+    /// <summary>
+    /// Enables or disables a breakpoint without forgetting it: a disabled one is taken out of the
+    /// running process but kept in the list and the gutter, so it can be switched back on. Works
+    /// before a run too — it just marks the set, which the start-up planting then honours.
+    /// </summary>
+    public void SetBreakpointEnabled(ulong staticVa, bool enabled)
+    {
+        if (!BreakpointAddresses.Contains(staticVa))
+        {
+            return;
+        }
+
+        bool changed = enabled ? _disabledBreakpoints.Remove(staticVa) : _disabledBreakpoints.Add(staticVa);
+        if (!changed)
+        {
+            return;
+        }
+
+        if (enabled)
+        {
+            PlantBreakpoint(staticVa);
+            Add($"enabled the breakpoint at 0x{staticVa:X}");
+        }
+        else
+        {
+            UnplantBreakpoint(staticVa);
+            Add($"disabled the breakpoint at 0x{staticVa:X}");
+        }
+
+        // The row already carries the new state (the tick set it), so the list is not rebuilt here —
+        // that would drop the row out from under the click. Only the gutter needs telling.
+        BreakpointsVersion++;
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Puts a breakpoint into the running process, by whichever route its kind takes — a native int3, a
+    /// managed breakpoint on the CLR engine, or a managed one planted over the native loop in mixed
+    /// mode. A no-op when nothing is running; enabling before a run just leaves it for the start to plant.
+    /// </summary>
+    private void PlantBreakpoint(ulong staticVa)
+    {
+        if (UsesManagedDebugger)
+        {
+            if (_pendingManaged.TryGetValue(staticVa, out var m) && _managed?.SetBreakpoint(m.Module, m.Token, m.Offset) is { } refused)
+            {
+                Add(refused);
+            }
+        }
+        else if (IsMixedMode && MixedTarget(staticVa) is { } target)
+        {
+            string? result = _session?.AddManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+            if (result is not null && !result.Contains("nothing is running", StringComparison.Ordinal))
+            {
+                _seededMixed.Add(staticVa);
+            }
+
+            EnsureMixedPump();
+        }
+        else
+        {
+            _session?.AddBreakpoint(staticVa);
+        }
+    }
+
+    /// <summary>Takes a breakpoint back out of the running process, the reverse of <see cref="PlantBreakpoint"/>.</summary>
+    private void UnplantBreakpoint(ulong staticVa)
+    {
+        if (UsesManagedDebugger)
+        {
+            if (_pendingManaged.TryGetValue(staticVa, out var m))
+            {
+                _managed?.ClearBreakpoint(m.Module, m.Token, m.Offset);
+            }
+        }
+        else if (IsMixedMode && MixedTarget(staticVa) is { } target)
+        {
+            _seededMixed.Remove(staticVa);
+            _session?.RemoveManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
+        }
+        else
+        {
+            _session?.RemoveBreakpoint(staticVa);
+        }
+    }
 
     // ------------------------------------------------------------------
 
@@ -587,7 +754,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         {
             foreach (ulong address in BreakpointAddresses)
             {
-                session.AddBreakpoint(address);
+                if (!_disabledBreakpoints.Contains(address))
+                {
+                    session.AddBreakpoint(address);
+                }
             }
         }
 
@@ -690,9 +860,14 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // Put in while it is held, which is the point of holding: every one of them is in place
         // before the code it is about has run. A run that planted them afterwards would be racing
         // the program for the ones near the start, which are the ones people set.
-        foreach (var (module, token, offset) in _pendingManaged.Values)
+        foreach (var (va, pending) in _pendingManaged)
         {
-            if (session.SetBreakpoint(module, token, offset) is { } refused)
+            if (_disabledBreakpoints.Contains(va))
+            {
+                continue;   // disabled before the run: kept in the list, but not planted
+            }
+
+            if (session.SetBreakpoint(pending.Module, pending.Token, pending.Offset) is { } refused)
             {
                 Add(refused);
             }
@@ -986,6 +1161,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         if (BreakpointAddresses.Remove(staticVa))
         {
+            _disabledBreakpoints.Remove(staticVa);
             _session?.RemoveBreakpoint(staticVa);
             RememberBreakpoint(staticVa, on: false);
             Add($"cleared the breakpoint at 0x{staticVa:X}");
@@ -1047,6 +1223,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     {
         if (BreakpointAddresses.Remove(staticVa))
         {
+            _disabledBreakpoints.Remove(staticVa);
             _seededMixed.Remove(staticVa);
             string? refused = _session?.RemoveManagedBreakpoint(target.Type, (int)target.Token, (int)target.Offset);
             RememberBreakpoint(staticVa, on: false);
@@ -1170,7 +1347,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         foreach (ulong va in BreakpointAddresses.ToList())
         {
-            if (_seededMixed.Contains(va) || MixedTarget(va) is not { } target)
+            if (_seededMixed.Contains(va) || _disabledBreakpoints.Contains(va) || MixedTarget(va) is not { } target)
             {
                 continue;
             }
@@ -1224,6 +1401,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     {
         BreakpointAddresses.Clear();
         _pendingManaged.Clear();
+        _disabledBreakpoints.Clear();   // enabled/disabled is a session matter; a reopened binary starts them on
 
         if (_workspace.Current is { } binary)
         {
@@ -1269,6 +1447,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             }
 
             BreakpointAddresses.Remove(address);
+            _disabledBreakpoints.Remove(address);
             RememberBreakpoint(address, on: false);
         }
 
@@ -1366,11 +1545,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             Modules.Add(new ModuleRow(module, string.Empty, string.Empty, false));
         }
 
-        Breakpoints.Clear();
-        foreach (var breakpoint in session.Breakpoints)
-        {
-            Breakpoints.Add(breakpoint.ToString());
-        }
+        // The pane is built from BreakpointAddresses, the one source both engines keep — a managed
+        // breakpoint is added to it through the same toggle that hands it to the session — so it names
+        // and enables uniformly rather than dumping the managed session's own list as bare text.
+        RefreshBreakpoints();
 
         if (State != DebugState.Stopped)
         {
@@ -1947,8 +2125,36 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Breakpoints.Clear();
         foreach (ulong address in BreakpointAddresses.Order())
         {
-            Breakpoints.Add($"0x{address:X}");
+            Breakpoints.Add(new BreakpointRow(
+                address,
+                BreakpointLocation(address),
+                _pendingManaged.ContainsKey(address) ? "managed" : "native",
+                !_disabledBreakpoints.Contains(address),
+                SetBreakpointEnabled));
         }
+    }
+
+    /// <summary>
+    /// What a breakpoint sits in, for the pane to read rather than a bare address: a managed one names
+    /// its method and IL offset (a native listing is absent for an IL-only file); a native one takes
+    /// the name the analysis gives its address. Falls back to the address when nothing can name it.
+    /// </summary>
+    private string BreakpointLocation(ulong va)
+    {
+        if (_workspace.Current is not { } binary)
+        {
+            return $"0x{va:X}";
+        }
+
+        if (_pendingManaged.TryGetValue(va, out var managed))
+        {
+            string where = $"IL_{managed.Offset:X4}";
+            return binary.Managed?.Locate((int)managed.Token) is (var type, { } member)
+                ? $"{type.Name}.{member.Name} ({where})"
+                : where;
+        }
+
+        return binary.Analysis?.NameFor(va) ?? $"0x{va:X}";
     }
 
     // ------------------------------------------------------------------

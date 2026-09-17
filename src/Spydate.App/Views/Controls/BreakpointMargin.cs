@@ -64,6 +64,7 @@ public sealed class BreakpointMargin : AbstractMargin
         drawingContext.DrawRectangle(Brush("Editor.Background", Brushes.Transparent), null, new Rect(0, 0, StripWidth, ActualHeight));
 
         var breakpoints = _editor.BreakpointAddresses;
+        var disabled = _editor.DisabledBreakpointAddresses;
         ulong? current = _editor.ExecutionAddress;
 
         // Which line the arrow belongs on, asked of the whole document rather than matched against
@@ -94,9 +95,13 @@ public sealed class BreakpointMargin : AbstractMargin
 
             if (breakpoints?.Contains(va) == true)
             {
+                // A disabled breakpoint draws hollow — outline only, no fill — so it reads as present
+                // but not firing, the way dnSpy shows one that is switched off. An enabled one is the
+                // filled dot it has always been.
+                bool off = disabled?.Contains(va) == true;
                 drawingContext.DrawEllipse(
-                    Brush("Debug.Breakpoint", Brushes.Firebrick),
-                    new Pen(Brush("Debug.BreakpointEdge", Brushes.DarkRed), 1),
+                    off ? Brushes.Transparent : Brush("Debug.Breakpoint", Brushes.Firebrick),
+                    new Pen(Brush("Debug.BreakpointEdge", Brushes.DarkRed), off ? 1.5 : 1),
                     new Point(StripWidth / 2, middle),
                     DotRadius,
                     DotRadius);
