@@ -197,6 +197,17 @@ public sealed partial class MainViewModel : ObservableObject
 
         if (Binary?.Analysis is { } analysis && analysis.FunctionContaining(va) is { } function)
         {
+            // Already reading this function where the arrow can follow it — the disassembly, the
+            // decompiled C, or the two side by side? Then leave the reader on it: the ExecutionAddress
+            // binding moves the arrow on its own, and reopening the disassembly is what made stepping
+            // in a decompiled or side-by-side tab snap back to assembly on every press. The graph is
+            // an ICaretContext too but carries no arrow, so it is deliberately not one of these.
+            if (ActiveDocument is CodeDocumentViewModel or SplitCodeDocumentViewModel
+                && (ActiveDocument as ICaretContext)?.OwningFunctionVa == function.EntryVa)
+            {
+                return;
+            }
+
             OpenTarget(new DisassemblyTarget(function.EntryVa, NameOf(function.EntryVa)));
             return;
         }
