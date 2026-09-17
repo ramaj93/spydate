@@ -2437,38 +2437,65 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Runs to the end of the current method and stops in whatever called it.
+    /// Runs to the end of the current function and stops in whatever called it.
     ///
-    /// Managed only, and not an oversight on the native side: stepping out of a native function
-    /// means knowing where its return address is, which is a question about an unwinding convention
-    /// rather than about the program. The runtime already knows.
+    /// Three ways to the same place, by who is driving. Mixed mode steps out over the native loop; the
+    /// CLR engine asks the runtime, which knows its own frames; and a native stop unwinds one frame
+    /// with the platform's own unwinder to find the return address and runs to it. That last is why
+    /// this is no longer managed-only: <see cref="DebugSession.StepOutNative"/> reads the function's
+    /// unwind info the way the OS does, rather than guessing where the return address sits.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanStepOut))]
     private void StepOut()
     {
+        if (!IsStopped)
+        {
+            return;
+        }
+
+        // Mixed mode: an IL step-out over the native loop.
         if (StepMixed(IlStepKind.Out))
         {
             return;
         }
 
-        if (_managed is not { } session || !IsStopped)
+        // The CLR engine steps out of the managed frame through the runtime.
+        if (_managed is { } session)
         {
+            Resuming();
+            if (session.StepOut() is { } problem)
+            {
+                Add(problem);
+                return;
+            }
+
+            State = DebugState.Running;
+            NotifyCommands();
             return;
         }
 
-        Resuming();
-        if (session.StepOut() is { } problem)
+        // A pure native stop: unwind one frame and run to the caller's return address. Asked before
+        // anything moves, so a step out that cannot be worked out — the outermost frame, a function
+        // with no unwind information — says so and leaves the program stopped where it was, rather
+        // than letting it run on to wherever it would have ended.
+        if (_session is { } native)
         {
-            Add(problem);
-            return;
-        }
+            if (!native.TryStepOut(out string? problem))
+            {
+                Add($"cannot step out: {problem}");
+                Status = "Cannot step out from here.";
+                return;
+            }
 
-        State = DebugState.Running;
-        NotifyCommands();
+            Resuming();
+            State = DebugState.Running;
+            NotifyCommands();
+        }
     }
 
-    // A step out belongs to a managed stop, whether the CLR engine or the native loop is driving it.
-    private bool CanStepOut() => IsStopped && (IsManaged || IsMixedMode);
+    // Step out works at any stop now: mixed and CLR-engine stops step out through the runtime, and a
+    // native stop unwinds one frame. Only that there is a stop to step out of.
+    private bool CanStepOut() => IsStopped;
 
     /// <summary>
     /// A breakpoint clicked in the IL gutter, turned into the method and offset the runtime wants.

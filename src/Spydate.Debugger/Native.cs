@@ -404,4 +404,49 @@ internal static partial class Native
     internal static partial int GetThreadPriority(IntPtr hThread);
 
     internal const int THREAD_PRIORITY_ERROR_RETURN = 0x7FFFFFFF;
+
+    // ------------------------------------------------------------------
+    // DbgHelp — a native stack walk, for "step out" of native code.
+    //
+    // StackWalk64 is Windows' own unwinder: it reads each function's .pdata unwind info the way
+    // RtlVirtualUnwind does, so it finds the caller's return address on x64 where reading [rsp] or an
+    // ebp chain cannot (x64 omits the frame pointer). DbgHelp is single-threaded, so every call here
+    // is made on the debug-loop thread. The helper routines it needs — SymFunctionTableAccess64 and
+    // SymGetModuleBase64 — are passed by address (see NativeStackWalk); the read routine is left null,
+    // which makes StackWalk64 read the debuggee with ReadProcessMemory on the handle it is given.
+    // ------------------------------------------------------------------
+
+    internal const uint IMAGE_FILE_MACHINE_I386 = 0x014C;
+    internal const uint IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+
+    internal const uint SYMOPT_NO_PROMPTS = 0x00080000;
+    internal const uint SYMOPT_FAIL_CRITICAL_ERRORS = 0x00000200;
+
+    [LibraryImport("dbghelp.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SymInitializeW(IntPtr hProcess, IntPtr userSearchPath, [MarshalAs(UnmanagedType.Bool)] bool invadeProcess);
+
+    [LibraryImport("dbghelp.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SymCleanup(IntPtr hProcess);
+
+    [LibraryImport("dbghelp.dll")]
+    internal static partial uint SymSetOptions(uint symOptions);
+
+    [LibraryImport("dbghelp.dll", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
+    internal static partial ulong SymLoadModuleExW(
+        IntPtr hProcess, IntPtr hFile, string imageName, IntPtr moduleName, ulong baseOfDll, uint dllSize, IntPtr data, uint flags);
+
+    [LibraryImport("dbghelp.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool StackWalk64(
+        uint machineType,
+        IntPtr hProcess,
+        IntPtr hThread,
+        byte* stackFrame,
+        byte* contextRecord,
+        IntPtr readMemoryRoutine,
+        IntPtr functionTableAccessRoutine,
+        IntPtr getModuleBaseRoutine,
+        IntPtr translateAddress);
 }

@@ -37,6 +37,7 @@
         <KeyBinding Key="F10" Modifiers="Control" Command="{Binding RunToCursorCommand}" />
         <KeyBinding Key="F11" Command="{Binding Debugger.StepInstructionCommand}" />
         <KeyBinding Key="F11" Modifiers="Control" Command="{Binding Debugger.StepIlCommand}" />
+        <KeyBinding Key="F11" Modifiers="Shift" Command="{Binding Debugger.StepOutCommand}" />
         <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Debugger.StopDebuggingCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
@@ -172,6 +173,8 @@
                               ToolTip="One statement, stopping inside any call it makes. One machine instruction, for a native process." />
                     <MenuItem Header="Step one I_L instruction" InputGestureText="Ctrl+F11" Command="{Binding Debugger.StepIlCommand}"
                               ToolTip="One IL instruction, for reading the IL view. .NET processes only." />
+                    <MenuItem Header="Step ou_t" InputGestureText="Shift+F11" Command="{Binding Debugger.StepOutCommand}"
+                              ToolTip="Runs to the end of the current function and stops in whatever called it." />
                     <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding RunToCursorCommand}" />
                     <Separator />
                     <MenuItem Header="_Test patch live…" InputGestureText="Ctrl+Shift+P" Command="{Binding TestPatchLiveCommand}"
@@ -246,6 +249,41 @@
                         <ui:SymbolIcon Symbol="ArrowSync24" FontSize="13" Margin="0,0,4,0" />
                         <TextBlock Text="Re-analyze" VerticalAlignment="Center" />
                     </StackPanel>
+                </Button>
+
+                <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />
+
+                <!-- The debugger's run controls, moved off the Debug panel so they are reachable
+                     whatever tab is forward. Bound through Debugger since the toolbar's context is the
+                     main view model; each greys itself out through its own command's CanExecute. -->
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StartCommand}"
+                        ToolTip="Run under the debugger" AutomationProperties.Name="Run under the debugger">
+                    <ui:SymbolIcon Symbol="Play20" FontSize="14" Foreground="{DynamicResource Semantic.Success}" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.ContinueCommand}"
+                        ToolTip="Continue (F8)" AutomationProperties.Name="Continue running">
+                    <ui:SymbolIcon Symbol="FastForward20" FontSize="14" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.PauseCommand}"
+                        ToolTip="Pause — stop it where it is, without ending it" AutomationProperties.Name="Pause">
+                    <ui:SymbolIcon Symbol="Pause20" FontSize="14" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StepOverCommand}"
+                        ToolTip="Step over (F10)" AutomationProperties.Name="Step over">
+                    <ui:SymbolIcon Symbol="ArrowStepOver20" FontSize="14" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StepInstructionCommand}"
+                        ToolTip="Step into — one instruction (F11)" AutomationProperties.Name="Step one instruction">
+                    <ui:SymbolIcon Symbol="ArrowStepIn20" FontSize="14" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StepOutCommand}"
+                        ToolTip="Step out — run to the end of this function and stop in its caller"
+                        AutomationProperties.Name="Step out">
+                    <ui:SymbolIcon Symbol="ArrowStepOut20" FontSize="14" />
+                </Button>
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StopDebuggingCommand}"
+                        ToolTip="Stop, which ends the process (Shift+F5)" AutomationProperties.Name="Stop debugging">
+                    <ui:SymbolIcon Symbol="Stop20" FontSize="14" Foreground="{DynamicResource Semantic.Error}" />
                 </Button>
             </DockPanel>
         </Border>
@@ -419,76 +457,13 @@
                                          the things that change every time execution stops. -->
                                     <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
                                         <DockPanel LastChildFill="False">
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding StartCommand}"
-                                                    ToolTip="Run under the debugger"
-                                                    AutomationProperties.Name="Run under the debugger">
-                                                <ui:SymbolIcon Symbol="Play20" Foreground="{DynamicResource Semantic.Success}" />
-                                            </Button>
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding ContinueCommand}"
-                                                    ToolTip="Continue (F8)"
-                                                    AutomationProperties.Name="Continue running">
-                                                <ui:SymbolIcon Symbol="FastForward20" />
-                                            </Button>
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding PauseCommand}"
-                                                    ToolTip="Pause - stop it where it is, without ending it"
-                                                    AutomationProperties.Name="Pause">
-                                                <ui:SymbolIcon Symbol="Pause20" />
-                                            </Button>
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding StepOverCommand}"
-                                                    ToolTip="Step over (F10)"
-                                                    AutomationProperties.Name="Step over">
-                                                <ui:SymbolIcon Symbol="ArrowStepOver20" />
-                                            </Button>
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding StepInstructionCommand}"
-                                                    ToolTip="Step one instruction (F11)"
-                                                    AutomationProperties.Name="Step one instruction">
-                                                <ui:SymbolIcon Symbol="ArrowStepIn20" />
-                                            </Button>
-                                            <!-- Managed only, and not an oversight on the native
-                                                 side: stepping out of a native function means
-                                                 knowing where its return address is, which is a
-                                                 question about an unwinding convention rather than
-                                                 about the program. The runtime already knows. -->
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding StepOutCommand}"
-                                                    Visibility="{Binding UsesManagedDebugger, Converter={StaticResource BoolToVisibility}}"
-                                                    ToolTip="Step out — run to the end of this method"
-                                                    AutomationProperties.Name="Step out">
-                                                <ui:SymbolIcon Symbol="ArrowStepOut20" />
-                                            </Button>
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding StopDebuggingCommand}"
-                                                    ToolTip="Stop, which ends the process (Shift+F5)"
-                                                    AutomationProperties.Name="Stop debugging">
-                                                <ui:SymbolIcon Symbol="Stop20" Foreground="{DynamicResource Semantic.Error}" />
-                                            </Button>
-
-                                            <Border DockPanel.Dock="Left" Width="1" Margin="6,4"
-                                                    Background="{DynamicResource Chrome.Border}" />
-
-                                            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}"
-                                                    Command="{Binding ConfigureRunCommand}"
-                                                    ToolTip="Run configuration — the host, its arguments and where to start it"
-                                                    AutomationProperties.Name="Run configuration">
-                                                <ui:SymbolIcon Symbol="MoreVertical20" />
-                                            </Button>
-
-
-                                            <Border DockPanel.Dock="Left" Width="1" Margin="6,4"
-                                                    Background="{DynamicResource Chrome.Border}" />
-
-                                            <!-- Tabs on the same row as the actions, so the panes
-                                                 below get the whole of the height there is. -->
-                                            <!-- One of these two is showing at a time, decided by
-                                                 what was opened. Registers and stack words are what
-                                                 a native stop has to say; a managed stop has the
-                                                 frame's own values, which is the same question
-                                                 answered by something that knows the answer. -->
+                                            <!-- The run controls (run, continue, step, stop) live on
+                                                 the main toolbar now, where they are reachable without
+                                                 the Debug tab being forward; this row is the panes and,
+                                                 on the right, the stop status and the run configuration.
+                                                 One of the first two panes shows at a time: registers
+                                                 and stack words are what a native stop has to say; a
+                                                 managed stop has the frame's own values instead. -->
                                             <RadioButton x:Name="PaneThreads" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" IsChecked="True"
                                                          Content="Threads &amp; registers"
@@ -525,6 +500,19 @@
                                                          ToolTip="Patches tried in the running process but not yet in the project"
                                                          AutomationProperties.Name="Live patches pane" />
 
+                                            <!-- Docked right, so they read from the right edge in the
+                                                 order added: the run configuration at the far right,
+                                                 then the processor flags, then the stop status. Run
+                                                 config sits after the flags because it is set once for
+                                                 a binary and then left alone, out of the way of the
+                                                 status that changes at every stop. -->
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                    Command="{Binding ConfigureRunCommand}"
+                                                    Margin="6,0,0,0"
+                                                    ToolTip="Run configuration — the host, its arguments and where to start it"
+                                                    AutomationProperties.Name="Run configuration">
+                                                <ui:SymbolIcon Symbol="MoreVertical20" />
+                                            </Button>
                                             <TextBlock DockPanel.Dock="Right" Text="{Binding Flags}"
                                                        VerticalAlignment="Center" Margin="12,0,6,0"
                                                        FontFamily="{DynamicResource Mono.FontFamily}"

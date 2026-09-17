@@ -36,6 +36,10 @@ public abstract unsafe class ThreadContext : IDisposable
 
     protected byte* Buffer => _buffer;
 
+    /// <summary>The whole CONTEXT, for an API that takes the structure rather than one field — a
+    /// native stack walk hands this to StackWalk64, which reads and updates it as it unwinds.</summary>
+    internal byte* Raw => _buffer;
+
     public abstract bool Read(IntPtr thread);
 
     public abstract bool Write(IntPtr thread);
@@ -45,6 +49,9 @@ public abstract unsafe class ThreadContext : IDisposable
 
     /// <summary>RSP, or ESP on a 32-bit thread.</summary>
     public abstract ulong StackPointer { get; }
+
+    /// <summary>RBP, or EBP on a 32-bit thread — the frame pointer, to seed a stack walk.</summary>
+    public abstract ulong FramePointer { get; }
 
     public abstract uint EFlags { get; set; }
 
@@ -111,6 +118,8 @@ public sealed unsafe class X64ThreadContext : ThreadContext
 
     public override ulong StackPointer => this[4];
 
+    public override ulong FramePointer => this[5];
+
     public override uint EFlags
     {
         get => *(uint*)(Buffer + OffEFlags);
@@ -176,6 +185,8 @@ public sealed unsafe class Wow64ThreadContext : ThreadContext
     }
 
     public override ulong StackPointer => *(uint*)(Buffer + OffEsp);
+
+    public override ulong FramePointer => *(uint*)(Buffer + OffEbp);
 
     public override uint EFlags
     {

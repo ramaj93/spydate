@@ -662,6 +662,77 @@ public sealed class DebugSession : IDisposable
         });
     }
 
+    /// <summary>
+    /// Runs until the function the stopped thread is in returns, and stops in its caller — a native
+    /// "step out". The caller's return address comes from unwinding one frame with the platform's own
+    /// unwinder (<see cref="NativeStackWalk"/>), which reads the function's <c>.pdata</c> where reading
+    /// the stack directly could not. A one-shot breakpoint is planted there and the process let run to
+    /// it, exactly as <see cref="RunTo"/> does — the difference is only how the address is found.
+    /// </summary>
+    /// <summary>
+    /// True when the step was started. The unwind happens here rather than inside the posted work, and
+    /// that ordering is the point: posting resumes the debuggee unconditionally, so a step out that
+    /// could not find its caller would run the program on to wherever it ended — for the outermost
+    /// frame, to exit. Working the address out first means a step out that cannot be done changes
+    /// nothing at all and says why, leaving the program where it was stopped.
+    /// </summary>
+    public bool TryStepOut(out string? problem)
+    {
+        problem = null;
+        if (State != DebugState.Stopped)
+        {
+            problem = "nothing is stopped";
+            return false;
+        }
+
+        uint thread = SelectedThreadId;
+        ulong rip = RipOf(thread);
+        var module = ModuleAt(rip);
+
+        // Safe to read from this thread: the debuggee is stopped with its threads suspended, and
+        // nothing here touches the debug loop — only the process's memory and the thread's registers.
+        ulong ret = NativeStackWalk.CallerReturn(_process, thread, _wow64, module?.Path, module?.Base ?? 0);
+        if (ret == 0)
+        {
+            problem = NativeStackWalk.LastDiag ?? "could not work out where this function returns to";
+            return false;
+        }
+
+        _overlay?.MarkMoved();
+        Post(() =>
+        {
+            if (Plant(ret, temporary: true))
+            {
+                _temporary = ret;
+            }
+            else
+            {
+                Report("problem", $"could not set the one-shot breakpoint at 0x{ret:X}");
+            }
+        });
+
+        return true;
+    }
+
+    /// <summary>The loaded module a runtime address is in — the one with the greatest base at or below
+    /// it — or null when nothing is loaded there.</summary>
+    private LoadedModule? ModuleAt(ulong runtimeVa)
+    {
+        lock (_modules)
+        {
+            LoadedModule? best = null;
+            foreach (var module in _modules.Values)
+            {
+                if (module.Base <= runtimeVa && (best is null || module.Base > best.Base))
+                {
+                    best = module;
+                }
+            }
+
+            return best;
+        }
+    }
+
     /// <summary>A managed step in flight: the thread, what to do with calls, and where it started.</summary>
     private sealed record ManagedStep(
         uint Thread, IlStepKind Kind, ulong RangeStart, ulong RangeEnd, ulong MethodStart, ulong MethodEnd, int StartIl, string Method);
