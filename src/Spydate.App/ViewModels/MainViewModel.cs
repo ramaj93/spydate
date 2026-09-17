@@ -43,6 +43,16 @@ public sealed partial class MainViewModel : ObservableObject
     /// </summary>
     private readonly Dictionary<string, OpenedBinary?> _modules = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The opened binary's imported function names to the module each comes from — "GetModuleHandleW"
+    /// to "KERNEL32.dll" — built once from the import table so a click on an import name in a listing
+    /// can find its module without scanning the imports every time the hand cursor asks.
+    /// </summary>
+    private Dictionary<string, string>? _imports;
+
+    /// <summary>Modules a symbol-server PDB fetch has already been started for, so it runs once each.</summary>
+    private readonly HashSet<string> _symbolsWarmed = new(StringComparer.OrdinalIgnoreCase);
+
     public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant, DebuggerViewModel debugger)
     {
         _dialogs = dialogs;
@@ -320,7 +330,65 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         _modules[path] = opened;
+        if (opened is not null)
+        {
+            WarmModuleSymbols(path, opened);
+        }
+
         return opened;
+    }
+
+    /// <summary>
+    /// Fetches a foreign module's PDB from the symbol server in the background and folds its function
+    /// names into that module's analysis, so a stop deep inside it reads as a name rather than
+    /// sub_XXXX. Best-effort and once per module: no PDB, no network, or a build mismatch just leaves
+    /// the export names already there. Any open document for the module is reloaded when names arrive.
+    /// </summary>
+    private void WarmModuleSymbols(string path, OpenedBinary module)
+    {
+        if (module.Analysis is not { } analysis || !_symbolsWarmed.Add(path))
+        {
+            return;
+        }
+
+        var image = analysis.Image;
+        var codeView = image.Debug.Select(d => d.CodeView).FirstOrDefault(c => c is not null);
+        if (codeView is null)
+        {
+            return;
+        }
+
+        var symbols = analysis.Symbols;
+        string moduleName = System.IO.Path.GetFileName(path);
+        _ = Task.Run(() =>
+        {
+            // Network and PDB parse off the UI thread; the symbol table and documents are touched only
+            // back on it, where nothing else is reading them at the same time.
+            string? pdbPath = Spydate.Debugger.CoreClrSymbols.PdbFor(path);
+            var pdb = pdbPath is null ? null : Spydate.Core.Pdb.PdbFile.TryLoad(pdbPath, out _);
+            if (pdb is null || pdb.Guid != codeView.Guid)
+            {
+                return;
+            }
+
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                int before = symbols.Count;
+                Spydate.Core.Pdb.PdbSymbols.Apply(image, pdb, symbols);
+                if (symbols.Count <= before)
+                {
+                    return;
+                }
+
+                Log($"Loaded {symbols.Count - before} symbols for {moduleName} from its PDB.");
+                foreach (var doc in Documents.OfType<CodeDocumentViewModel>()
+                             .Where(d => d.Key.StartsWith($"module:{moduleName}:", StringComparison.Ordinal))
+                             .ToList())
+                {
+                    _ = doc.ReloadAsync();
+                }
+            });
+        });
     }
 
     /// <summary>The member whose IL covers an address, when the open file is a .NET assembly.</summary>
@@ -763,6 +831,8 @@ public sealed partial class MainViewModel : ObservableObject
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
             Documents.Clear();
             _modules.Clear();
+            _imports = null;
+            _symbolsWarmed.Clear();
             ActiveDocument = null;
             ClearHistory();
             Binary = opened;
@@ -851,6 +921,8 @@ public sealed partial class MainViewModel : ObservableObject
         _analysisCts?.Cancel();
         Documents.Clear();
         _modules.Clear();
+        _imports = null;
+        _symbolsWarmed.Clear();
         Explorer.Clear();
         Warnings.Clear();
         ActiveDocument = null;
@@ -1552,13 +1624,47 @@ public sealed partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanNavigateWord))]
     private void NavigateWord(string? word)
     {
-        if (Binary?.Analysis is { } analysis && ResolveFunction(word) is { } va)
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        // A function in the opened binary opens in place; a clicked import name opens the module it
+        // comes from — the static cousin of stepping into it, and the same document either way.
+        if (ResolveFunction(word) is { } va)
         {
             OpenTarget(new DisassemblyTarget(va, analysis.NameFor(va)));
         }
+        else if (ImportUnder(word, analysis) is { } import)
+        {
+            OpenImportedFunction(analysis, import.Module, import.Function);
+        }
     }
 
-    private bool CanNavigateWord(string? word) => ResolveFunction(word) is not null;
+    private bool CanNavigateWord(string? word)
+        => ResolveFunction(word) is not null
+           || (Binary?.Analysis is { } analysis && ImportUnder(word, analysis) is not null);
+
+    /// <summary>
+    /// The (module, function) a clicked word names as an import, or null. A listing writes an import as
+    /// its whole symbol — <c>KERNEL32!GetSystemTimeAsFileTime</c>, one word since <c>!</c> is part of a
+    /// name here — so the module is in the word; a bare function name is looked up in the import table.
+    /// </summary>
+    private (string Module, string Function)? ImportUnder(string? word, BinaryAnalysis analysis)
+    {
+        if (string.IsNullOrEmpty(word))
+        {
+            return null;
+        }
+
+        int bang = word.IndexOf('!');
+        if (bang > 0 && bang < word.Length - 1 && analysis.Symbols.GetByName(word) is { Kind: Core.Symbols.SymbolKind.Import })
+        {
+            return (word[..bang], word[(bang + 1)..]);
+        }
+
+        return ImportMap(analysis).TryGetValue(word, out string? module) ? (TrimExtension(module), word) : null;
+    }
 
     /// <summary>The entry of the function a listing word names, or null.</summary>
     private ulong? ResolveFunction(string? word)
@@ -1570,6 +1676,90 @@ public sealed partial class MainViewModel : ObservableObject
 
         ulong? target = Core.Text.AddressText.FromGeneratedName(word) ?? analysis.Symbols.GetByName(word)?.Va;
         return target is { } va && analysis.IsFunctionStart(va) ? va : null;
+    }
+
+    /// <summary>Every named import of the opened binary, mapped to the module it comes from. Built once.</summary>
+    private Dictionary<string, string> ImportMap(BinaryAnalysis analysis)
+    {
+        if (_imports is not null)
+        {
+            return _imports;
+        }
+
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var module in analysis.Image.Imports.Concat(analysis.Image.DelayImports))
+        {
+            foreach (var function in module.Functions)
+            {
+                if (function.Name is { Length: > 0 } name)
+                {
+                    map.TryAdd(name, module.Name);
+                }
+            }
+        }
+
+        _imports = map;
+        return _imports;
+    }
+
+    /// <summary>
+    /// Opens the imported function <paramref name="functionName"/> from <paramref name="moduleName"/> —
+    /// resolving which file that module is (the running copy when a run is up, otherwise the on-disk
+    /// DLL the import table points at), analysing it on demand, and showing the export's disassembly.
+    /// </summary>
+    private void OpenImportedFunction(BinaryAnalysis owner, string moduleName, string functionName)
+    {
+        if (ImportedModuleFile(owner, TrimExtension(moduleName)) is not { } path)
+        {
+            StatusText = $"Could not find {moduleName} on disk to open {functionName}.";
+            return;
+        }
+
+        if (ModuleAnalysis(path) is not { Analysis: { } analysis })
+        {
+            StatusText = $"Could not read {System.IO.Path.GetFileName(path)}.";
+            return;
+        }
+
+        if (analysis.Symbols.GetByName(functionName)?.Va is not { } exportVa)
+        {
+            StatusText = $"{functionName} is not an export of {System.IO.Path.GetFileName(path)}.";
+            return;
+        }
+
+        var function = analysis.GetOrDiscoverFunction(exportVa);
+        string name = System.IO.Path.GetFileName(path);
+        var doc = Find($"module:{name}:{function.EntryVa:X}")
+                  ?? CodeDocumentViewModel.ForModuleDisassembly(analysis, function, name);
+        Show(doc);
+    }
+
+    private static string TrimExtension(string name)
+        => name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
+
+    /// <summary>
+    /// The on-disk file of an imported module named <paramref name="bare"/> (no extension). The running
+    /// copy when a run is up; then whatever the import table resolved (api-sets, forwarders); then the
+    /// system directory for the opened binary's architecture, where the common system DLLs live.
+    /// </summary>
+    private string? ImportedModuleFile(BinaryAnalysis owner, string bare)
+    {
+        if (Debugger.ModulePath(bare + ".dll") is { } loaded)
+        {
+            return loaded;
+        }
+
+        if (owner.Signatures?.Modules.FirstOrDefault(m =>
+                string.Equals(TrimExtension(m.Name), bare, StringComparison.OrdinalIgnoreCase))?.Path is { } resolved)
+        {
+            return resolved;
+        }
+
+        string system = owner.Image.Is64Bit
+            ? Environment.GetFolderPath(Environment.SpecialFolder.System)        // System32: 64-bit DLLs
+            : Environment.GetFolderPath(Environment.SpecialFolder.SystemX86);    // SysWOW64: 32-bit DLLs
+        string candidate = System.IO.Path.Combine(system, bare + ".dll");
+        return File.Exists(candidate) ? candidate : null;
     }
 
 /// <summary>
