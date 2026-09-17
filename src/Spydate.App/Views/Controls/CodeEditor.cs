@@ -71,6 +71,15 @@ public sealed class CodeEditor : TextEditor
         nameof(GoToDefinitionCommand), typeof(System.Windows.Input.ICommand), typeof(CodeEditor),
         new FrameworkPropertyMetadata(null));
 
+    /// <summary>
+    /// Invoked with the word under a click, for a native listing where a target is a name rather than
+    /// a recorded reference. The command's CanExecute decides whether the word is a link at all — so
+    /// the hand cursor and the click both ask it.
+    /// </summary>
+    public static readonly DependencyProperty NavigateWordCommandProperty = DependencyProperty.Register(
+        nameof(NavigateWordCommand), typeof(System.Windows.Input.ICommand), typeof(CodeEditor),
+        new FrameworkPropertyMetadata(null));
+
     public CodeEditor()
     {
         IsReadOnly = true;
@@ -134,8 +143,15 @@ public sealed class CodeEditor : TextEditor
         set => SetValue(GoToDefinitionCommandProperty, value);
     }
 
-    /// <summary>The reference the left button went down on, and where, so the release can follow it.</summary>
-    private SourceReference? _pressedReference;
+    public System.Windows.Input.ICommand? NavigateWordCommand
+    {
+        get => (System.Windows.Input.ICommand?)GetValue(NavigateWordCommandProperty);
+        set => SetValue(NavigateWordCommandProperty, value);
+    }
+
+    /// <summary>What the left button went down on, and where, so the release can follow it. A managed
+    /// <see cref="SourceReference"/>, or a native word (a string), or null over ordinary text.</summary>
+    private object? _pressedHit;
     private Point _pressedPoint;
 
     /// <summary>
@@ -151,8 +167,8 @@ public sealed class CodeEditor : TextEditor
     private void NoteReferenceUnderPress(object sender, MouseButtonEventArgs e)
     {
         _pressedPoint = e.GetPosition(this);
-        _pressedReference = ReferenceAt(_pressedPoint);
-        if (_pressedReference is not null)
+        _pressedHit = HitAt(_pressedPoint);
+        if (_pressedHit is not null)
         {
             e.Handled = true;   // a link: do not let the text view select or capture the mouse
         }
@@ -160,13 +176,12 @@ public sealed class CodeEditor : TextEditor
 
     private void FollowReferenceOnClick(object sender, MouseButtonEventArgs e)
     {
-        if (_pressedReference is not { } reference || GoToDefinitionCommand is not { } command)
+        if (_pressedHit is not { } hit)
         {
-            _pressedReference = null;
             return;
         }
 
-        _pressedReference = null;
+        _pressedHit = null;
         e.Handled = true;
 
         var released = e.GetPosition(this);
@@ -176,9 +191,20 @@ public sealed class CodeEditor : TextEditor
             return;   // the press wandered off the link before releasing — not a click
         }
 
-        if (ReferenceAt(released) == reference && command.CanExecute(reference))
+        if (!Equals(HitAt(released), hit))
         {
-            command.Execute(reference);
+            return;
+        }
+
+        switch (hit)
+        {
+            case SourceReference reference when GoToDefinitionCommand is { } command && command.CanExecute(reference):
+                command.Execute(reference);
+                break;
+
+            case string word when NavigateWordCommand is { } command && command.CanExecute(word):
+                command.Execute(word);
+                break;
         }
     }
 
@@ -189,11 +215,44 @@ public sealed class CodeEditor : TextEditor
     /// </summary>
     private void ShowHandOverReference(object sender, QueryCursorEventArgs e)
     {
-        if (e.LeftButton == MouseButtonState.Released && ReferenceAt(e.GetPosition(this)) is not null)
+        if (e.LeftButton == MouseButtonState.Released && HitAt(e.GetPosition(this)) is not null)
         {
             e.Cursor = Cursors.Hand;
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// What a point is over that can be followed: a recorded managed reference, or — for a native
+    /// listing — a word the <see cref="NavigateWordCommand"/> says it can navigate to. Null over
+    /// ordinary text, which is what leaves selecting and copying working everywhere else.
+    /// </summary>
+    private object? HitAt(Point point)
+    {
+        if (ReferenceAt(point) is { } reference)
+        {
+            return reference;
+        }
+
+        if (NavigateWordCommand is { } command && WordAt(point) is { } word && command.CanExecute(word))
+        {
+            return word;
+        }
+
+        return null;
+    }
+
+    /// <summary>The identifier under a point, or null. The click's column is a character offset into
+    /// the line, which is what <see cref="AddressText.WordAt"/> counts in.</summary>
+    private string? WordAt(Point point)
+    {
+        if (Document is null || GetPositionFromPoint(point) is not { } position)
+        {
+            return null;
+        }
+
+        var line = Document.GetLineByNumber(position.Line);
+        return AddressText.WordAt(Document.GetText(line.Offset, line.Length), position.Column - 1);
     }
 
     /// <summary>

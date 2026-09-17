@@ -41,6 +41,7 @@
                                  BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 NavigateWordCommand="{Binding DataContext.NavigateWordCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                  CaretAddress="{Binding DisassemblyCaretAddress, Mode=OneWayToSource}"
                                  CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
                                  Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
@@ -76,6 +77,7 @@
                                  BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 NavigateWordCommand="{Binding DataContext.NavigateWordCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                  CaretAddress="{Binding PseudoCCaretAddress, Mode=OneWayToSource}"
                                  CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
                                  Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
