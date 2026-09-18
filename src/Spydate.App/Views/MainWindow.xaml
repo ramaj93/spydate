@@ -116,6 +116,8 @@
                     <MenuItem Header="_Output" IsCheckable="True"
                               IsChecked="{Binding IsOutputVisible, RelativeSource={RelativeSource AncestorType=Window}}" />
                     <Separator />
+                    <MenuItem Header="_Annotations" Command="{Binding OpenAnnotationsCommand}"
+                              ToolTip="Every name, comment and slot name you have set, in one list" />
                     <Separator />
                     <MenuItem Header="_Side by side" InputGestureText="F6" Command="{Binding OpenSideBySideCommand}"
                               ToolTip="Show this function's disassembly and pseudo-C together, each following the other" />

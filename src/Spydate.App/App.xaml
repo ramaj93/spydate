@@ -50,6 +50,9 @@
             <DataTemplate DataType="{x:Type docs:StringsDocumentViewModel}">
                 <views:StringsView />
             </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:AnnotationsDocumentViewModel}">
+                <views:AnnotationsView />
+            </DataTemplate>
             <DataTemplate DataType="{x:Type docs:HexDocumentViewModel}">
                 <views:HexView />
             </DataTemplate>

@@ -15,6 +15,7 @@ public sealed record ExportsTarget : NodeTarget;
 public sealed record FunctionsTarget : NodeTarget;
 public sealed record ResourcesTarget : NodeTarget;
 public sealed record StringsTarget : NodeTarget;
+public sealed record AnnotationsTarget : NodeTarget;
 /// <summary>A resource leaf that can be shown as text rather than bytes.</summary>
 public sealed record ResourcePreviewTarget(uint TypeId, uint Id, uint DataRva, uint DataSize, string Title) : NodeTarget;
 public sealed record HexTarget(long Offset) : NodeTarget;

@@ -532,6 +532,38 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>Opens the Annotations tab: every name, comment and slot name in one list.</summary>
+    [RelayCommand]
+    private void OpenAnnotations() => OpenTarget(new AnnotationsTarget());
+
+    /// <summary>
+    /// Opens the code an annotation sits on, for the list's double-click. The function that contains
+    /// the address rather than the address itself: asking for a function starting mid-function makes
+    /// one, and a comment is very often on a line inside a function rather than at its entry.
+    /// </summary>
+    private void GoToAnnotation(ulong va)
+    {
+        if (Managed(va) is { } member)
+        {
+            OpenTarget(member);
+            return;
+        }
+
+        if (Binary?.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        if (analysis.FunctionContaining(va) is { } function)
+        {
+            OpenTarget(new DisassemblyTarget(function.EntryVa, analysis.NameFor(function.EntryVa)));
+        }
+        else
+        {
+            OpenTarget(new RangeDisassemblyTarget(va, 128, $"0x{va:X}"));
+        }
+    }
+
     partial void OnSelectedNodeChanged(ExplorerNodeViewModel? value)
     {
         if (value?.Target is { } target)
@@ -1400,6 +1432,10 @@ public sealed partial class MainViewModel : ObservableObject
                 case FunctionsDocumentViewModel functions:
                     functions.Refresh();
                     break;
+
+                case AnnotationsDocumentViewModel annotations:
+                    annotations.Refresh();
+                    break;
             }
         }
     }
@@ -1447,6 +1483,7 @@ public sealed partial class MainViewModel : ObservableObject
             ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
             ResourcePreviewTarget preview => OpenResource(preview),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
+            AnnotationsTarget when b.Analysis is { } ann => Find("annotations") ?? new AnnotationsDocumentViewModel(ann, GoToAnnotation),
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
