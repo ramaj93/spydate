@@ -41,11 +41,24 @@ FluentWindow  (WindowBackdropType=None, ExtendsContentIntoTitleBar)
  │       ├─ GridSplitter (4px)
  │       └─ Output tool window       header + tab strip *below* the content
  │                                    (Output = timestamped log, Xrefs, Warnings)
- └─ Status bar             file summary · function count, 2px progress bar when busy
+ └─ Status bar             last thing that happened · function count, 2px progress bar when busy
 ```
 
 Both tool windows can be hidden from the **View** menu or their own ✕; the
 window remembers the last size of each panel (`MainWindow.xaml.cs`).
+
+The status bar's left half is latest-wins, and the debugger writes to it like
+anything else: `Stopped at 0x…`, `Breakpoint at 0x…`, `Exited with code 2`. It
+used to have a second copy in the Debug panel's own toolbar, which could only
+be read with that tab forward — the one moment it is least needed, since the
+panel below it already says everything the line does. The Debug panel's
+**header** names the module execution is in instead — `Debug (ntdll.dll)` —
+because stepping leaves the opened binary routinely and nothing on screen said
+so. The header rather than the tab: the tab strip is a fixed row of short words
+you aim at, and one of them resizing as you step moves the ones beside it.
+
+Double-clicking `rip` in the registers pane opens the line it names, which is
+the way back to the listing after stepping around. Only that register.
 
 The **Xrefs** tab follows the active document: every document may carry an
 `Address` (and an `AddressLength`), and code documents set it to their function

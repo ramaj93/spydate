@@ -405,8 +405,17 @@
                                         Click="OnHideOutputClick" AutomationProperties.Name="Hide output" />
                                 <Button DockPanel.Dock="Right" Style="{StaticResource GlyphButton}" Content="&#x2327;"
                                         Margin="0,0,2,0" ToolTip="Clear" Command="{Binding ClearOutputCommand}" AutomationProperties.Name="Clear output" />
-                                <TextBlock Style="{StaticResource ToolWindowHeaderText}"
-                                           Text="{Binding SelectedItem.Header, ElementName=BottomTabs}" />
+                                <!-- The panel header repeats the selected tab's name, except for
+                                     Debug, which adds the module execution is in. It belongs here
+                                     rather than on the tab itself: the tab strip is a fixed row of
+                                     short words you aim at, and one of them growing and shrinking as
+                                     you step moves the ones beside it. -->
+                                <TextBlock DockPanel.Dock="Left" Style="{StaticResource ToolWindowHeaderText}"
+                                           Text="{Binding SelectedItem.Header, ElementName=BottomTabs}"
+                                           Visibility="{Binding IsSelected, ElementName=DebugTab, Converter={StaticResource InverseBoolToVisibility}}" />
+                                <TextBlock DockPanel.Dock="Left" Style="{StaticResource ToolWindowHeaderText}"
+                                           Text="{Binding Debugger.Caption}"
+                                           Visibility="{Binding IsSelected, ElementName=DebugTab, Converter={StaticResource BoolToVisibility}}" />
                             </DockPanel>
                         </Border>
 
@@ -504,10 +513,11 @@
 
                                             <!-- Docked right, so they read from the right edge in the
                                                  order added: the run configuration at the far right,
-                                                 then the processor flags, then the stop status. Run
-                                                 config sits after the flags because it is set once for
-                                                 a binary and then left alone, out of the way of the
-                                                 status that changes at every stop. -->
+                                                 then the processor flags. Where the program stopped
+                                                 is not here — it is on the status bar at the bottom
+                                                 of the window, which is readable with any tab
+                                                 forward, and having it in both places meant two
+                                                 copies of one line that could disagree. -->
                                             <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                                     Command="{Binding ConfigureRunCommand}"
                                                     Margin="6,0,0,0"
@@ -520,10 +530,6 @@
                                                        FontFamily="{DynamicResource Mono.FontFamily}"
                                                        Foreground="{DynamicResource Text.Tertiary}"
                                                        ToolTip="Processor flags at the last stop" />
-                                            <TextBlock DockPanel.Dock="Right" Text="{Binding Status}"
-                                                       VerticalAlignment="Center" Margin="12,0,0,0"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       Foreground="{DynamicResource Text.Secondary}" />
                                         </DockPanel>
                                     </Border>
 
@@ -569,8 +575,11 @@
                                             <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
                                                           Background="{DynamicResource Chrome.Border}" />
 
-                                            <DataGrid Grid.Column="2" ItemsSource="{Binding Registers}" AutoGenerateColumns="False"
+                                            <DataGrid Grid.Column="2" x:Name="RegisterGrid" ItemsSource="{Binding Registers}"
+                                                      AutoGenerateColumns="False"
                                                       IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
+                                                      MouseDoubleClick="OpenRegisterRow"
+                                                      ToolTip="Double-click rip to open the line the program is stopped at"
                                                       AutomationProperties.Name="Registers">
                                                 <DataGrid.Columns>
                                                     <DataGridTextColumn Header="reg" Binding="{Binding Name}" />

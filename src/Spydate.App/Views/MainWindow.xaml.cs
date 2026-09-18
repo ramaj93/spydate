@@ -232,6 +232,19 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    /// <summary>
+    /// Double-clicking the instruction pointer goes to the line it names. Only that register: the
+    /// others hold whatever they hold, and sending the listing to wherever rsp happens to point
+    /// would be a navigation that means nothing.
+    /// </summary>
+    private void OpenRegisterRow(object sender, MouseButtonEventArgs e)
+    {
+        if (RegisterGrid.SelectedItem is RegisterRow { Name: "rip" or "eip" })
+        {
+            _viewModel.Debugger.GoToExecutionCommand.Execute(null);
+        }
+    }
+
     private void OnHideExplorerClick(object sender, RoutedEventArgs e) => IsExplorerVisible = false;
 
     private void OnHideOutputClick(object sender, RoutedEventArgs e) => IsOutputVisible = false;

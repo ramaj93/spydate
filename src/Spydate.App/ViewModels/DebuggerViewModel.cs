@@ -130,6 +130,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         Host = target?.Host ?? string.Empty;
         Arguments = target?.Arguments ?? string.Empty;
         WorkingDirectory = target?.WorkingDirectory ?? string.Empty;
+        CurrentModule = null;
+        _arrivedAt = null;
         Modules.Clear();
         Threads.Clear();
         Variables.Clear();
@@ -514,6 +516,23 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string _status = "Not running.";
 
+    /// <summary>
+    /// The module execution is in, plain — <c>ntdll.dll</c>. Null when nothing is stopped, or when
+    /// the stop is somewhere no loaded module claims.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Caption))]
+    private string? _currentModule;
+
+    /// <summary>
+    /// The Debug panel's header. It names the module when there is one, because stepping leaves the
+    /// opened binary routinely — into kernelbase, into ntdll — and nothing on screen said so.
+    ///
+    /// The header and not the tab below it: the tab strip is a fixed row of short words you aim at,
+    /// and one of them growing and shrinking at every step moves the ones beside it.
+    /// </summary>
+    public string Caption => CurrentModule is { Length: > 0 } module ? $"Debug ({module})" : "Debug";
+
     public bool IsDebugging => State is DebugState.Running or DebugState.Stopped;
 
     public bool IsStopped => State == DebugState.Stopped;
@@ -535,6 +554,41 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// "the program stopped here".
     /// </summary>
     public event EventHandler<ulong>? NavigateRequested;
+
+    /// <summary>
+    /// Where the last stop sent the window — the listing address when the stop is inside the opened
+    /// image, the run-time address when it is in another module.
+    ///
+    /// Kept rather than worked out again on demand, because <see cref="ExecutionAddress"/> does not
+    /// survive as an answer to "where are we": opening a foreign module rewrites it to that module's
+    /// own preferred base so the arrow can be drawn there, and that number means nothing to anything
+    /// but the document already showing it. Re-deriving from it opened an empty listing at an address
+    /// no module claims.
+    /// </summary>
+    private ulong? _arrivedAt;
+
+    /// <summary>Sends the window to a stop, and remembers where, so it can be sent there again.</summary>
+    private void Arrive(ulong va)
+    {
+        _arrivedAt = va;
+        StoppedAt?.Invoke(this, va);
+    }
+
+    /// <summary>
+    /// Opens the line the program is stopped at — what double-clicking <c>rip</c> in the registers
+    /// does. The registers pane is where you end up after stepping around, and getting back to the
+    /// listing meant finding the tab again; the register that holds the answer may as well be the
+    /// way back. It repeats the stop's own navigation exactly, rather than working out a second
+    /// answer that could differ from where the arrow actually is.
+    /// </summary>
+    [RelayCommand]
+    private void GoToExecution()
+    {
+        if (_arrivedAt is { } va)
+        {
+            StoppedAt?.Invoke(this, va);
+        }
+    }
 
     /// <summary>Opens the code a breakpoint sits in — the pane's double-click and its context menu.</summary>
     [RelayCommand]
@@ -1534,9 +1588,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // addressed, so the arrow can be put on the line the program is actually at. The same index
         // that gave the listing its addresses answers this, so the two cannot disagree.
         ExecutionAddress = Located(session.StoppedAt);
+        CurrentModule = State == DebugState.Stopped ? session.StoppedAt?.Module : null;
         if (ExecutionAddress is { } at)
         {
-            StoppedAt?.Invoke(this, at);
+            Arrive(at);
         }
 
         Modules.Clear();
@@ -1893,7 +1948,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         ExecutionAddress = Located(session.StoppedAt);
         if (ExecutionAddress is { } at)
         {
-            StoppedAt?.Invoke(this, at);
+            Arrive(at);
         }
 
         NotifyCommands();
@@ -1940,6 +1995,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
                     State = DebugState.Stopped;
                     Status = e.Address is { } at ? $"Stopped at 0x{at:X}." : "Stopped.";
+                    CurrentModule = StoppedIn();
                     RefreshModules();
                     RefreshThreads();
                     RefreshRegisters();
@@ -1952,7 +2008,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                     ExecutionAddress = shown;
                     if (shown is { } address)
                     {
-                        StoppedAt?.Invoke(this, address);
+                        Arrive(address);
                     }
                     else if (_managed is null && _session is { CurrentAddress: > 0 and var runtime })
                     {
@@ -1960,7 +2016,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                         // stepped into an imported DLL, the CRT, a system library. There is nothing to
                         // point at in the file on screen, but the window can still open that module's
                         // own code from the run-time address, so hand it over rather than dropping it.
-                        StoppedAt?.Invoke(this, runtime);
+                        Arrive(runtime);
                     }
 
                     break;
@@ -1968,6 +2024,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                 case "exited":
                     State = DebugState.Exited;
                     ExecutionAddress = null;
+                    CurrentModule = null;
+                    _arrivedAt = null;
 
                     // The event's own words, which carry the exit code. "It exited." threw away the
                     // one fact worth having when a process dies — whether it finished or crashed,
@@ -2054,6 +2112,26 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         SelectedThread = row;
         return true;
+    }
+
+    /// <summary>
+    /// Which module the program is stopped in.
+    ///
+    /// The run-time address rather than the listing one, because those are the same number only
+    /// inside the opened binary — the whole point of naming the module is the stops that are not.
+    /// In mixed mode a stop inside JITted code belongs to no loaded image at all, so the managed
+    /// location's own module answers where the address cannot.
+    /// </summary>
+    private string? StoppedIn()
+    {
+        if (_session is not { CurrentAddress: > 0 and var runtime } native)
+        {
+            return _managed?.StoppedAt?.Module;
+        }
+
+        return native.ModuleAt(runtime) is { Name.Length: > 0 } module
+            ? module.Name
+            : native.Managed?.LocationOf(runtime)?.Module;
     }
 
     private void RefreshModules()
@@ -2413,6 +2491,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(HasLivePatches));
 
         State = DebugState.NotStarted;
+        CurrentModule = null;
+        _arrivedAt = null;
         Registers.Clear();
         Stack.Clear();
         Modules.Clear();

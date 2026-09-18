@@ -716,7 +716,7 @@ public sealed class DebugSession : IDisposable
 
     /// <summary>The loaded module a runtime address is in — the one with the greatest base at or below
     /// it — or null when nothing is loaded there.</summary>
-    private LoadedModule? ModuleAt(ulong runtimeVa)
+    public LoadedModule? ModuleAt(ulong runtimeVa)
     {
         lock (_modules)
         {

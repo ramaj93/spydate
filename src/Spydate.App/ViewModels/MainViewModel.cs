@@ -71,6 +71,16 @@ public sealed partial class MainViewModel : ObservableObject
                 RunToCursorCommand.NotifyCanExecuteChanged();
                 TestPatchLiveCommand.NotifyCanExecuteChanged();
             }
+
+            // Where the program stopped goes on the window's status bar rather than the Debug
+            // panel's own toolbar. It is the one line that changes at every stop and it was only
+            // readable with that tab forward — which is exactly when it is least needed, because
+            // the panel below already says everything the line does. Latest wins, as a status bar
+            // should: a patch made while stopped says so until the next step.
+            if (e.PropertyName is nameof(DebuggerViewModel.Status))
+            {
+                StatusText = Debugger.Status;
+            }
         };
         debugger.StoppedAt += (_, va) => ShowWhereItStopped(va);
 
