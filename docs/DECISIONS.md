@@ -678,3 +678,24 @@ no network, or a server that does not have that build, and the catch silently fa
 a later call. A PDB already beside the runtime, or already in the cache, needs no download at all. The
 match is on the build GUID rather than GUID-and-age, because a PE's debug directory and the PDB the
 server returns for it legitimately carry different ages for one build.
+
+## The patch dialog has an assembly box and a hex box, and they are the same patch seen twice
+
+Both are how patches actually arrive. A line edited from the listing is the common case, and it is
+the one that still reads as a decision six months later — the Patches list records what was typed,
+so `mov byte ptr [rdi+4], 1` is what shows there rather than `C6470401`. But bytes pasted from a
+diff, a write-up or another tool are the other case, and putting those through an assembler that has
+to recognise every mnemonic first is how a one-byte change turns into an argument with a parser. One
+box with a `bytes:` prefix made the hex route reachable but hid it; two boxes that fill each other
+make neither one the real one, and let the analyst check the two against each other before anything
+is committed.
+
+Keeping them in step is what forced `X86Assembler` to grow memory operands. The dialog starts by
+showing what is there now, and what is there is `mov byte ptr [rdi+4], 0` far more often than it is
+a line of registers — so a register-only subset meant the dialog handed the analyst text it could
+not itself read back. That is worse than refusing outright: the box looks editable and then rejects
+its own contents. The subset is still deliberate and still refuses by name rather than guessing, but
+the line it draws is now "what the listing writes", which is a rule that can be checked rather than a
+list that drifts. Where the two sides genuinely cannot agree — an encoding the formatter spells one
+way and the assembler builds another, like the redundant-REX `40 53` for `push rbx` — the dialog
+opens on the hex box, because the bytes are what is really there.

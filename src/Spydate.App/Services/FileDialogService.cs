@@ -1,6 +1,7 @@
 using System.Windows;
 using Microsoft.Win32;
 using Spydate.App.Views;
+using Spydate.Disassembly;
 
 namespace Spydate.App.Services;
 
@@ -21,9 +22,30 @@ public interface IFileDialogService
     /// </summary>
     string? AskForText(string title, string label, string? hint = null, string? initial = null);
 
+    /// <summary>
+    /// Asks for a patch, as assembly or as bytes. Returns what to assemble — a line of assembly, or
+    /// <c>bytes: ...</c> for hex — or null when cancelled.
+    /// </summary>
+    string? AskForPatch(PatchPrompt prompt);
+
     /// <summary>Asks where to write a file; returns the chosen path or null.</summary>
     string? SaveFile(string title, string filter, string suggestedName);
 }
+
+/// <summary>
+/// Everything the patch dialog needs to show assembly and bytes as each other, without knowing what
+/// a binary is. The three functions are the whole of it: text to bytes, bytes back to text, and how
+/// far a replacement of a given size reaches at this address.
+/// </summary>
+/// <param name="Original">The bytes there now — what both boxes start out saying.</param>
+public sealed record PatchPrompt(
+    string Title,
+    string Subtitle,
+    string Hint,
+    byte[] Original,
+    Func<string, AssembleResult> Assemble,
+    Func<byte[], string> ReadBack,
+    Func<int, string> Fit);
 
 public sealed class FileDialogService : IFileDialogService
 {
@@ -62,6 +84,16 @@ public sealed class FileDialogService : IFileDialogService
         };
 
         return prompt.ShowDialog() == true ? prompt.Value : null;
+    }
+
+    public string? AskForPatch(PatchPrompt prompt)
+    {
+        var dialog = new PatchWindow(prompt)
+        {
+            Owner = Application.Current?.MainWindow,
+        };
+
+        return dialog.ShowDialog() == true ? dialog.Value : null;
     }
 
     public string? SaveFile(string title, string filter, string suggestedName)

@@ -1,0 +1,52 @@
+<Window x:Class="Spydate.App.Views.PatchWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SizeToContent="Height"
+        Width="520"
+        WindowStyle="SingleBorderWindow"
+        Background="{DynamicResource Chrome.Background}"
+        Foreground="{DynamicResource Text.Primary}"
+        FontFamily="{DynamicResource App.FontFamily}"
+        FontSize="{DynamicResource App.FontSize}">
+    <Border Padding="12" BorderThickness="1" BorderBrush="{DynamicResource Chrome.Border}">
+        <StackPanel>
+            <TextBlock x:Name="LabelText" Margin="0,0,0,10" TextWrapping="Wrap"
+                       Foreground="{DynamicResource Text.Secondary}" />
+
+            <!-- Two ways of saying the same thing, and the analyst has whichever one in front of
+                 them. Typing in either fills the other, so neither is the "real" box: hex pasted
+                 from a diff is as good a way in as a line edited from the listing. -->
+            <TextBlock Text="ASSEMBLY" FontSize="10" FontWeight="SemiBold" Margin="0,0,0,3"
+                       Foreground="{DynamicResource Text.Tertiary}" />
+            <TextBox x:Name="Assembly" FontFamily="{DynamicResource Mono.FontFamily}"
+                     FontSize="{DynamicResource Mono.FontSize}" Padding="5,3" MinHeight="26"
+                     VerticalContentAlignment="Center" AcceptsReturn="False" MaxLength="512"
+                     AutomationProperties.Name="Assembly"
+                     TextChanged="OnAssemblyChanged" />
+
+            <TextBlock Text="BYTES" FontSize="10" FontWeight="SemiBold" Margin="0,10,0,3"
+                       Foreground="{DynamicResource Text.Tertiary}" />
+            <TextBox x:Name="Bytes" FontFamily="{DynamicResource Mono.FontFamily}"
+                     FontSize="{DynamicResource Mono.FontSize}" Padding="5,3" MinHeight="26"
+                     VerticalContentAlignment="Center" AcceptsReturn="False" MaxLength="512"
+                     AutomationProperties.Name="Bytes"
+                     TextChanged="OnBytesChanged" />
+
+            <TextBlock x:Name="StatusText" Margin="0,10,0,0" TextWrapping="Wrap" FontSize="11"
+                       MinHeight="28" VerticalAlignment="Top"
+                       AutomationProperties.AutomationId="PatchStatus"
+                       Foreground="{DynamicResource Text.Tertiary}" />
+
+            <TextBlock x:Name="HintText" Margin="0,2,0,0" TextWrapping="Wrap" FontSize="11"
+                       Foreground="{DynamicResource Text.Tertiary}" />
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                <Button Content="Cancel" MinWidth="76" Margin="0,0,6,0" IsCancel="True" Click="OnCancel" />
+                <Button x:Name="AcceptButton" Content="OK" MinWidth="76" IsDefault="True" Click="OnAccept" />
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

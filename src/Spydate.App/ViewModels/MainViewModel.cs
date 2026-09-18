@@ -640,13 +640,12 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        string current = analysis.DisassembleRange(va, 16, 1) is [{ } instruction] ? instruction.Text : string.Empty;
-
-        string? typed = _dialogs.AskForText(
+        string? typed = _dialogs.AskForPatch(Prompt(
+            analysis,
+            va,
             "Patch instruction",
             $"Instruction at 0x{va:X}",
-            "Several may be separated by semicolons. Use bytes: <hex> to write raw bytes. Shorter is padded with NOPs; longer takes in the instructions it needs.",
-            current);
+            "Several instructions may be separated by semicolons. Shorter is padded with nop; longer takes in the instructions it needs."));
 
         if (string.IsNullOrWhiteSpace(typed))
         {
@@ -654,6 +653,27 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         Propose(_ => InstructionPatches.Assemble(analysis, va, typed));
+    }
+
+    /// <summary>
+    /// Ties the patch dialog to one address: what is there now, how to read each box as the other,
+    /// and how far a replacement of a given size would reach. The dialog does not know what a binary
+    /// is, which keeps the assembling where the rest of it lives.
+    /// </summary>
+    private static PatchPrompt Prompt(BinaryAnalysis analysis, ulong va, string title, string subtitle, string hint)
+    {
+        byte[] original = analysis.DisassembleRange(va, 16, 1) is [{ } instruction]
+            ? instruction.Bytes.ToArray()
+            : [];
+
+        return new PatchPrompt(
+            title,
+            subtitle,
+            hint,
+            original,
+            text => X86Assembler.Encode(text, analysis.Image.Is64Bit, va),
+            bytes => InstructionPatches.ReadBack(analysis, va, bytes),
+            count => InstructionPatches.Fit(analysis, va, count).Describe(count));
     }
 
     private bool CanTestPatchLive() => Debugger.IsStopped && CanPatchHere();
@@ -671,14 +691,12 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        string current = analysis.DisassembleRange(va, 16, 1) is [{ } instruction] ? instruction.Text : string.Empty;
-
-        string? typed = _dialogs.AskForText(
+        string? typed = _dialogs.AskForPatch(Prompt(
+            analysis,
+            va,
             "Try a patch live",
             $"Instruction at 0x{va:X}, into the running process",
-            "It is written into the process now, not the project — Keep it or Undo it from the Live patches tab. "
-            + "Several may be separated by semicolons; bytes: <hex> writes raw bytes.",
-            current);
+            "It is written into the process now, not the project — Keep it or Undo it from the Live patches tab."));
 
         if (string.IsNullOrWhiteSpace(typed))
         {

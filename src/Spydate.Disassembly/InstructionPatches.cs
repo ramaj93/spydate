@@ -13,6 +13,34 @@ public sealed record PatchProposal(Patch? Patch, string? Problem)
 }
 
 /// <summary>
+/// How a replacement of a given size lands at an address: the whole instructions it covers, and the
+/// bytes of nop that leaves over.
+/// </summary>
+public sealed record PatchFit(int Covered, int Instructions, int Padding, string? Problem)
+{
+    public bool Ok => Problem is null;
+
+    /// <summary>
+    /// What a dialog says under the box — the analyst is about to overwrite more than they typed,
+    /// and how much more is the one thing they cannot work out by looking.
+    /// </summary>
+    public string Describe(int byteCount)
+    {
+        if (Problem is { } problem)
+        {
+            return problem;
+        }
+
+        string typed = byteCount == 1 ? "1 byte" : $"{byteCount} bytes";
+        string over = Instructions == 1 ? "1 instruction" : $"{Instructions} instructions";
+
+        return Padding == 0
+            ? $"{typed} over {over} — an exact fit"
+            : $"{typed} over {over} ({Covered} bytes), {Padding} padded with nop";
+    }
+}
+
+/// <summary>
 /// The patches worth having a button for: take an instruction out, or make a branch go the other
 /// way. Both are answers to "stop this check from failing", which is most of what patching is for.
 ///
@@ -127,40 +155,79 @@ public static class InstructionPatches
             return PatchProposal.Failed(encoded.Problem!);
         }
 
-        // Enough instructions to cover what was assembled, never part of one.
-        var decoded = analysis.DisassembleRange(va, Math.Max(64, encoded.Bytes.Length + 32));
+        var fit = Fit(analysis, va, encoded.Bytes.Length);
+        if (!fit.Ok)
+        {
+            return PatchProposal.Failed(fit.Problem!);
+        }
+
+        if (Original(analysis.Image, va, fit.Covered) is not { } original)
+        {
+            return PatchProposal.Failed($"0x{va:X} is not in any section of the file");
+        }
+
+        byte[] bytes = new byte[fit.Covered];
+        Array.Fill(bytes, (byte)0x90);
+        encoded.Bytes.CopyTo(bytes, 0);
+
+        string what = fit.Instructions == 1 ? "1 instruction" : $"{fit.Instructions} instructions";
+        string note = fit.Padding == 0 ? what : $"{what}, {fit.Padding} byte(s) padded";
+
+        return Build(analysis.Image, va, bytes, original, $"{text?.Trim()} ({note})");
+    }
+
+    /// <summary>
+    /// Works out how many whole instructions <paramref name="byteCount"/> bytes would take over at
+    /// <paramref name="va"/>. Separate from <see cref="Assemble"/> because the patch dialog has to
+    /// say it before anything is committed — an analyst typing two bytes over a five-byte call
+    /// should see that the call is going, not find out afterwards.
+    /// </summary>
+    public static PatchFit Fit(BinaryAnalysis analysis, ulong va, int byteCount)
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+
+        if (byteCount < 1)
+        {
+            return new PatchFit(0, 0, 0, "nothing to write");
+        }
+
+        var decoded = analysis.DisassembleRange(va, Math.Max(64, byteCount + 32));
         int covered = 0;
         int taken = 0;
         foreach (var instruction in decoded)
         {
             covered += instruction.Length;
             taken++;
-            if (covered >= encoded.Bytes.Length)
+            if (covered >= byteCount)
             {
                 break;
             }
         }
 
-        if (covered < encoded.Bytes.Length)
+        return covered < byteCount
+            ? new PatchFit(covered, taken, 0,
+                $"{byteCount} bytes will not fit: only {covered} bytes of whole instructions could be read at 0x{va:X}")
+            : new PatchFit(covered, taken, covered - byteCount, null);
+    }
+
+    /// <summary>
+    /// Reads bytes back as the line they spell, for the other half of the patch dialog.
+    ///
+    /// Deliberately without the symbol table the listing uses. A call shown as
+    /// <c>call ResolveSearchRoot</c> reads better but cannot be typed back in, and a box whose
+    /// contents this cannot re-assemble is worse than one that says 0x140001408 out loud.
+    /// </summary>
+    public static string ReadBack(BinaryAnalysis analysis, ulong va, ReadOnlyMemory<byte> bytes)
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+
+        if (bytes.IsEmpty)
         {
-            return PatchProposal.Failed(
-                $"{encoded.Bytes.Length} bytes will not fit: only {covered} bytes of whole instructions could be read at 0x{va:X}");
+            return string.Empty;
         }
 
-        if (Original(analysis.Image, va, covered) is not { } original)
-        {
-            return PatchProposal.Failed($"0x{va:X} is not in any section of the file");
-        }
-
-        byte[] bytes = new byte[covered];
-        Array.Fill(bytes, (byte)0x90);
-        encoded.Bytes.CopyTo(bytes, 0);
-
-        int padding = covered - encoded.Bytes.Length;
-        string what = taken == 1 ? "1 instruction" : $"{taken} instructions";
-        string note = padding == 0 ? what : $"{what}, {padding} byte(s) padded";
-
-        return Build(analysis.Image, va, bytes, original, $"{text?.Trim()} ({note})");
+        var plain = new X86Disassembler(analysis.Image.Is64Bit ? 64 : 32, symbols: null, analysis.Disassembler.Syntax);
+        return string.Join("; ", plain.Decode(bytes, va, analysis.Image.ImageBase).Select(d => d.Text));
     }
 
     /// <summary>The bytes as they are now, or null when the address is not in the file.</summary>

@@ -520,6 +520,56 @@ public sealed class X86AssemblerTests
         Assert.Contains("bytes:", result.Problem!, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The listing writes memory operands, so the dialog hands them back to be edited. Every one of
+    /// these is a line lifted from a real listing with one character changed — which is exactly how
+    /// patching is done, and what the register-only subset used to refuse.
+    /// </summary>
+    [Theory]
+    [InlineData("mov byte ptr [rdi+4], 1", "C6470401")]
+    [InlineData("mov byte ptr [rdi+4], 0", "C6470400")]
+    [InlineData("mov dword ptr [rbp-8], 0", "C745F800000000")]
+    [InlineData("mov [rax], rcx", "488908")]
+    [InlineData("mov rcx, [rax]", "488B08")]
+    [InlineData("mov al, byte ptr [rdi]", "8A07")]
+    [InlineData("cmp dword ptr [rcx+0x10], 0", "83791000")]
+    [InlineData("inc dword ptr [rcx]", "FF01")]
+    [InlineData("lea rax, [rdi+8]", "488D4708")]
+    [InlineData("movzx eax, byte ptr [rdi]", "0FB607")]
+    [InlineData("mov eax, dword ptr [rdi+rcx*4]", "8B048F")]
+    public void MemoryOperandsEncodeTheWayTheListingWritesThem(string text, string expected)
+        => Assert.Equal(expected, Hex(text));
+
+    [Fact]
+    public void ADisplacementCanBeSubtracted()
+    {
+        // [rbp-8] and [rbp+-8] are the same place; the sign belongs to the number, not the register.
+        Assert.Equal(Hex("mov dword ptr [rbp-8], 1"), Hex("mov dword ptr [rbp + -8], 1"));
+    }
+
+    [Fact]
+    public void ASizeIsAskedForWhenNothingElseSettlesIt()
+    {
+        // [rdi], 1 could write one byte or eight. Refusing beats picking one.
+        var result = X86Assembler.Encode("mov [rdi], 1", is64Bit: true, 0x140001000);
+
+        Assert.False(result.Ok);
+        Assert.Contains("how big", result.Problem!, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("mov byte ptr [rdi+4, 1")]
+    [InlineData("mov byte ptr [rdi+rcx*3], 1")]
+    [InlineData("mov byte ptr [rdi+rsi+rcx], 1")]
+    [InlineData("mov byte ptr [rdi], ax")]
+    public void AMemoryOperandItCannotReadIsReportedRatherThanGuessed(string text)
+    {
+        var result = X86Assembler.Encode(text, is64Bit: true, 0x140001000);
+
+        Assert.False(result.Ok);
+        Assert.False(string.IsNullOrWhiteSpace(result.Problem));
+    }
+
     [Theory]
     [InlineData("mov rax, rbx, rcx")]
     [InlineData("mov eax, rbx")]
