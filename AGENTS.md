@@ -29,6 +29,7 @@ Detailed design lives in `docs/`:
 - `docs/DECISIONS.md` — architecture decision records (ADRs).
 - `docs/MCP.md` — the agent-facing tool surface, and how to connect a client.
 - `docs/MIXED-MODE.md` — native and managed debugging in one session: design, spike evidence, plan.
+- `docs/MULTI-FILE.md` — several binaries open at once: file tabs, per-file state, concurrent debuggees.
 
 ## 2. Repository layout
 
