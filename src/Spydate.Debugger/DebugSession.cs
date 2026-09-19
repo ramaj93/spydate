@@ -171,6 +171,10 @@ public sealed class DebugSession : IDisposable
     private readonly Dictionary<PatchAt, LivePatch> _patches = new();
     private readonly CancellationTokenSource _stopping = new();
 
+    /// <summary>Guards the debuggee's handle, which two threads race for: the loop closes it when it
+    /// finishes, and <see cref="Stop"/> terminates through it from whoever pressed the button.</summary>
+    private readonly Lock _processLock = new();
+
     /// <summary>
     /// The file name of the module whose addresses the listing is about, or null for the process's
     /// own executable. It is what makes debugging a DLL possible: the thing being run and the thing
@@ -1638,6 +1642,18 @@ public sealed class DebugSession : IDisposable
     /// <summary>Ends the debuggee. It is a debugged process, so it does not outlive the session.</summary>
     public void Stop()
     {
+        // Killed before the loop is told to finish, and under the lock that owns the handle.
+        //
+        // This used to cancel first and terminate afterwards, and the two raced. Cancelling is what
+        // sends the loop thread to its teardown, where it closes the process handle and zeroes
+        // _process — so Stop would arrive a moment later, read _process as zero, and never terminate
+        // anything. The debuggee outlived the session, and Stop had already said it had not.
+        //
+        // The worse half is the handle itself: read as non-zero and closed before the call, this was
+        // a TerminateProcess on a closed handle, and a handle value the process had since reused is
+        // not a safe thing to kill.
+        KillDebuggee();
+
         _stopping.Cancel();
 
         _managedStep = null;
@@ -1658,13 +1674,6 @@ public sealed class DebugSession : IDisposable
         _overlay?.Dispose();
         _overlay = null;
 
-        // Ended first, and only then let go. Resuming the held threads of a live process let them
-        // run, and one that was due to trap reported a step after Stop had been pressed.
-        if (_process != IntPtr.Zero)
-        {
-            Native.TerminateProcess(_process, 0);
-        }
-
         ReleaseOthers();
 
         // Let a stopped loop notice it is finished.
@@ -1676,6 +1685,42 @@ public sealed class DebugSession : IDisposable
             }
             catch (SemaphoreFullException)
             {
+            }
+        }
+
+        // And waited for, because "stopped" is a claim about the debuggee and not about this method.
+        // The kill above cannot land until the loop has answered whatever event the process is
+        // frozen at, so returning before that is returning while it is still running — which is what
+        // the panel then tells the analyst it is not.
+        //
+        // Not from the loop's own thread: a posted command runs there, and a thread cannot wait for
+        // itself. Both report handlers marshal with BeginInvoke, so waiting here from the window's
+        // thread cannot deadlock against them either.
+        if (_loop is { } loop && !ReferenceEquals(loop, Thread.CurrentThread))
+        {
+            loop.Join(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    /// <summary>
+    /// Ends the debuggee, if there still is one.
+    ///
+    /// Under <see cref="_processLock"/>, which is the only thing standing between this and the loop
+    /// thread's teardown closing the same handle: both run without coordination otherwise, and one
+    /// of the two orders kills a handle number that now belongs to something else.
+    ///
+    /// The kill is only half of it. A process frozen at a debug event nobody has continued cannot
+    /// finish dying — TerminateProcess returns true and the process stays — so the loop has to keep
+    /// answering events until the exit arrives. That is what the pump does after cancellation, and
+    /// why this does not cancel anything itself.
+    /// </summary>
+    private void KillDebuggee()
+    {
+        lock (_processLock)
+        {
+            if (_process != IntPtr.Zero)
+            {
+                Native.TerminateProcess(_process, 0);
             }
         }
     }
@@ -1973,8 +2018,11 @@ public sealed class DebugSession : IDisposable
         {
             State = DebugState.Exited;
             Native.CloseHandle(info.hThread);
-            Native.CloseHandle(info.hProcess);
-            _process = IntPtr.Zero;
+            lock (_processLock)
+            {
+                Native.CloseHandle(info.hProcess);
+                _process = IntPtr.Zero;
+            }
 
             // After the process has gone, so whatever it printed on its way out has already been
             // read: the pipe holds it until somebody takes it, and closing first would throw away
@@ -1999,10 +2047,36 @@ public sealed class DebugSession : IDisposable
 
     private void Pump()
     {
-        while (!_stopping.IsCancellationRequested)
+        // After Stop the loop does not simply leave. A debuggee frozen at a debug event cannot
+        // finish dying until that event is answered, so walking out with one outstanding leaves a
+        // process nothing can end: not Task Manager, not another TerminateProcess, because it is the
+        // debug port holding it and this process owns the debug object. Killing Spydate was the only
+        // thing that freed it, which is a strange and alarming way to find out.
+        //
+        // So cancellation means "answer everything and let it go" rather than "stop answering". The
+        // deadline is for the case where the exit never comes at all — a wedged debuggee is not
+        // worth a loop thread that never ends.
+        DateTime? leaveBy = null;
+
+        while (true)
         {
+            if (_stopping.IsCancellationRequested)
+            {
+                leaveBy ??= DateTime.UtcNow.AddSeconds(5);
+                if (DateTime.UtcNow > leaveBy)
+                {
+                    return;
+                }
+            }
+
             if (!Native.WaitForDebugEvent(out var e, 200))
             {
+                // Nothing pending. With a stop asked for, there is nothing left to answer either.
+                if (_stopping.IsCancellationRequested)
+                {
+                    return;
+                }
+
                 continue;
             }
 
@@ -2059,24 +2133,27 @@ public sealed class DebugSession : IDisposable
                     break;
             }
 
-            if (stop)
+            // A stop asked for while this one was being decided: do not hold, and do not report a
+            // pause nobody is there to see. The event is still answered, immediately below.
+            if (stop && !_stopping.IsCancellationRequested)
             {
                 State = DebugState.Stopped;
                 _resume.Wait();
 
-                if (_stopping.IsCancellationRequested)
+                if (!_stopping.IsCancellationRequested)
                 {
-                    return;
-                }
+                    while (_commands.TryDequeue(out var work))
+                    {
+                        work();
+                    }
 
-                while (_commands.TryDequeue(out var work))
-                {
-                    work();
+                    State = DebugState.Running;
                 }
-
-                State = DebugState.Running;
             }
 
+            // Always. This used to be skipped on the way out of a stop, which is exactly the case
+            // that leaves an unkillable process behind: the breakpoint that stopped it was never
+            // answered, so the terminate could not complete.
             Native.ContinueDebugEvent(e.dwProcessId, e.dwThreadId, status);
         }
     }

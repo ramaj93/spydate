@@ -1681,4 +1681,82 @@ public sealed class DebuggerTests
 
         session.Stop();
     }
+
+    /// <summary>
+    /// Stop means stopped: the debuggee is gone by the time it returns.
+    ///
+    /// It used to fire TerminateProcess and return, racing its own loop thread — which, told to
+    /// finish at the same moment, closes the process handle and zeroes it on the way out. Lose that
+    /// race and nothing is terminated at all, and the panel says "the process was terminated" over a
+    /// program that is still running.
+    ///
+    /// The worse form of the same race is what made this worth chasing: a debuggee frozen at a debug
+    /// event nobody answered cannot finish dying, so Task Manager cannot end it either — the debug
+    /// port holds it, and only killing Spydate lets go. The loop now answers every event it has taken
+    /// before it leaves, and Stop waits for it.
+    ///
+    /// ping -t never exits on its own, so anything alive here is being held rather than merely slow.
+    /// </summary>
+    [Fact]
+    public void StopDoesNotReturnWhileTheDebuggeeIsStillRunning()
+    {
+        string ping = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE");
+        if (!OperatingSystem.IsWindows() || !File.Exists(ping))
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(ping, imageBase: 0, imageSize: 0, arguments: "-t 127.0.0.1");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        int pid = (int)session.ProcessId;
+        Assert.True(StillRunning(pid), "the debuggee was not running to begin with, so nothing was proved");
+
+        // Let it go, so the stop below is pressed on a live process rather than a held one — which is
+        // the state both observed survivors were in.
+        session.Continue();
+        Assert.True(Wait(() => session.State == DebugState.Running, 5), "never resumed");
+
+        session.Stop();
+
+        // No polling. The point is that Stop waited, not that the process goes away eventually.
+        Assert.False(StillRunning(pid), "Stop returned while the debuggee was still running");
+    }
+
+    /// <summary>The same, pressed while it is held at a stop — where an unanswered debug event is
+    /// what would leave a process nothing can kill.</summary>
+    [Fact]
+    public void StopEndsADebuggeeThatIsHeldAtAStop()
+    {
+        string ping = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE");
+        if (!OperatingSystem.IsWindows() || !File.Exists(ping))
+        {
+            return;
+        }
+
+        using var session = Headless();
+        session.Start(ping, imageBase: 0, imageSize: 0, arguments: "-t 127.0.0.1");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never reached the loader break");
+
+        int pid = (int)session.ProcessId;
+        session.Stop();
+
+        Assert.False(StillRunning(pid), "Stop returned while the debuggee was still held at a stop");
+    }
+
+    /// <summary>Whether a process id still belongs to something running. A process that has exited
+    /// but whose handle is still open answers HasExited, so this is not fooled by one.</summary>
+    private static bool StillRunning(int pid)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;   // no such process: gone
+        }
+    }
 }
