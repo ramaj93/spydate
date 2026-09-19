@@ -90,6 +90,46 @@ public sealed partial class CodeDocumentViewModel : DocumentViewModel, ICaretCon
         // on a function you have only just opened, until you happen to click a line. The split view
         // has always done this; the single-pane view never did.
         RevealLine = Address is { } va ? LineOf(va, content.Text) : 0;
+
+        // A stop that opened this document asked for its line before there was text; now there is.
+        ApplyPendingReveal();
+    }
+
+    /// <summary>
+    /// Scrolls to the line an address is on, if this listing has one.
+    ///
+    /// What a stop needs and what opening a function needs are not the same thing: a document opens
+    /// on the function's entry, which is the top of the listing, and stopping two hundred
+    /// instructions in would otherwise leave the reader looking at the header with the arrow
+    /// somewhere off screen below.
+    ///
+    /// Held rather than applied when the listing is not there yet. A document opened by a stop is
+    /// loaded in the background, so the stop asks for its line before there is any text to find it
+    /// in — which is why this has to outlive the request.
+    /// </summary>
+    public void RevealAddress(ulong va)
+    {
+        _pendingReveal = va;
+        ApplyPendingReveal();
+    }
+
+    private ulong? _pendingReveal;
+
+    private void ApplyPendingReveal()
+    {
+        if (_pendingReveal is not { } va || Text.Length == 0)
+        {
+            return;
+        }
+
+        _pendingReveal = null;
+        if (LineOf(va, Text) is > 0 and var line)
+        {
+            // Zero first: RevealLine only acts on a change, and stopping twice on one line — a
+            // breakpoint hit after stepping away and back — would otherwise not scroll at all.
+            RevealLine = 0;
+            RevealLine = line;
+        }
     }
 
     /// <summary>The 1-based line stating this address, or 0 when none does.</summary>

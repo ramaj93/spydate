@@ -236,10 +236,12 @@ public sealed partial class MainViewModel : ObservableObject
             if (ActiveDocument is CodeDocumentViewModel or SplitCodeDocumentViewModel
                 && (ActiveDocument as ICaretContext)?.OwningFunctionVa == function.EntryVa)
             {
+                ScrollTo(va);
                 return;
             }
 
             OpenTarget(new DisassemblyTarget(function.EntryVa, NameOf(function.EntryVa)));
+            ScrollTo(va);
             return;
         }
 
@@ -334,7 +336,26 @@ public sealed partial class MainViewModel : ObservableObject
         // The arrow lives on a single shared address. Set it into this module's listing space; the
         // opened binary's own documents draw no arrow for it, since it is not in their range.
         Debugger.ExecutionAddress = listingVa;
+        ScrollTo(listingVa);
         return true;
+    }
+
+    /// <summary>
+    /// Scrolls the document in front of the reader to an address.
+    ///
+    /// A listing opens on its function's entry, which is the top; stopping some way into a long
+    /// function would otherwise leave the header on screen and the arrow below the fold. Only the
+    /// active document, and only when it has a line for the address — a document showing something
+    /// else is not moved.
+    /// </summary>
+    private void ScrollTo(ulong va)
+    {
+        switch (ActiveDocument)
+        {
+            case CodeDocumentViewModel code: code.RevealAddress(va); break;
+            case SplitCodeDocumentViewModel split: split.RevealAddress(va); break;
+            default: break;
+        }
     }
 
     /// <summary>

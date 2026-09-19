@@ -132,6 +132,63 @@ public sealed partial class SplitCodeDocumentViewModel : DocumentViewModel, ICar
 
         HasNotes = Notes.Count > 0;
         SyncStatus = $"{_disassemblyMap.Count} instructions · {_pseudoCMap.Count} statements";
+
+        // A stop that opened this document asked for its line before there was text; now there is.
+        ApplyPendingReveal();
+    }
+
+    /// <summary>
+    /// Scrolls both panes to an address, if this function has a line for it.
+    ///
+    /// What a stop needs and what opening a function needs are not the same thing: a document opens
+    /// on the function's entry, which is the top of the listing, and stopping two hundred
+    /// instructions in would otherwise leave the reader looking at the header with the arrow
+    /// somewhere off screen below.
+    /// </summary>
+    public void RevealAddress(ulong va)
+    {
+        _pendingReveal = va;
+        ApplyPendingReveal();
+    }
+
+    /// <summary>
+    /// An address to scroll to as soon as there is a listing to scroll. A document opened by a stop
+    /// loads in the background, so the stop asks for its line before either pane has any text.
+    /// </summary>
+    private ulong? _pendingReveal;
+
+    private void ApplyPendingReveal()
+    {
+        if (_pendingReveal is not { } va || _disassemblyMap.Count == 0)
+        {
+            return;
+        }
+
+        _pendingReveal = null;
+
+        // Through the same guard the panes use on each other, so moving them here does not read as a
+        // caret the reader put there and send them chasing.
+        _syncing = true;
+        try
+        {
+            // Zero first: a line only moves the pane when it changes, and stopping twice on one line
+            // — a breakpoint hit after stepping away and back — would otherwise not scroll at all.
+            if (_disassemblyMap.LineFor(va) is { } disassembly && _disassemblyMap.Covers(va))
+            {
+                DisassemblyLine = 0;
+                DisassemblyLine = disassembly;
+            }
+
+            if (_pseudoCMap.LineFor(va) is { } pseudoC && _pseudoCMap.Covers(va))
+            {
+                PseudoCLine = 0;
+                PseudoCLine = pseudoC;
+            }
+        }
+        finally
+        {
+            _syncing = false;
+        }
     }
 
     partial void OnDisassemblyCaretAddressChanged(ulong? value) => Follow(value, toPseudoC: true);

@@ -74,7 +74,13 @@ public sealed class BreakpointMargin : AbstractMargin
         // them has a line to itself, so stepping round a loop used to blank the arrow for two
         // presses out of three. The last line at or before the address is the statement that
         // instruction ended up inside, which is what the reader means by "where it is".
-        int? arrow = current is { } stopped ? Map(Document).LineFor(stopped) : null;
+        //
+        // Only within the span this text actually covers, though. "The last line at or before" has
+        // an answer for every address above the first one, including addresses belonging to some
+        // other function entirely — so opening any function while stopped elsewhere drew an arrow on
+        // its closing line, pointing at an instruction that is nowhere near it.
+        var map = Map(Document);
+        int? arrow = current is { } stopped && map.Covers(stopped) ? map.LineFor(stopped) : null;
 
         foreach (var line in view.VisualLines)
         {
