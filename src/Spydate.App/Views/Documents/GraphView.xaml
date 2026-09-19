@@ -40,7 +40,7 @@
                                   Graph="{Binding Graph}"
                                   Zoom="{Binding Zoom, Mode=TwoWay}"
                                   SelectedVa="{Binding SelectedVa, Mode=TwoWay}"
-                                  ActivateCommand="{Binding DataContext.OpenBlockCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                  ActivateCommand="{Binding DataContext.Active.OpenBlockCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                   FontFamily="{DynamicResource Mono.FontFamily}"
                                   FontSize="11"
                                   NodeFill="{DynamicResource Graph.Node}"

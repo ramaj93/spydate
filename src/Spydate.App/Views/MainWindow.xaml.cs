@@ -219,7 +219,7 @@ public partial class MainWindow : FluentWindow
     {
         if (XrefGrid.SelectedItem is XrefRow row)
         {
-            _viewModel.GoToXrefCommand.Execute(row);
+            _viewModel.Active?.GoToXrefCommand.Execute(row);
         }
     }
 
@@ -666,7 +666,10 @@ public partial class MainWindow : FluentWindow
 
     private void OnExplorerSelectionChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {
-        _viewModel.SelectedNode = e.NewValue as ExplorerNodeViewModel;
+        if (_viewModel.Active is { } file)
+        {
+            file.SelectedNode = e.NewValue as ExplorerNodeViewModel;
+        }
     }
 
     private void OnDragOver(object sender, DragEventArgs e)

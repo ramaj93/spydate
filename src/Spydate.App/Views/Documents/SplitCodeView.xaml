@@ -41,11 +41,11 @@
                                  DisabledBreakpointAddresses="{Binding DataContext.Debugger.DisabledBreakpointAddresses, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
-                                 ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                 NavigateWordCommand="{Binding DataContext.NavigateWordCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 ToggleBreakpointCommand="{Binding DataContext.Active.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 NavigateWordCommand="{Binding DataContext.Active.NavigateWordCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                  CaretAddress="{Binding DisassemblyCaretAddress, Mode=OneWayToSource}"
                                  CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
-                                 Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
+                                 Tag="{Binding DataContext.Active, RelativeSource={RelativeSource AncestorType=Window}}">
                 <controls:CodeEditor.ContextMenu>
                     <ContextMenu DataContext="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource Self}}">
                         <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding RenameSymbolCommand}" />
@@ -78,11 +78,11 @@
                                  DisabledBreakpointAddresses="{Binding DataContext.Debugger.DisabledBreakpointAddresses, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  BreakpointsVersion="{Binding DataContext.Debugger.BreakpointsVersion, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
                                  ExecutionAddress="{Binding DataContext.Debugger.ExecutionAddress, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}"
-                                 ToggleBreakpointCommand="{Binding DataContext.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                 NavigateWordCommand="{Binding DataContext.NavigateWordCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 ToggleBreakpointCommand="{Binding DataContext.Active.ToggleBreakpointAtCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 NavigateWordCommand="{Binding DataContext.Active.NavigateWordCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                  CaretAddress="{Binding PseudoCCaretAddress, Mode=OneWayToSource}"
                                  CaretWord="{Binding CaretWord, Mode=OneWayToSource}"
-                                 Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
+                                 Tag="{Binding DataContext.Active, RelativeSource={RelativeSource AncestorType=Window}}">
                 <controls:CodeEditor.ContextMenu>
                     <ContextMenu DataContext="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource Self}}">
                         <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding RenameSymbolCommand}" />

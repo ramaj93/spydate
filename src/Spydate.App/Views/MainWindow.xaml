@@ -23,27 +23,27 @@
 
     <Window.InputBindings>
         <KeyBinding Key="O" Modifiers="Control" Command="{Binding OpenFileCommand}" />
-        <KeyBinding Key="W" Modifiers="Control" Command="{Binding CloseActiveDocumentCommand}" />
-        <KeyBinding Key="F4" Modifiers="Control" Command="{Binding CloseActiveDocumentCommand}" />
+        <KeyBinding Key="W" Modifiers="Control" Command="{Binding Active.CloseActiveDocumentCommand}" />
+        <KeyBinding Key="F4" Modifiers="Control" Command="{Binding Active.CloseActiveDocumentCommand}" />
         <KeyBinding Key="G" Modifiers="Control" Command="{Binding FocusGotoCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
-        <KeyBinding Key="F5" Command="{Binding ReanalyzeCommand}" />
-        <KeyBinding Key="F2" Command="{Binding RenameSymbolCommand}" />
-        <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding EditCommentCommand}" />
-        <KeyBinding Key="P" Modifiers="Control" Command="{Binding PatchCommand}" />
-        <KeyBinding Key="P" Modifiers="Control+Shift" Command="{Binding TestPatchLiveCommand}" />
-        <KeyBinding Key="F9" Command="{Binding ToggleBreakpointCommand}" />
+        <KeyBinding Key="F5" Command="{Binding Active.ReanalyzeCommand}" />
+        <KeyBinding Key="F2" Command="{Binding Active.RenameSymbolCommand}" />
+        <KeyBinding Key="OemSemicolon" Modifiers="Control" Command="{Binding Active.EditCommentCommand}" />
+        <KeyBinding Key="P" Modifiers="Control" Command="{Binding Active.PatchCommand}" />
+        <KeyBinding Key="P" Modifiers="Control+Shift" Command="{Binding Active.TestPatchLiveCommand}" />
+        <KeyBinding Key="F9" Command="{Binding Active.ToggleBreakpointCommand}" />
         <KeyBinding Key="F8" Command="{Binding Debugger.ContinueCommand}" />
         <KeyBinding Key="F10" Command="{Binding Debugger.StepOverCommand}" />
-        <KeyBinding Key="F10" Modifiers="Control" Command="{Binding RunToCursorCommand}" />
+        <KeyBinding Key="F10" Modifiers="Control" Command="{Binding Active.RunToCursorCommand}" />
         <KeyBinding Key="F11" Command="{Binding Debugger.StepInstructionCommand}" />
         <KeyBinding Key="F11" Modifiers="Control" Command="{Binding Debugger.StepIlCommand}" />
         <KeyBinding Key="F11" Modifiers="Shift" Command="{Binding Debugger.StepOutCommand}" />
         <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Debugger.StopDebuggingCommand}" />
-        <KeyBinding Key="S" Modifiers="Control" Command="{Binding SaveProjectCommand}" />
-        <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding NavigateBackCommand}" />
-        <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding NavigateForwardCommand}" />
-        <KeyBinding Key="F6" Command="{Binding OpenSideBySideCommand}" />
-        <KeyBinding Key="F7" Command="{Binding OpenGraphCommand}" />
+        <KeyBinding Key="S" Modifiers="Control" Command="{Binding Active.SaveProjectCommand}" />
+        <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding Active.NavigateBackCommand}" />
+        <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding Active.NavigateForwardCommand}" />
+        <KeyBinding Key="F6" Command="{Binding Active.OpenSideBySideCommand}" />
+        <KeyBinding Key="F7" Command="{Binding Active.OpenGraphCommand}" />
     </Window.InputBindings>
 
     <Grid>
@@ -95,17 +95,17 @@
                     <MenuItem Header="C_lear recent" Command="{Binding ClearRecentCommand}"
                               IsEnabled="{Binding HasRecent}" />
 
-                    <MenuItem Header="_Save project" InputGestureText="Ctrl+S" Command="{Binding SaveProjectCommand}" />
-                    <MenuItem Header="Save _patched copy…" Command="{Binding SavePatchedCommand}"
-                              IsEnabled="{Binding HasPatches}"
+                    <MenuItem Header="_Save project" InputGestureText="Ctrl+S" Command="{Binding Active.SaveProjectCommand}" />
+                    <MenuItem Header="Save _patched copy…" Command="{Binding Active.SavePatchedCommand}"
+                              IsEnabled="{Binding Active.HasPatches}"
                               ToolTip="Writes a new file with the patches applied. The original is never modified." />
                     <MenuItem Header="_Close file" Command="{Binding CloseFileCommand}" />
                     <Separator />
                     <MenuItem Header="E_xit" InputGestureText="Alt+F4" Click="OnExitClick" />
                 </MenuItem>
                 <MenuItem Header="_Edit">
-                    <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding RenameSymbolCommand}" />
-                    <MenuItem Header="Comment…" InputGestureText="Ctrl+;" Command="{Binding EditCommentCommand}" />
+                    <MenuItem Header="_Rename…" InputGestureText="F2" Command="{Binding Active.RenameSymbolCommand}" />
+                    <MenuItem Header="Comment…" InputGestureText="Ctrl+;" Command="{Binding Active.EditCommentCommand}" />
                     <Separator />
                     <MenuItem Header="_Copy" InputGestureText="Ctrl+C" Command="ApplicationCommands.Copy" />
                     <MenuItem Header="Select _all" InputGestureText="Ctrl+A" Command="ApplicationCommands.SelectAll" />
@@ -116,38 +116,38 @@
                     <MenuItem Header="_Output" IsCheckable="True"
                               IsChecked="{Binding IsOutputVisible, RelativeSource={RelativeSource AncestorType=Window}}" />
                     <Separator />
-                    <MenuItem Header="_Annotations" Command="{Binding OpenAnnotationsCommand}"
+                    <MenuItem Header="_Annotations" Command="{Binding Active.OpenAnnotationsCommand}"
                               ToolTip="Every name, comment and slot name you have set, in one list" />
                     <Separator />
-                    <MenuItem Header="_Side by side" InputGestureText="F6" Command="{Binding OpenSideBySideCommand}"
+                    <MenuItem Header="_Side by side" InputGestureText="F6" Command="{Binding Active.OpenSideBySideCommand}"
                               ToolTip="Show this function's disassembly and pseudo-C together, each following the other" />
-                    <MenuItem Header="Control-flow _graph" InputGestureText="F7" Command="{Binding OpenGraphCommand}"
+                    <MenuItem Header="Control-flow _graph" InputGestureText="F7" Command="{Binding Active.OpenGraphCommand}"
                               ToolTip="Draw this function as basic blocks and the edges between them" />
                     <Separator />
                     <MenuItem Header="Assistant _provider…" Command="{Binding Assistant.ConfigureCommand}"
                               ToolTip="Choose a provider and model for the Assistant panel, and add an API key" />
                     <Separator />
-                    <MenuItem Header="Close _tab" InputGestureText="Ctrl+W" Command="{Binding CloseActiveDocumentCommand}" />
-                    <MenuItem Header="Close all tabs" Command="{Binding CloseAllDocumentsCommand}" />
+                    <MenuItem Header="Close _tab" InputGestureText="Ctrl+W" Command="{Binding Active.CloseActiveDocumentCommand}" />
+                    <MenuItem Header="Close all tabs" Command="{Binding Active.CloseAllDocumentsCommand}" />
                 </MenuItem>
                 <MenuItem Header="_Analyze">
-                    <MenuItem Header="_Back" InputGestureText="Alt+Left" Command="{Binding NavigateBackCommand}" />
-                    <MenuItem Header="_Forward" InputGestureText="Alt+Right" Command="{Binding NavigateForwardCommand}" />
+                    <MenuItem Header="_Back" InputGestureText="Alt+Left" Command="{Binding Active.NavigateBackCommand}" />
+                    <MenuItem Header="_Forward" InputGestureText="Alt+Right" Command="{Binding Active.NavigateForwardCommand}" />
                     <Separator />
                     <MenuItem Header="_Go to address…" InputGestureText="Ctrl+G"
                               Command="{Binding FocusGotoCommand, RelativeSource={RelativeSource AncestorType=Window}}" />
-                    <MenuItem Header="Go to _entry point" Command="{Binding OpenEntryPointCommand}" />
+                    <MenuItem Header="Go to _entry point" Command="{Binding Active.OpenEntryPointCommand}" />
                     <Separator />
                     <!-- Patches act on the address the active document is showing. Nothing is written
                          to disk until File ▸ Save patched copy. -->
-                    <MenuItem Header="_NOP out this instruction" Command="{Binding NopOutCommand}"
+                    <MenuItem Header="_NOP out this instruction" Command="{Binding Active.NopOutCommand}"
                               ToolTip="Replaces the instruction here with NOPs of exactly the same length" />
-                    <MenuItem Header="_Patch instruction…" InputGestureText="Ctrl+P" Command="{Binding PatchCommand}"
+                    <MenuItem Header="_Patch instruction…" InputGestureText="Ctrl+P" Command="{Binding Active.PatchCommand}"
                               ToolTip="Type an instruction to put at the caret" />
-                    <MenuItem Header="_Invert this branch" Command="{Binding InvertBranchCommand}"
+                    <MenuItem Header="_Invert this branch" Command="{Binding Active.InvertBranchCommand}"
                               ToolTip="Makes a conditional jump take the other way, keeping its length" />
                     <Separator />
-                    <MenuItem Header="_Re-analyze" InputGestureText="F5" Command="{Binding ReanalyzeCommand}" />
+                    <MenuItem Header="_Re-analyze" InputGestureText="F5" Command="{Binding Active.ReanalyzeCommand}" />
                 </MenuItem>
 
                 <!-- F5 is already Re-analyze and has been since before there was a debugger, so
@@ -177,12 +177,12 @@
                               ToolTip="One IL instruction, for reading the IL view. .NET processes only." />
                     <MenuItem Header="Step ou_t" InputGestureText="Shift+F11" Command="{Binding Debugger.StepOutCommand}"
                               ToolTip="Runs to the end of the current function and stops in whatever called it." />
-                    <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding RunToCursorCommand}" />
+                    <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding Active.RunToCursorCommand}" />
                     <Separator />
-                    <MenuItem Header="_Test patch live…" InputGestureText="Ctrl+Shift+P" Command="{Binding TestPatchLiveCommand}"
+                    <MenuItem Header="_Test patch live…" InputGestureText="Ctrl+Shift+P" Command="{Binding Active.TestPatchLiveCommand}"
                               ToolTip="Assemble an instruction into the running process as a hypothesis, to Keep or Undo" />
                     <Separator />
-                    <MenuItem Header="Toggle _breakpoint" InputGestureText="F9" Command="{Binding ToggleBreakpointCommand}"
+                    <MenuItem Header="Toggle _breakpoint" InputGestureText="F9" Command="{Binding Active.ToggleBreakpointCommand}"
                               ToolTip="Marks the line the caret is on. Works before anything is running." />
                 </MenuItem>
                 <MenuItem Header="_Help">
@@ -211,12 +211,12 @@
 
                 <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />
 
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding NavigateBackCommand}"
-                        AutomationProperties.Name="Back" ToolTip="{Binding BackTooltip}">
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.NavigateBackCommand}"
+                        AutomationProperties.Name="Back" ToolTip="{Binding Active.BackTooltip}">
                     <ui:SymbolIcon Symbol="ArrowLeft24" FontSize="13" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding NavigateForwardCommand}"
-                        AutomationProperties.Name="Forward" ToolTip="{Binding ForwardTooltip}">
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.NavigateForwardCommand}"
+                        AutomationProperties.Name="Forward" ToolTip="{Binding Active.ForwardTooltip}">
                     <ui:SymbolIcon Symbol="ArrowRight24" FontSize="13" />
                 </Button>
 
@@ -227,25 +227,25 @@
                 <TextBox x:Name="GotoBox" DockPanel.Dock="Left" Width="220" AutomationProperties.Name="Address"
                          Tag="VA / RVA / offset / symbol"
                          FontFamily="{DynamicResource Mono.FontFamily}"
-                         Text="{Binding GotoAddressText, UpdateSourceTrigger=PropertyChanged}"
+                         Text="{Binding Active.GotoAddressText, UpdateSourceTrigger=PropertyChanged}"
                          IsEnabled="{Binding HasBinary}">
                     <TextBox.InputBindings>
-                        <KeyBinding Key="Return" Command="{Binding GoToAddressCommand}" />
+                        <KeyBinding Key="Return" Command="{Binding Active.GoToAddressCommand}" />
                     </TextBox.InputBindings>
                 </TextBox>
                 <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Content="Go" Margin="3,0,0,0" AutomationProperties.Name="Go"
-                        Command="{Binding GoToAddressCommand}" IsEnabled="{Binding HasBinary}" />
+                        Command="{Binding Active.GoToAddressCommand}" IsEnabled="{Binding HasBinary}" />
 
                 <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />
 
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding OpenEntryPointCommand}" AutomationProperties.Name="Go to entry point"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.OpenEntryPointCommand}" AutomationProperties.Name="Go to entry point"
                         IsEnabled="{Binding HasBinary}" ToolTip="Disassemble the entry point">
                     <StackPanel Orientation="Horizontal">
                         <ui:SymbolIcon Symbol="Play24" FontSize="13" Margin="0,0,4,0" />
                         <TextBlock Text="Entry point" VerticalAlignment="Center" />
                     </StackPanel>
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding ReanalyzeCommand}" AutomationProperties.Name="Re-analyze"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.ReanalyzeCommand}" AutomationProperties.Name="Re-analyze"
                         IsEnabled="{Binding HasBinary}" ToolTip="Re-run function discovery (F5)">
                     <StackPanel Orientation="Horizontal">
                         <ui:SymbolIcon Symbol="ArrowSync24" FontSize="13" Margin="0,0,4,0" />
@@ -314,7 +314,7 @@
                         </DockPanel>
                     </Border>
 
-                    <TreeView x:Name="ExplorerTree" Grid.Row="1" ItemsSource="{Binding Explorer}"
+                    <TreeView x:Name="ExplorerTree" Grid.Row="1" ItemsSource="{Binding Active.Explorer}"
                               SelectedItemChanged="OnExplorerSelectionChanged" Padding="0,2,0,0">
                         <TreeView.ItemContainerStyle>
                             <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
@@ -360,9 +360,9 @@
                 </Grid.RowDefinitions>
 
                 <Grid Grid.Row="0">
-                    <TabControl ItemsSource="{Binding Documents}" SelectedItem="{Binding ActiveDocument}"
+                    <TabControl ItemsSource="{Binding Active.Documents}" SelectedItem="{Binding Active.ActiveDocument}"
                                 Style="{StaticResource DocumentTabControl}"
-                                Visibility="{Binding HasDocuments, Converter={StaticResource BoolToVisibility}}">
+                                Visibility="{Binding Active.HasDocuments, Converter={StaticResource BoolToVisibility}}">
                         <TabControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type docs:DocumentViewModel}">
                                 <StackPanel Orientation="Horizontal">
@@ -373,7 +373,7 @@
                                                Foreground="{DynamicResource Accent.Hover}"
                                                Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
                                     <Button Style="{StaticResource TabCloseButton}" ToolTip="Close (Ctrl+W)" AutomationProperties.Name="Close tab"
-                                            Command="{Binding DataContext.CloseDocumentCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            Command="{Binding DataContext.Active.CloseDocumentCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                             CommandParameter="{Binding}" />
                                 </StackPanel>
                             </DataTemplate>
@@ -381,7 +381,7 @@
                     </TabControl>
 
                     <Border Background="{DynamicResource Document.Background}"
-                            Visibility="{Binding HasDocuments, Converter={StaticResource InverseBoolToVisibility}}">
+                            Visibility="{Binding Active.HasDocuments, Converter={StaticResource InverseBoolToVisibility}}">
                         <TextBlock Text="Select an item in the explorer to open a document."
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
                                    Foreground="{DynamicResource Text.Tertiary}" />
@@ -423,9 +423,9 @@
                             <TabItem Header="Output">
                                 <ListBox x:Name="OutputList" ItemsSource="{Binding Output}" />
                             </TabItem>
-                            <TabItem Header="{Binding XrefsCaption}">
+                            <TabItem Header="{Binding Active.XrefsCaption}">
                                 <Grid>
-                                    <DataGrid x:Name="XrefGrid" ItemsSource="{Binding Xrefs}" Style="{StaticResource DocGrid}"
+                                    <DataGrid x:Name="XrefGrid" ItemsSource="{Binding Active.Xrefs}" Style="{StaticResource DocGrid}"
                                               Background="{DynamicResource Panel.Background}"
                                               MouseDoubleClick="OnXrefDoubleClick">
                                         <DataGrid.Columns>
@@ -438,11 +438,11 @@
                                     <TextBlock Text="Open a function to see what references it."
                                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                                Foreground="{DynamicResource Text.Tertiary}"
-                                               Visibility="{Binding Xrefs.Count, Converter={StaticResource ZeroToVisible}}" />
+                                               Visibility="{Binding Active.Xrefs.Count, Converter={StaticResource ZeroToVisible}}" />
                                 </Grid>
                             </TabItem>
                             <TabItem Header="Warnings">
-                                <ListBox ItemsSource="{Binding Warnings}">
+                                <ListBox ItemsSource="{Binding Active.Warnings}">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding}" TextWrapping="NoWrap"
@@ -912,8 +912,8 @@
                                 </Grid>
                             </TabItem>
 
-                            <TabItem Header="{Binding PatchesCaption}">
-                                <DataGrid ItemsSource="{Binding Patches}" AutoGenerateColumns="False"
+                            <TabItem Header="{Binding Active.PatchesCaption}">
+                                <DataGrid ItemsSource="{Binding Active.Patches}" AutoGenerateColumns="False"
                                           IsReadOnly="True" HeadersVisibility="Column"
                                           GridLinesVisibility="None" SelectionMode="Single"
                                           AutomationProperties.Name="Patches">
@@ -929,10 +929,10 @@
                                     <DataGrid.ContextMenu>
                                         <ContextMenu>
                                             <MenuItem Header="Switch on or off"
-                                                      Command="{Binding PlacementTarget.DataContext.TogglePatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      Command="{Binding PlacementTarget.DataContext.Active.TogglePatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                             <MenuItem Header="Revert"
-                                                      Command="{Binding PlacementTarget.DataContext.RevertPatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      Command="{Binding PlacementTarget.DataContext.Active.RevertPatchCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
                                         </ContextMenu>
                                     </DataGrid.ContextMenu>
@@ -1077,7 +1077,7 @@
                 <ProgressBar IsIndeterminate="True" VerticalAlignment="Top" Height="2"
                              Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
                 <DockPanel Margin="6,0">
-                    <TextBlock DockPanel.Dock="Right" Text="{Binding AnalysisText}" VerticalAlignment="Center"
+                    <TextBlock DockPanel.Dock="Right" Text="{Binding Active.AnalysisText}" VerticalAlignment="Center"
                                Margin="12,0,0,0" Foreground="{DynamicResource Text.Secondary}" />
                     <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                 </DockPanel>
