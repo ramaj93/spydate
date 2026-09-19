@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.ComponentModel;
 using System.Text;
 using ModelContextProtocol.Server;
@@ -202,14 +203,31 @@ public sealed class DebugTools
             : "\n\nwhat it has done:\n" + string.Join("\n", snapshot.Recent.Select(line => $"  {line}"));
 
     [McpServerTool(Name = "debug_break")]
-    [Description("Set or clear a breakpoint at a listing address (open module) or a .NET Type::Method(+IL_7); in another assembly, by name not address. A .NET program debugged natively takes a managed breakpoint at a managed address, a native one elsewhere. Works before its module loads.")]
+    [Description("Set or clear a breakpoint at a listing address (open module) or a .NET Type::Method(+IL_7); in another assembly, by name not address. In another native module, Name.dll+0xRVA, not its listing address. A .NET program debugged natively takes a managed breakpoint at a managed address, a native one elsewhere. Works before its module loads.")]
     public string Break(
-        [Description("Address, sub_XXXX, an existing name, or a .NET method.")] string target,
+        [Description("Address, sub_XXXX, a name, .NET method, or Name.dll+0xRVA.")] string target,
         [Description("True to set it, false to clear it.")] bool on = true)
     {
         if (Refusal() is { } refused)
         {
             return refused;
+        }
+
+        // Module+RVA first, and for both engines. It names a place in a module that is not the one
+        // being read, so nothing about the open binary can resolve it and neither resolver should
+        // try - a .NET assembly running native code through a P/Invoke is exactly when this is asked
+        // for, and that is the managed engine's session as much as the native one's.
+        if (ModuleTarget(target) is var (module, rva))
+        {
+            if (_store.Debug is not { } debug)
+            {
+                return "this host does not support breakpoints in other modules.";
+            }
+
+            return debug.SetModuleBreakpoint(module, rva, on)
+                   ?? (on
+                       ? $"breakpoint at {module}+0x{rva:X}. It goes into the process when {module} loads."
+                       : $"cleared the breakpoint at {module}+0x{rva:X}");
         }
 
         if (_store.ManagedDebug is { } managed)
@@ -387,6 +405,45 @@ public sealed class DebugTools
         return _store.Current is null ? SessionTools.NothingOpen : null;
     }
 
+    /// <summary>
+    /// <c>Name.dll+0x1234</c> split into the module and the RVA, or null when the target is not
+    /// written that way.
+    ///
+    /// The file extension is what tells this apart from a .NET <c>Type::Method+IL_7</c> and from an
+    /// arithmetic-looking name: the left side has to end in one, so <c>Mingus.dll+0x6F10</c> is a
+    /// module and <c>sub_1000+8</c> is not.
+    /// </summary>
+    private static (string Module, uint Rva)? ModuleTarget(string? target)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return null;
+        }
+
+        int plus = target.LastIndexOf('+');
+        if (plus <= 0)
+        {
+            return null;
+        }
+
+        string module = target[..plus].Trim();
+        if (!module.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+            && !module.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string rva = target[(plus + 1)..].Trim();
+        if (rva.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            rva = rva[2..];
+        }
+
+        return uint.TryParse(rva, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint parsed)
+            ? (module, parsed)
+            : null;
+    }
+
     private ulong? Address(string? target)
     {
         if (string.IsNullOrWhiteSpace(target) || _store.Current is not { } session)
@@ -532,10 +589,12 @@ public sealed class DebugTools
             }
         }
 
-        if (snapshot.Breakpoints.Count > 0)
+        if (snapshot.Breakpoints.Count > 0 || snapshot.ModuleBreakpoints.Count > 0)
         {
             sb.AppendLine();
-            sb.AppendLine("breakpoints: " + string.Join(", ", snapshot.Breakpoints.Select(b => $"0x{b:X}")));
+            sb.AppendLine("breakpoints: " + string.Join(
+                ", ",
+                snapshot.Breakpoints.Select(b => $"0x{b:X}").Concat(snapshot.ModuleBreakpoints)));
         }
 
         sb.Append(Recent(snapshot));

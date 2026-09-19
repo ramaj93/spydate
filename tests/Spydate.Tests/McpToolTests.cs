@@ -820,6 +820,52 @@ public sealed class DebugToolTests
         Assert.Contains("pause to stop it where it is", tools.Run("continue"), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A breakpoint in a module the open binary merely calls into.
+    ///
+    /// The address read off that module's own listing cannot work and is the thing to stop anyone
+    /// reaching for: two DLLs in one process routinely prefer the same base, so the number alone is
+    /// a real place in several of them, and planting it translates against the wrong module's rebase.
+    /// The module has to be named, and the tool takes it the way the panel writes it.
+    /// </summary>
+    [Fact]
+    public void ABreakpointCanNameAModuleOtherThanTheOneBeingRead()
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "stopped", At = 0x1800040C0 };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        string answer = tools.Break("Mingus.dll+0x6F10");
+
+        Assert.Contains("Mingus.dll+0x6F10", answer, StringComparison.Ordinal);
+        Assert.Contains("Mingus.dll+0x6F10", stub.ModuleBreaks);
+
+        // And it is not mistaken for an address in the open listing, which is where it used to go.
+        Assert.DoesNotContain(stub.Done, d => d.StartsWith("break:6F10:", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The two things that are not a module and an RVA, so neither is taken for one: a .NET method
+    /// with an IL offset, and a name with arithmetic on it. Both end in "+something" and neither
+    /// names a file.
+    /// </summary>
+    [Theory]
+    [InlineData("Program::Main+IL_7")]
+    [InlineData("sub_1000+8")]
+    [InlineData("0x140001000")]
+    public void WhatIsNotAModuleAndAnRvaIsNotTakenForOne(string target)
+    {
+        using var store = Open();
+        var stub = new StubDebug { State = "stopped" };
+        var tools = new DebugTools(store, McpOptions.Default with { AllowDebug = true });
+        store.Debug = stub;
+
+        tools.Break(target);
+
+        Assert.Empty(stub.ModuleBreaks);
+    }
+
     private sealed class StubDebug : IDebugControl
     {
         public List<string> Done { get; } = [];
@@ -917,6 +963,15 @@ public sealed class DebugToolTests
             Done.Add($"break:{staticVa:X}:{on}");
             return on;
         }
+
+        public string? SetModuleBreakpoint(string module, uint rva, bool on)
+        {
+            Done.Add($"break:{module}+{rva:X}:{on}");
+            ModuleBreaks.Add($"{module}+0x{rva:X}");
+            return null;
+        }
+
+        public List<string> ModuleBreaks { get; } = new();
 
         public DebugSnapshot Snapshot() => new()
         {

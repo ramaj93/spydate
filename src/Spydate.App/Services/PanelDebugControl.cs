@@ -92,6 +92,13 @@ public sealed class PanelDebugControl : IDebugControl
         return _debugger.BreakpointAddresses.Contains(staticVa);
     }
 
+    public string? SetModuleBreakpoint(string module, uint rva, bool on)
+    {
+        string? problem = null;
+        OnUi(() => problem = _debugger.SetModuleBreakpoint(module, rva, on));
+        return problem;
+    }
+
     public DebugSnapshot Snapshot()
     {
         DebugSnapshot snapshot = null!;
@@ -118,6 +125,7 @@ public sealed class PanelDebugControl : IDebugControl
             Stack = _debugger.Stack.Select(s => (Parse(s.Address), Parse(s.Value))).ToList(),
             Modules = _debugger.Modules.Select(m => (m.Name, Parse(m.Base), m.IsTarget)).ToList(),
             Breakpoints = _debugger.BreakpointAddresses.Order().ToList(),
+            ModuleBreakpoints = _debugger.ModuleBreakpoints,
             LivePatches = _debugger.LivePatches.Select(p => (p.Rva, p.Va, p.Was, p.Now, p.Comment)).ToList(),
 
             // In mixed mode — the native loop driving a .NET target — the panel also shows the managed

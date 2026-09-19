@@ -63,12 +63,19 @@ public sealed record LivePatchRow(uint Rva, ulong Va, string Was, string Now, st
 /// </summary>
 public sealed partial class BreakpointRow : ObservableObject
 {
-    private readonly Action<ulong, bool>? _onEnabledChanged;
+    private readonly Action<BreakpointRow, bool>? _onEnabledChanged;
     private readonly bool _wired;
 
-    public BreakpointRow(ulong address, string location, string kind, bool enabled, Action<ulong, bool>? onEnabledChanged)
+    public BreakpointRow(
+        ulong address,
+        string location,
+        string kind,
+        bool enabled,
+        Action<BreakpointRow, bool>? onEnabledChanged,
+        string? module = null)
     {
         Address = address;
+        Module = module;
         Location = location;
         Kind = kind;
         _enabled = enabled;                 // set the backing field directly, so building the row does not fire the toggle
@@ -76,9 +83,20 @@ public sealed partial class BreakpointRow : ObservableObject
         _wired = true;
     }
 
+    /// <summary>A static address, or an RVA when <see cref="Module"/> names where it is.</summary>
     public ulong Address { get; }
 
-    public string Where => $"0x{Address:X}";
+    /// <summary>
+    /// The module this is in, or null for the one being read.
+    ///
+    /// An address alone cannot say which module is meant: two DLLs in one process routinely prefer
+    /// the same base — 0x10000000 is the linker's default — so the same number is a real place in
+    /// both. A breakpoint somewhere other than the module the listing is about therefore carries its
+    /// module's name and an RVA inside it, and is written the way it was asked for.
+    /// </summary>
+    public string? Module { get; }
+
+    public string Where => Module is null ? $"0x{Address:X}" : $"{Module}+0x{Address:X}";
 
     public string Location { get; }
 
@@ -92,7 +110,7 @@ public sealed partial class BreakpointRow : ObservableObject
         // Only a person ticking the box calls out; the constructor set the field, not the property.
         if (_wired)
         {
-            _onEnabledChanged?.Invoke(Address, value);
+            _onEnabledChanged?.Invoke(this, value);
         }
     }
 }
@@ -492,6 +510,25 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     public HashSet<ulong> BreakpointAddresses { get; } = new();
 
     /// <summary>
+    /// Breakpoints in a module other than the one being read, as its name and an RVA inside it.
+    ///
+    /// Kept apart from <see cref="BreakpointAddresses"/> because they are a different kind of thing.
+    /// Those are static addresses in the open binary: the gutter draws them, the project file saves
+    /// them, and the analysis can name what is at them. These name a module that is not open — there
+    /// is no listing to draw a dot in and no analysis to ask — so they live only for as long as this
+    /// panel does, and appear in the Breakpoints pane and nowhere else.
+    ///
+    /// The point of them is that a process has more than one module in it. A P/Invoke crossing into
+    /// a native DLL is the ordinary case: the breakpoint that matters is inside the DLL, while the
+    /// thing being read is the assembly that calls it.
+    /// </summary>
+    private readonly SortedSet<(string Module, uint Rva)> _moduleBreakpoints =
+        new(Comparer<(string Module, uint Rva)>.Create((a, b) =>
+            string.Compare(a.Module, b.Module, StringComparison.OrdinalIgnoreCase) is var byName && byName != 0
+                ? byName
+                : a.Rva.CompareTo(b.Rva)));
+
+    /// <summary>
     /// Breakpoints kept in the listing but taken out of the running process — disabled, not cleared.
     /// A disabled one still draws in the gutter (hollow) and stays in the Breakpoints pane, so it can
     /// be switched back on, but it is not planted and does not stop the program. Not persisted: a
@@ -837,15 +874,40 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // IL's static address, which is not executed code. They are seeded as managed breakpoints once
         // the run is up, by the pump below. In pure native mode a mark is a native address and goes in
         // now, so it is standing before the loader break.
-        if (!IsMixedMode)
         {
             foreach (ulong address in BreakpointAddresses)
             {
-                if (!_disabledBreakpoints.Contains(address))
+                if (_disabledBreakpoints.Contains(address))
                 {
-                    session.AddBreakpoint(address);
+                    continue;
                 }
+
+                // In mixed mode a mark on managed code is not planted here: an int3 at its IL's static
+                // address would be over a byte that never executes. Those are seeded as managed
+                // breakpoints by the pump once the run is up.
+                //
+                // A mark that is *not* managed code still is a native address and still goes in now.
+                // It used to be skipped along with them — the whole loop was behind a "not mixed"
+                // test — so in a .NET run debugged natively, a native breakpoint set before the run
+                // went in nowhere and said nothing. The pump skips it too, for the same reason, so
+                // nothing ever planted it. This is the rule the toggle already uses when the mark is
+                // made, and now the rule the run uses when it starts.
+                if (IsMixedMode && MixedTarget(address) is not null)
+                {
+                    continue;
+                }
+
+                session.AddBreakpoint(address);
             }
+        }
+
+        // Breakpoints in other modules go in whatever the engine is. They name a module rather than
+        // an address, so nothing has to be translated and nothing has to be loaded yet: the session
+        // plants each one when the loader announces its module, which for a DLL is the only moment
+        // its addresses mean anything.
+        foreach (var (module, rva) in _moduleBreakpoints)
+        {
+            session.AddBreakpoint(module, rva);
         }
 
         // Every patch that is switched on goes into the run, so it behaves like the patched copy
@@ -1270,6 +1332,63 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         RefreshBreakpoints();
         BreakpointsChanged?.Invoke(this, EventArgs.Empty);
     }
+
+    /// <summary>
+    /// Sets or clears a breakpoint in a module other than the one being read, by its name and an RVA
+    /// inside it — the only way to stop inside a DLL the open binary merely calls into.
+    ///
+    /// An RVA and a name rather than an address, because an address cannot say which module is meant:
+    /// DLLs routinely share a preferred base, so the same number is a real place in several of them.
+    /// That is also why asking for the address off a second module's listing could never work — it
+    /// was translated against the open binary's rebase, which is not that module's, and the plant
+    /// landed on whatever was at the unmapped preferred base, if anything.
+    ///
+    /// Works before the module loads and before anything runs, the same as any other breakpoint: it
+    /// is held here and goes into the process the moment the loader announces that module. Returns
+    /// null when it went in, or why it could not.
+    /// </summary>
+    public string? SetModuleBreakpoint(string module, uint rva, bool on)
+    {
+        if (string.IsNullOrWhiteSpace(module))
+        {
+            return "a breakpoint in another module has to name the module";
+        }
+
+        string name = System.IO.Path.GetFileName(module.Trim());
+        if (string.Equals(name, _binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{name} is the module being read, so its breakpoints go in by address — "
+                   + $"0x{_binary.Image.RvaToVa(rva):X} for RVA 0x{rva:X}.";
+        }
+
+        bool changed = on ? _moduleBreakpoints.Add((name, rva)) : _moduleBreakpoints.Remove((name, rva));
+        if (!changed)
+        {
+            return on ? null : $"there is no breakpoint at {name}+0x{rva:X}";
+        }
+
+        if (_session is { } session)
+        {
+            if (on)
+            {
+                session.AddBreakpoint(name, rva);
+            }
+            else
+            {
+                session.RemoveBreakpoint(name, rva);
+            }
+        }
+
+        Add(on ? $"breakpoint at {name}+0x{rva:X}" : $"cleared the breakpoint at {name}+0x{rva:X}");
+        BreakpointsVersion++;
+        RefreshBreakpoints();
+        BreakpointsChanged?.Invoke(this, EventArgs.Empty);
+        return null;
+    }
+
+    /// <summary>The module-named breakpoints, written the way they were asked for.</summary>
+    public IReadOnlyList<string> ModuleBreakpoints
+        => _moduleBreakpoints.Select(b => $"{b.Module}+0x{b.Rva:X}").ToList();
 
     /// <summary>
     /// A managed program driven by the native loop — the case where a native breakpoint and a managed
@@ -2262,8 +2381,34 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
                 BreakpointLocation(address),
                 _pendingManaged.ContainsKey(address) ? "managed" : "native",
                 !_disabledBreakpoints.Contains(address),
-                SetBreakpointEnabled));
+                OnRowEnabledChanged));
         }
+
+        // Then the ones in other modules. Nothing here can say what is at them — that module is not
+        // open, so there is no analysis to ask and no listing to name — so the location is the module
+        // itself, which is the fact that matters about them.
+        foreach (var (module, rva) in _moduleBreakpoints)
+        {
+            Breakpoints.Add(new BreakpointRow(
+                rva, $"in {module}", "native", enabled: true, OnRowEnabledChanged, module));
+        }
+    }
+
+    /// <summary>
+    /// The tick box in the Breakpoints pane. A breakpoint in the open binary is disabled rather than
+    /// forgotten — it stays in the gutter, hollow, to be switched back on. One in another module has
+    /// no gutter to stay in, so unticking it clears it; the row goes, which is what the pane then
+    /// shows and is honest about what happened.
+    /// </summary>
+    private void OnRowEnabledChanged(BreakpointRow row, bool enabled)
+    {
+        if (row.Module is { } module)
+        {
+            SetModuleBreakpoint(module, (uint)row.Address, enabled);
+            return;
+        }
+
+        SetBreakpointEnabled(row.Address, enabled);
     }
 
     /// <summary>

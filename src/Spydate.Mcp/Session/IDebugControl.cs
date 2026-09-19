@@ -50,6 +50,13 @@ public sealed record DebugSnapshot
     public IReadOnlyList<ulong> Breakpoints { get; init; } = [];
 
     /// <summary>
+    /// Breakpoints in other modules, written the way they were set — <c>Name.dll+0xRVA</c>. Listed
+    /// apart from <see cref="Breakpoints"/> because they are not addresses in the open listing and
+    /// reading them as such would put them somewhere they are not.
+    /// </summary>
+    public IReadOnlyList<string> ModuleBreakpoints { get; init; } = [];
+
+    /// <summary>
     /// The managed call stack, innermost first, when the native engine is driving a .NET target —
     /// mixed mode. Empty for a purely native target and for the managed (.NET CLR) engine, which has
     /// its own snapshot. Its presence is how a snapshot says it is a .NET process under the native
@@ -107,6 +114,16 @@ public interface IDebugControl
 
     /// <summary>Sets or clears a breakpoint at a static address. Returns whether it is now set.</summary>
     bool SetBreakpoint(ulong staticVa, bool on);
+
+    /// <summary>
+    /// Sets or clears a breakpoint in a module other than the one being read, by its name and an RVA
+    /// inside it. Returns null when it went in, or why it could not.
+    ///
+    /// A name and an RVA rather than an address, because an address cannot say which module is meant:
+    /// DLLs in one process routinely share a preferred base, so the same number is a real place in
+    /// several of them. This is the only way to stop inside a DLL the open binary merely calls into.
+    /// </summary>
+    string? SetModuleBreakpoint(string module, uint rva, bool on);
 
     /// <summary>
     /// Makes a thread the one looked at and stepped — for the panel as well, since there is one

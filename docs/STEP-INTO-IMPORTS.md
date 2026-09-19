@@ -35,6 +35,19 @@ Status: **Phases 1, 2 and 3 are done**, all verified in the window.
   F11 from `sub_140001408 (C)` opening `kernel32.dll!GetModuleHandleW (C)`, and F10 there staying in
   `KernelBase.dll!GetModuleHandleW (C)`.
 
+**Breakpoints in another module** reach the panel and the agent as `Name.dll+0xRVA`
+(`DebuggerViewModel.SetModuleBreakpoint`, `IDebugControl.SetModuleBreakpoint`, `debug_break`). The
+session has been able to do this since phase 1 — `AddBreakpoint(module, rva)`, planted when the
+loader announces that module — but nothing above it could ask, so the only way to stop inside a DLL
+the open binary calls into was to open that DLL as the target instead. Asking by address cannot
+work and now says so: that address is the module's *preferred* base, the module is mapped somewhere
+else, and it is not even unambiguous — every 32-bit system DLL on a stock Windows prefers
+`0x10000000`, the linker's default, so two dozen loaded modules claim the same number. These
+breakpoints live for the session, not the project file: there is no gutter to draw them in and no
+analysis to name what is at them, so the Breakpoints pane lists them as `in Name.dll` and that is
+all. Verified in the panel on a 32-bit target: `Mingus.dll loaded at 0x5BA90000 (file says
+0x10000000); 1 breakpoint in it armed`, then `breakpoint at Mingus.dll+0x6F10`.
+
 Not done: folding on-demand module analysis into a true multi-binary workspace (the explorer still
 lists only the opened binary; foreign modules are reached by navigation, not browsed), the stepping
 skip-list for noisy system modules (§4/§6), and clickable api-set import names (their hyphens are not

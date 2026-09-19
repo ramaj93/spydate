@@ -1585,5 +1585,100 @@ public sealed class DebuggerTests
 
         session.Stop();
     }
-}
 
+    /// <summary>
+    /// An address off another module's listing cannot be planted, and the refusal says why.
+    ///
+    /// It is a real place in that module's file and a real number on its listing, but the module
+    /// loaded somewhere else, so nothing is at it. "Could not read 0x…" is true and explains nothing,
+    /// and the reader's next thought is that the debugger cannot reach other modules at all — which
+    /// is what the assistant concluded. It can; it has to be told which module is meant, because
+    /// several routinely prefer the same base.
+    /// </summary>
+    [Fact]
+    public void AnAddressFromAnotherModulesListingSaysWhatToWriteInstead()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        var problems = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind == "problem")
+            {
+                lock (problems) { problems.Add(e.Text); }
+            }
+        };
+
+        session.Start(Trivial, imageBase: 0, imageSize: 0, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
+
+        // ntdll's own preferred base, read from its file. It is mapped somewhere else in every
+        // process — the loader has not honoured that base since ASLR — so this address is nowhere.
+        string ntdll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
+        ulong preferred = Spydate.Core.PE.PeImage.Load(ntdll).ImageBase;
+        ulong loaded = session.Modules.Single(m => m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase)).Base;
+        Assert.NotEqual(preferred, loaded);
+
+        Assert.True(session.AddBreakpoint(preferred + 0x1000));
+
+        string said = Assert.Single(problems, p => p.Contains("0x1000", StringComparison.Ordinal) || p.Contains("could not read", StringComparison.Ordinal));
+        Assert.Contains("names its module and an RVA in it", said, StringComparison.Ordinal);
+        Assert.Contains("+0x1000", said, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+
+    /// <summary>
+    /// A module's load line reports that module's own preferred base.
+    ///
+    /// It used to report the target's, for every module — so "Mingus.dll loaded at 0x59A20000 (file
+    /// says 0x400000)" quoted the base of a different file entirely. Working out a rebase is most of
+    /// why anybody reads this line, and the number was wrong by a whole module.
+    /// </summary>
+    [Fact]
+    public void AModuleLoadReportsItsOwnPreferredBaseAndNotTheTargets()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = Headless();
+        var loads = new List<string>();
+        session.Reported += (_, e) =>
+        {
+            if (e.Kind is "module" or "started")
+            {
+                lock (loads) { loads.Add(e.Text); }
+            }
+        };
+
+        // A module announces its load only when something of ours goes into it, so ntdll needs a
+        // breakpoint for there to be a line at all. RVA 0 is the "MZ" of its mapped header — never
+        // executed, which is why the other tests here use it too.
+        Assert.True(session.AddBreakpoint("ntdll.dll", 0));
+
+        // where.exe read as itself, so ImageBase is where.exe's — and ntdll's line must not quote it.
+        var image = Spydate.Core.PE.PeImage.Load(Trivial);
+        session.Start(Trivial, image.ImageBase, image.OptionalHeader.SizeOfImage, arguments: "where.exe");
+        Assert.True(Wait(() => session.State == DebugState.Stopped), "never stopped");
+
+        string ntdll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "ntdll.dll");
+        ulong preferred = Spydate.Core.PE.PeImage.Load(ntdll).ImageBase;
+
+        string line;
+        lock (loads)
+        {
+            line = Assert.Single(loads, l => l.Contains("ntdll.dll", StringComparison.OrdinalIgnoreCase));
+        }
+
+        Assert.Contains($"file says 0x{preferred:X}", line, StringComparison.Ordinal);
+        Assert.DoesNotContain($"file says 0x{image.ImageBase:X}", line, StringComparison.Ordinal);
+
+        session.Stop();
+    }
+}

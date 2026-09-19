@@ -2232,8 +2232,14 @@ public sealed class DebugSession : IDisposable
         }
 
         string name = module.Name.Length > 0 ? module.Name : "an unnamed module";
+
+        // That module's own preferred base, not the target's. This used to print ImageBase for every
+        // module, which belongs to the one being read — so "Mingus.dll loaded at 0x59A20000 (file says
+        // 0x400000)" named the base of a different file entirely. A rebase is precisely what somebody
+        // reads this line to work out, and the number was wrong by a whole module.
+        ulong preferred = Header(module) is { } header ? header.Base : 0;
         string where = $"at 0x{loadBase:X}"
-                       + (ImageBase != 0 && loadBase != ImageBase ? $" (file says 0x{ImageBase:X})" : string.Empty);
+                       + (preferred != 0 && loadBase != preferred ? $" (file says 0x{preferred:X})" : string.Empty);
 
         if (main)
         {
@@ -3226,12 +3232,87 @@ public sealed class DebugSession : IDisposable
     /// Puts an int3 at an address and remembers the byte it replaced. A temporary one is remembered
     /// separately, because it is removed on the first hit rather than kept and re-armed.
     /// </summary>
+    /// <summary>
+    /// A loaded module's preferred base and size, read from its own file once and kept.
+    ///
+    /// From the file rather than from the process, because what is wanted is the number that module's
+    /// *listing* prints — which is its header's, not where the loader happened to put it. Null when
+    /// the file cannot be read, which for a module the loader mapped means it was deleted or replaced
+    /// mid-run; nothing here is worth failing over, since its only caller is explaining an error.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (ulong Base, uint Size)?> _headers = new(StringComparer.OrdinalIgnoreCase);
+
+    private (ulong Base, uint Size)? Header(LoadedModule module)
+        => module.Path.Length == 0
+            ? null
+            : _headers.GetOrAdd(module.Path, static path =>
+            {
+                try
+                {
+                    var image = Core.PE.PeImage.Load(path);
+                    return (image.ImageBase, image.OptionalHeader.SizeOfImage);
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    return null;
+                }
+            });
+
+    /// <summary>
+    /// Why there is nothing at an address a breakpoint was wanted at, when it can be worked out.
+    ///
+    /// Almost always one thing: an address read off a second module's listing. It is a real place in
+    /// that module's own file, at that module's preferred base — but the breakpoint was kept as a
+    /// plain address, so it was translated against the module *being read*, which is a different
+    /// module with a different rebase, and the plant went to the preferred base nothing is mapped at.
+    /// "Could not read 0x10006F10" is true and says nothing about any of that, and the reader's next
+    /// thought is that the debugger cannot reach other modules at all. It can; it has to be told
+    /// which one is meant, because two DLLs in one process routinely prefer the same base.
+    /// </summary>
+    private string WhyNothingIsThere(ulong address)
+    {
+        if (Find(address) is { Module: not null })
+        {
+            return string.Empty;   // already named a module: the address is that module's, and it is not there
+        }
+
+        var could = new List<(string Name, ulong Rva)>();
+        foreach (var module in Modules)
+        {
+            if (Header(module) is { } header
+                && address >= header.Base
+                && address < header.Base + header.Size)
+            {
+                could.Add((module.Name, address - header.Base));
+            }
+        }
+
+        if (could.Count == 0)
+        {
+            return ". Nothing is mapped there";
+        }
+
+        // One candidate is named; several are counted, not listed. Several is the ordinary case rather
+        // than a curiosity: 0x10000000 is the linker's default base for a DLL that does not ask for
+        // another, and every 32-bit system DLL on this machine kept it — two dozen of them, which as a
+        // list buries the one sentence worth reading. That collision is the whole reason a breakpoint
+        // outside the module being read is kept as a name and an RVA instead of an address.
+        string rule = ". A breakpoint outside the module being read names its module and an RVA in it, "
+                      + $"as {(could.Count == 1 ? could[0].Name : "Name.dll")}+0x{could[0].Rva:X}, "
+                      + "so it can be placed wherever that module lands";
+
+        return could.Count == 1
+            ? $". That address is inside {could[0].Name} as its own file lays it out, but it loaded elsewhere{rule}"
+            : $". Nothing is mapped there: it is a preferred base, and {could.Count} of the loaded modules "
+              + $"prefer it, so the address cannot say which is meant{rule}";
+    }
+
     private bool Plant(ulong address, bool temporary = false)
     {
         byte[] existing = ReadMemory(address, 1);
         if (existing.Length != 1)
         {
-            Report("problem", $"could not read {Describe(address)} to put a breakpoint there");
+            Report("problem", $"could not read {Describe(address)} to put a breakpoint there{WhyNothingIsThere(address)}");
             return false;
         }
 

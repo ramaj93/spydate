@@ -481,6 +481,7 @@ public class McpSessionTests
         public void StepOver() => throw new NotSupportedException();
         public void RunTo(ulong staticVa) => throw new NotSupportedException();
         public bool SetBreakpoint(ulong staticVa, bool on) => throw new NotSupportedException();
+        public string? SetModuleBreakpoint(string module, uint rva, bool on) => throw new NotSupportedException();
         public bool SelectThread(uint threadId) => throw new NotSupportedException();
         public string? TryPatch(ulong va, string instruction, string? comment) => throw new NotSupportedException();
         public bool UndoPatch(uint rva) => throw new NotSupportedException();
