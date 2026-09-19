@@ -575,4 +575,80 @@ public sealed class ManagedOverlayTests
 
         session.Stop();
     }
+
+    /// <summary>
+    /// The same first call, caught while the thing being read is the assembly rather than its host.
+    ///
+    /// This is how the window debugs a .NET DLL — the apphost runs, and the module addresses are
+    /// about is the assembly beside it — and it is the arrangement that broke the catch. The
+    /// assembly is mapped, unmapped and mapped again during startup, and the unload marks every
+    /// breakpoint "not planted" that is kept without a module name. The prestub catch is one of
+    /// those, though it lives in coreclr and was never unmapped, so the reload planted it a second
+    /// time, read the int3 already standing there, and recorded 0xCC as the byte to restore.
+    ///
+    /// After that the catch could not step off its own hit: it wrote 0xCC back over the worker's
+    /// first byte and wound the instruction pointer onto it, hitting it again forever. The debuggee
+    /// stopped dead — it printed nothing and never exited — which is a good deal worse than a
+    /// breakpoint that is merely missed.
+    /// </summary>
+    [Fact]
+    public void AColdMethodIsCaughtWhenTheModuleBeingReadIsTheAssemblyAndNotItsHost()
+    {
+        if (Fixture is not { } fixture)
+        {
+            return;
+        }
+
+        string? runtimeDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
+        string coreclr = runtimeDir is { Length: > 0 } ? Path.Combine(runtimeDir, "coreclr.dll") : string.Empty;
+        if (!File.Exists(coreclr) || CoreClrSymbols.PreStubWorkerRva(coreclr) == 0)
+        {
+            return;
+        }
+
+        string assembly = Path.ChangeExtension(fixture, ".dll");
+        Assert.True(File.Exists(assembly), $"{assembly} is missing, so nothing below was exercised");
+
+        int token = MethodToken(fixture, FixtureType, "OnceLate");
+        Assert.NotEqual(0, token);
+
+        using var session = new DebugSession { ShowConsole = false };
+        int stops = 0;
+        session.Reported += (_, e) => { if (e.Kind == "stopped") Interlocked.Increment(ref stops); };
+
+        // Held from the loader break, before any of the target's own code runs — which is the whole
+        // point and the only ordering that reproduces this. Asked for after the CLR is up, the catch
+        // arms after the assembly has already been mapped twice and nothing re-plants it; the window
+        // sets its breakpoints before the run, so it arms first and the reload lands on top of it.
+        session.Start(fixture, imageBase: 0, imageSize: 0, module: assembly, entryStop: EntryStop.LoaderBreak);
+        Assert.True(Wait(() => session.State == DebugState.Stopped, 30), "never reached the loader break");
+
+        string? held = session.AddManagedBreakpoint(FixtureType, token, 0);
+        Assert.NotNull(held);
+
+        // The loader break is itself a reported stop, and it is not the one this is about.
+        Volatile.Write(ref stops, 0);
+        session.Continue();
+
+        // The panel's mixed pump, in miniature: keep asking for the held breakpoint to go in.
+        Assert.True(
+            Wait(
+                () =>
+                {
+                    if (session.State == DebugState.Running)
+                    {
+                        session.PlantPending();
+                    }
+
+                    return Volatile.Read(ref stops) >= 1;
+                },
+                30),
+            "the once-called cold method was never caught with the assembly as the module being read");
+
+        var where = session.Managed!.LocationOf(session.CurrentAddress);
+        Assert.NotNull(where);
+        Assert.Contains("OnceLate", where!.Method, StringComparison.Ordinal);
+
+        session.Stop();
+    }
 }

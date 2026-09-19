@@ -2695,19 +2695,13 @@ public sealed class DebugSession : IDisposable
     /// </param>
     private void EnablePrestubCatch(bool atModuleLoad = false)
     {
-        // Held back on a 32-bit debuggee, for one reason and not the three it looked like.
-        //
-        // The symbol resolves now (see CoreClrSymbols.Resolve: x86 coreclr carries PreStubWorker as
-        // a procedure rather than a public symbol, which is what used to make this silently do
-        // nothing), and the MethodDesc is found — [esp+8] at the worker's first byte reads back as a
-        // real method through the DAC. What does not work yet is the step-and-re-arm after the hit:
-        // the same worker address comes back over and over with the same stack, and the debuggee
-        // stops making progress.
-        //
-        // A first call that is missed is a smaller harm than a program that does not run, so this
-        // stays off until that loop is understood. Cold breakpoints still arrive through
-        // PlantPending on a later call.
-        if (_wow64)
+        // Not when the two are different widths. The DAC that says which method is at the prestub has
+        // to match the debuggee's bitness, so a 64-bit Spydate watching a 32-bit program can arm this
+        // and then never recognise a single thing it catches (ManagedOverlay.Unreachable says so in
+        // words). Armed there it would wrap a lift-step-replant around every JIT compile in the
+        // process, for a stop that cannot happen. The other mismatch never arrives: Windows refuses
+        // to let a 32-bit debugger launch a 64-bit program at all.
+        if (Environment.Is64BitProcess && _wow64)
         {
             return;
         }
@@ -3187,6 +3181,21 @@ public sealed class DebugSession : IDisposable
     }
 
     /// <summary>
+    /// Whether an address kept under a null module really is one in the module being read.
+    ///
+    /// A null module is two different things in the same key. Mostly it means "the module the
+    /// listing is about", an address that only means something once that module is mapped. But a
+    /// breakpoint set at a bare runtime address is also kept this way — the JIT's output for a
+    /// managed breakpoint, and the prestub catch in the middle of coreclr — and those are not in
+    /// that module, do not move when it moves, and do not stop existing when it is unmapped.
+    ///
+    /// Asked of the static address against the image's own header, so the answer does not depend on
+    /// the module being loaded at the moment it is asked — which is exactly when it is asked.
+    /// </summary>
+    private bool InTargetImage(ulong staticVa)
+        => ImageBase != 0 && ImageSize != 0 && staticVa >= ImageBase && staticVa < ImageBase + ImageSize;
+
+    /// <summary>
     /// Forgets where a module's breakpoints were, without forgetting the breakpoints.
     ///
     /// Used when that module goes away. The bytes they saved belong to a mapping that no longer
@@ -3202,7 +3211,7 @@ public sealed class DebugSession : IDisposable
             foreach (var at in _breakpoints.Keys.ToList())
             {
                 bool theirs = module is null
-                    ? at.Module is null
+                    ? at.Module is null && InTargetImage(at.Address)
                     : string.Equals(at.Module, module, StringComparison.OrdinalIgnoreCase);
 
                 if (theirs)
