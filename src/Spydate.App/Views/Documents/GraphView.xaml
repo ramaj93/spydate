@@ -49,7 +49,8 @@
                                   SelectedBorder="{DynamicResource Graph.Selected}"
                                   TextBrush="{DynamicResource Editor.Foreground}"
                                   HeaderBrush="{DynamicResource Text.Tertiary}"
-                                  HorizontalAlignment="Left" VerticalAlignment="Top">
+                                  HorizontalAlignment="Left" VerticalAlignment="Top"
+                                  Tag="{Binding DataContext.Active, RelativeSource={RelativeSource AncestorType=Window}}">
                 <controls:GraphCanvas.EdgeBrushes>
                     <!-- Ordered by GraphEdgeKind: fall-through, taken, jump, loop, switch arm. Resolved
                          at parse time: these brushes are in a plain list, not in the visual tree, so a

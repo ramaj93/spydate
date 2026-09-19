@@ -8,13 +8,12 @@ public partial class GraphView : UserControl
     public GraphView()
     {
         InitializeComponent();
-        Loaded += (_, _) =>
-        {
-            // The naming commands live on the window; the canvas carries a reference so its context
-            // menu can reach them, because a popup has no window in its visual tree to walk up to.
-            Canvas.Tag = Window.GetWindow(this)?.DataContext;
-            UpdateViewport();
-        };
+        // The canvas carries the open file in its Tag, because a popup has no window in its visual
+        // tree to walk up to and the naming commands are not on the graph's own view model. That is
+        // a binding in the XAML rather than an assignment here: it used to be set once on Loaded,
+        // which was the same thing while there was one file for the life of a window — and stopped
+        // being the same thing the moment the file became something the window could swap.
+        Loaded += (_, _) => UpdateViewport();
     }
 
     private void OnScrollChanged(object sender, ScrollChangedEventArgs e) => UpdateViewport();
