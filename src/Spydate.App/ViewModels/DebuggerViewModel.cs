@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.Versioning;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Globalization;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -18,6 +19,13 @@ namespace Spydate.App.ViewModels;
 /// <summary>One register, as the panel shows it. Changed since the last stop is the useful part:
 /// at a breakpoint the question is almost always what the last few instructions did.</summary>
 public sealed record RegisterRow(string Name, string Value, bool Changed);
+
+/// <summary>
+/// One line the debuggee printed. <paramref name="IsError"/> is what the panel colours by: a
+/// program that fails says so on stderr, and losing which stream a line came from would lose the
+/// distinction that matters most.
+/// </summary>
+public sealed record OutputLine(string Text, bool IsError);
 
 /// <summary>One qword on the stack.</summary>
 public sealed record StackRow(string Address, string Value);
@@ -819,8 +827,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var session = new DebugSession();
+        var session = new DebugSession { CaptureOutput = true };
         session.Reported += OnReported;
+        session.Wrote += OnWrote;
+        ProgramOutput.Clear();
         _session = session;
 
         // In mixed mode the gutter marks are managed — they cannot be planted as native int3s at their
@@ -2530,6 +2540,110 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     }
 
     private void Add(string message) => Log.Add($"{DateTime.Now:HH:mm:ss}  {message}");
+
+    /// <summary>
+    /// What the program itself printed, kept apart from the session log.
+    ///
+    /// They answer different questions. The log is what the debugger did — breakpoints planted,
+    /// modules loaded, why a step stopped where it did — and the program's own output is what it
+    /// was trying to say. Merging them buries a one-line error message under a hundred lines of
+    /// module loads, which is the case where the output matters most.
+    /// </summary>
+    public ObservableCollection<OutputLine> ProgramOutput { get; } = new();
+
+    /// <summary>How many lines of the program's output to hold. A noisy program can print forever.</summary>
+    private const int OutputLimit = 5000;
+
+    private void OnWrote(object? sender, DebugSession.ProgramOutput line)
+    {
+        // The pipe is drained on its own thread, and this is a collection a panel is bound to.
+        if (Application.Current?.Dispatcher is { } dispatcher && !dispatcher.CheckAccess())
+        {
+            dispatcher.BeginInvoke(() => OnWrote(sender, line));
+            return;
+        }
+
+        ProgramOutput.Add(new OutputLine(line.Text, line.IsError));
+
+        // Oldest first, so what is on screen is the end of the output — which is where a program
+        // says how it went.
+        while (ProgramOutput.Count > OutputLimit)
+        {
+            ProgramOutput.RemoveAt(0);
+        }
+    }
+
+    [RelayCommand]
+    private void ClearProgramOutput() => ProgramOutput.Clear();
+
+    /// <summary>
+    /// Writes a register of the selected thread.
+    ///
+    /// Hex by default, because that is how the pane shows them and how a listing writes an address;
+    /// a leading <c>0x</c> is accepted and so is plain decimal with a <c>d</c> suffix, since a
+    /// counter one is trying to force is usually thought of in decimal.
+    /// </summary>
+    [RelayCommand]
+    private void SetRegister(RegisterRow? row)
+    {
+        if (row is null || _session is not { } session || !IsStopped)
+        {
+            return;
+        }
+
+        if (_dialogs?.AskForText(
+                "Set register",
+                $"New value for {row.Name}",
+                "hex by default — 1F40, 0x1F40; add a d for decimal — 8000d",
+                row.Value) is not { } typed)
+        {
+            return;
+        }
+
+        if (!TryReadNumber(typed, out ulong value))
+        {
+            Add($"could not read '{typed}' as a number");
+            return;
+        }
+
+        if (session.SetRegister(session.SelectedThreadId, row.Name, value) is { } problem)
+        {
+            Add($"could not write {row.Name}: {problem}");
+            Status = problem;
+            return;
+        }
+
+        Add($"{row.Name} = 0x{value:X}");
+        Status = $"{row.Name} is now 0x{value:X}.";
+
+        // Read back rather than assumed. The kernel does not store every bit of every register as
+        // given — the flags come back sanitised — and the pane should show what is there, not what
+        // was asked for.
+        RefreshRegisters();
+    }
+
+    /// <summary>Hex unless a <c>d</c> suffix says otherwise. False when it is neither.</summary>
+    private static bool TryReadNumber(string text, out ulong value)
+    {
+        string trimmed = text.Trim();
+        value = 0;
+        if (trimmed.Length == 0)
+        {
+            return false;
+        }
+
+        if (trimmed.EndsWith('d') || trimmed.EndsWith('D'))
+        {
+            return ulong.TryParse(trimmed[..^1], NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+
+        if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            trimmed = trimmed[2..];
+        }
+
+        return ulong.TryParse(trimmed, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
+    }
 
     private void NotifyCommands()
     {

@@ -62,6 +62,15 @@ public abstract unsafe class ThreadContext : IDisposable
     /// </summary>
     public abstract IReadOnlyList<(string Name, ulong Value)> General();
 
+    /// <summary>
+    /// Writes one named register into the buffer. False when this architecture has no register of
+    /// that name — the caller reports it rather than writing somewhere arbitrary.
+    ///
+    /// Only into the buffer: <see cref="Write"/> is what puts it into the thread, so a caller reads,
+    /// sets and writes, and a failed set never half-applies.
+    /// </summary>
+    public abstract bool TrySet(string name, ulong value);
+
     /// <summary>Asks the processor to fault after one instruction.</summary>
     public void SetTrapFlag(bool on) => EFlags = on ? EFlags | Native.TrapFlag : EFlags & ~Native.TrapFlag;
 
@@ -134,6 +143,41 @@ public sealed unsafe class X64ThreadContext : ThreadContext
         return all;
     }
 
+    public override bool TrySet(string name, ulong value)
+    {
+        int index = -1;
+        for (int i = 0; i < Names.Count; i++)
+        {
+            if (Names[i] == name)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index >= 0)
+        {
+            *(ulong*)(Buffer + OffRax + (index * 8)) = value;
+            return true;
+        }
+
+        switch (name)
+        {
+            case "rip":
+                InstructionPointer = value;
+                return true;
+
+            // Only the low 32 bits are the flags register; the rest of that qword is reserved and
+            // writing into it is how SetThreadContext starts refusing the whole context.
+            case "rflags":
+                EFlags = (uint)value;
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
     private ulong this[int index] => *(ulong*)(Buffer + OffRax + (index * 8));
 }
 
@@ -201,6 +245,34 @@ public sealed unsafe class Wow64ThreadContext : ThreadContext
         ("esp", At(OffEsp)), ("ebp", At(OffEbp)), ("esi", At(OffEsi)), ("edi", At(OffEdi)),
         ("eip", InstructionPointer), ("eflags", (ulong)EFlags),
     ];
+
+    public override bool TrySet(string name, ulong value)
+    {
+        int offset = name switch
+        {
+            "eax" => OffEax,
+            "ecx" => OffEcx,
+            "edx" => OffEdx,
+            "ebx" => OffEbx,
+            "esp" => OffEsp,
+            "ebp" => OffEbp,
+            "esi" => OffEsi,
+            "edi" => OffEdi,
+            "eip" => OffEip,
+            "eflags" => OffEFlags,
+            _ => -1,
+        };
+
+        if (offset < 0)
+        {
+            return false;
+        }
+
+        // Truncated deliberately: these are 32-bit registers, and a value that does not fit is the
+        // caller's mistake to be told about rather than silently spread over the next field.
+        *(uint*)(Buffer + offset) = (uint)value;
+        return true;
+    }
 
     private ulong At(int offset) => *(uint*)(Buffer + offset);
 }

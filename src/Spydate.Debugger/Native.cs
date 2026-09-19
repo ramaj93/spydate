@@ -283,6 +283,39 @@ internal static partial class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool CloseHandle(IntPtr hObject);
 
+    /// <summary>The debuggee's standard handles are the ones in STARTUPINFO, not the console's.</summary>
+    internal const uint STARTF_USESTDHANDLES = 0x00000100;
+
+    internal const uint HANDLE_FLAG_INHERIT = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SECURITY_ATTRIBUTES
+    {
+        public uint nLength;
+        public IntPtr lpSecurityDescriptor;
+        /// <summary>A plain int, not a bool: the struct has to stay blittable for LibraryImport.</summary>
+        public int bInheritHandle;
+    }
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CreatePipe(out IntPtr hReadPipe, out IntPtr hWritePipe, ref SECURITY_ATTRIBUTES lpPipeAttributes, uint nSize);
+
+    /// <summary>
+    /// Takes the inheritable flag off the read end.
+    ///
+    /// Both ends come out of <see cref="CreatePipe"/> inheritable, and the child must not inherit
+    /// the end this side reads from: while it holds a copy the pipe never reaches end-of-file, so
+    /// the reader waits for a writer that has already exited.
+    /// </summary>
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool SetHandleInformation(IntPtr hObject, uint dwMask, uint dwFlags);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool ReadFile(IntPtr hFile, byte* lpBuffer, uint nNumberOfBytesToRead, out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+
     [LibraryImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", SetLastError = true, StringMarshalling = StringMarshalling.Utf16)]
     internal static unsafe partial uint GetFinalPathNameByHandle(IntPtr hFile, char* lpszFilePath, uint cchFilePath, uint dwFlags);
 

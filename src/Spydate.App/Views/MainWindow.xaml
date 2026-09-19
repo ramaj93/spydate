@@ -570,8 +570,13 @@
                                                          Style="{StaticResource StripTab}" Content="Breakpoints"
                                                          ToolTip="Every breakpoint, managed and native. Tick to enable or disable one; double-click to open its code."
                                                          AutomationProperties.Name="Breakpoints pane" />
+                                            <RadioButton x:Name="PaneOutput" DockPanel.Dock="Left"
+                                                         Style="{StaticResource StripTab}" Content="Output"
+                                                         ToolTip="What the program itself printed, on standard output and standard error"
+                                                         AutomationProperties.Name="Program output pane" />
                                             <RadioButton x:Name="PaneLog" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Log"
+                                                         ToolTip="What the debugger did: breakpoints planted, modules loaded, why a step stopped"
                                                          AutomationProperties.Name="Log pane" />
                                             <RadioButton x:Name="PaneLivePatches" DockPanel.Dock="Left"
                                                          Style="{StaticResource StripTab}" Content="Live patches"
@@ -646,7 +651,9 @@
                                                       AutoGenerateColumns="False"
                                                       IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="None"
                                                       MouseDoubleClick="OpenRegisterRow"
-                                                      ToolTip="Double-click rip to open the line the program is stopped at"
+                                                      SelectionMode="Single" SelectionUnit="FullRow"
+                                                      PreviewMouseRightButtonDown="SelectRowOnRightClick"
+                                                      ToolTip="Double-click rip to open the line the program is stopped at; right-click to set a value"
                                                       AutomationProperties.Name="Registers">
                                                 <DataGrid.Columns>
                                                     <DataGridTextColumn Header="reg" Binding="{Binding Name}" />
@@ -663,6 +670,14 @@
                                                         </DataGridTextColumn.CellStyle>
                                                     </DataGridTextColumn>
                                                 </DataGrid.Columns>
+                                                <DataGrid.ContextMenu>
+                                                    <ContextMenu>
+                                                        <MenuItem Header="Set value…"
+                                                                  ToolTip="Hex by default; add a d for decimal. Writing rip moves execution."
+                                                                  Command="{Binding PlacementTarget.DataContext.SetRegisterCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                                  CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                    </ContextMenu>
+                                                </DataGrid.ContextMenu>
                                             </DataGrid>
 
                                             <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch"
@@ -947,6 +962,38 @@
                                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                                  Visibility="{Binding IsChecked, ElementName=PaneLog, Converter={StaticResource BoolToVisibility}}"
                                                  AutomationProperties.Name="Debug log" />
+
+                                        <!-- The program's own voice. Monospaced because that is what it
+                                             was written for, and stderr in the error colour because a
+                                             program that fails says so there and nowhere else. -->
+                                        <ListBox x:Name="ProgramOutputList" ItemsSource="{Binding ProgramOutput}"
+                                                 FontFamily="{DynamicResource Mono.FontFamily}"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                                 Visibility="{Binding IsChecked, ElementName=PaneOutput, Converter={StaticResource BoolToVisibility}}"
+                                                 AutomationProperties.Name="Program output">
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Text}" TextWrapping="NoWrap">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsError}" Value="True">
+                                                                        <Setter Property="Foreground" Value="{DynamicResource Semantic.Error}" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                            <ListBox.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Clear"
+                                                              Command="{Binding PlacementTarget.DataContext.ClearProgramOutputCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                                                </ContextMenu>
+                                            </ListBox.ContextMenu>
+                                        </ListBox>
 
                                         <!-- Hypotheses: bytes that are in the process but not the project.
                                              Keep writes one into the project; Undo takes it back out. -->

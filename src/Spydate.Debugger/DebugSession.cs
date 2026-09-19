@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Text;
 
 
 namespace Spydate.Debugger;
@@ -1715,9 +1716,135 @@ public sealed class DebugSession : IDisposable
         Reported?.Invoke(this, new DebugEvent(kind, text) { Address = address });
     }
 
+    /// <summary>
+    /// A line the debuggee printed. <paramref name="IsError"/> tells the two streams apart, which
+    /// is most of the value: a program that fails usually says so on stderr and says nothing at all
+    /// on stdout, and a panel that merged them would lose exactly the distinction worth having.
+    /// </summary>
+    public sealed record ProgramOutput(string Text, bool IsError);
+
+    /// <summary>What the debuggee wrote to its standard output or standard error.</summary>
+    public event EventHandler<ProgramOutput>? Wrote;
+
+    /// <summary>
+    /// Whether to capture the debuggee's output instead of letting it go to a console.
+    ///
+    /// The two are exclusive by construction: once its standard handles are the pipes on this side,
+    /// a console window of its own would sit there empty. So capturing implies no console, and a
+    /// program that wants one can still make its own with AllocConsole.
+    /// </summary>
+    public bool CaptureOutput { get; init; }
+
+    /// <summary>The read ends, kept so they can be closed when the session ends.</summary>
+    private IntPtr _stdoutRead, _stderrRead;
+
+    /// <summary>
+    /// Reads one pipe to end-of-file, reporting whole lines.
+    ///
+    /// Its own thread, and a blocking read: the debug loop must not wait on a program that may
+    /// print nothing for an hour, and the pipe ends when the last writing handle closes, which is
+    /// when the debuggee exits.
+    /// </summary>
+    private void Drain(IntPtr pipe, bool isError)
+    {
+        var thread = new Thread(() =>
+        {
+            var pending = new StringBuilder();
+            var buffer = new byte[4096];
+            while (true)
+            {
+                uint read;
+                unsafe
+                {
+                    fixed (byte* p = buffer)
+                    {
+                        if (!Native.ReadFile(pipe, p, (uint)buffer.Length, out read, IntPtr.Zero) || read == 0)
+                        {
+                            break;   // the last writer let go: the program has finished with it
+                        }
+                    }
+                }
+
+                // Decoded as the console encoding rather than UTF-8: a console program writes bytes
+                // in the code page, and a box where a character should be is a worse answer than a
+                // slightly wrong character.
+                pending.Append(Console.OutputEncoding.GetString(buffer, 0, (int)read));
+                Flush(pending, isError, last: false);
+            }
+
+            Flush(pending, isError, last: true);
+        })
+        {
+            IsBackground = true,
+            Name = isError ? "spydate-debuggee-stderr" : "spydate-debuggee-stdout",
+        };
+
+        thread.Start();
+    }
+
+    /// <summary>
+    /// Reports whole lines out of what has arrived, keeping any partial last line for the next read
+    /// — a program's output arrives in whatever sized lumps the pipe gives, which is nothing to do
+    /// with where its lines end.
+    /// </summary>
+    private void Flush(StringBuilder pending, bool isError, bool last)
+    {
+        string text = pending.ToString();
+        int cut = text.LastIndexOf('\n');
+        if (cut < 0)
+        {
+            if (last && text.Length > 0)
+            {
+                pending.Clear();
+                Wrote?.Invoke(this, new ProgramOutput(text.TrimEnd('\r'), isError));
+            }
+
+            return;
+        }
+
+        string whole = text[..cut];
+        pending.Remove(0, cut + 1);
+
+        foreach (string line in whole.Split('\n'))
+        {
+            Wrote?.Invoke(this, new ProgramOutput(line.TrimEnd('\r'), isError));
+        }
+
+        if (last && pending.Length > 0)
+        {
+            string tail = pending.ToString();
+            pending.Clear();
+            Wrote?.Invoke(this, new ProgramOutput(tail.TrimEnd('\r'), isError));
+        }
+    }
+
     private void Loop(string path, string? arguments, string? workingDirectory, TaskCompletionSource<Exception?> ready)
     {
         var startup = new Native.STARTUPINFO { cb = (uint)Marshal.SizeOf<Native.STARTUPINFO>() };
+        IntPtr outWrite = IntPtr.Zero, errWrite = IntPtr.Zero;
+
+        if (CaptureOutput)
+        {
+            var security = new Native.SECURITY_ATTRIBUTES
+            {
+                nLength = (uint)Marshal.SizeOf<Native.SECURITY_ATTRIBUTES>(),
+                bInheritHandle = 1,
+            };
+
+            if (Native.CreatePipe(out _stdoutRead, out outWrite, ref security, 0)
+                && Native.CreatePipe(out _stderrRead, out errWrite, ref security, 0))
+            {
+                // The child must not inherit the ends this side reads from, or the pipes never
+                // reach end-of-file and the reader threads wait for a writer that has exited.
+                Native.SetHandleInformation(_stdoutRead, Native.HANDLE_FLAG_INHERIT, 0);
+                Native.SetHandleInformation(_stderrRead, Native.HANDLE_FLAG_INHERIT, 0);
+
+                startup.dwFlags |= Native.STARTF_USESTDHANDLES;
+                startup.hStdOutput = outWrite;
+                startup.hStdError = errWrite;
+                startup.hStdInput = IntPtr.Zero;
+            }
+        }
 
         // Quoted, and writable: CreateProcessW may modify the buffer it is given.
         char[] command = ($"\"{path}\""
@@ -1731,18 +1858,38 @@ public sealed class DebugSession : IDisposable
             fixed (char* line = command)
             {
                 started = Native.CreateProcess(
-                    null, line, IntPtr.Zero, IntPtr.Zero, false,
+                    null, line, IntPtr.Zero, IntPtr.Zero, CaptureOutput,
                     Native.DEBUG_ONLY_THIS_PROCESS
-                        | (ShowConsole ? Native.CREATE_NEW_CONSOLE : Native.CREATE_NO_WINDOW),
+                        | (ShowConsole && !CaptureOutput ? Native.CREATE_NEW_CONSOLE : Native.CREATE_NO_WINDOW),
                     IntPtr.Zero, workingDirectory, ref startup, out info);
             }
         }
 
+        // This side's copies of the write ends go now, whether or not the start worked. While any
+        // of them is open the pipe has a writer, so the reader would never see end-of-file even
+        // after the debuggee had gone.
+        if (outWrite != IntPtr.Zero)
+        {
+            Native.CloseHandle(outWrite);
+        }
+
+        if (errWrite != IntPtr.Zero)
+        {
+            Native.CloseHandle(errWrite);
+        }
+
         if (!started)
         {
+            ClosePipes();
             ready.SetResult(new InvalidOperationException(
                 $"could not start {path}: {Marshal.GetLastPInvokeErrorMessage()}"));
             return;
+        }
+
+        if (_stdoutRead != IntPtr.Zero)
+        {
+            Drain(_stdoutRead, isError: false);
+            Drain(_stderrRead, isError: true);
         }
 
         _process = info.hProcess;
@@ -1765,7 +1912,26 @@ public sealed class DebugSession : IDisposable
             Native.CloseHandle(info.hThread);
             Native.CloseHandle(info.hProcess);
             _process = IntPtr.Zero;
+
+            // After the process has gone, so whatever it printed on its way out has already been
+            // read: the pipe holds it until somebody takes it, and closing first would throw away
+            // the last thing a program said, which is usually the reason it was being watched.
+            ClosePipes();
         }
+    }
+
+    private void ClosePipes()
+    {
+        foreach (ref var pipe in new[] { _stdoutRead, _stderrRead }.AsSpan())
+        {
+            if (pipe != IntPtr.Zero)
+            {
+                Native.CloseHandle(pipe);
+            }
+        }
+
+        _stdoutRead = IntPtr.Zero;
+        _stderrRead = IntPtr.Zero;
     }
 
     private void Pump()
@@ -1921,6 +2087,56 @@ public sealed class DebugSession : IDisposable
             }
 
             return context.General();
+        }
+        finally
+        {
+            Native.CloseHandle(thread);
+        }
+    }
+
+    /// <summary>
+    /// Writes one register of a stopped thread. Null on success, otherwise why not.
+    ///
+    /// Read, set, write — the whole context goes back, because that is the only granularity
+    /// SetThreadContext has. Done from the calling thread rather than posted to the loop, the same
+    /// way <see cref="RegistersOf"/> reads: the debuggee is stopped, so its threads are not moving,
+    /// and posting would resume the process to do it.
+    ///
+    /// Nothing here stops the caller writing rip. Putting execution somewhere it was never going is
+    /// the point of being able to write registers at all, and a debugger that allowed every register
+    /// except the interesting one would be refusing the reason people ask.
+    /// </summary>
+    public string? SetRegister(uint threadId, string name, ulong value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        if (State != DebugState.Stopped)
+        {
+            return "registers can only be written while it is stopped";
+        }
+
+        using var context = ThreadContext.For(_wow64);
+        var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
+        if (thread == IntPtr.Zero)
+        {
+            return $"could not open thread {threadId}";
+        }
+
+        try
+        {
+            if (!context.Read(thread))
+            {
+                return "could not read the thread's registers";
+            }
+
+            if (!context.TrySet(name.Trim().ToLowerInvariant(), value))
+            {
+                return $"{name} is not a register this can write";
+            }
+
+            return context.Write(thread)
+                ? null
+                : $"the write was refused: {Marshal.GetLastPInvokeErrorMessage()}";
         }
         finally
         {
