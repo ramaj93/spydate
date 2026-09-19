@@ -1818,6 +1818,49 @@ public sealed class DebugSession : IDisposable
         }
     }
 
+    /// <summary>A Win32 code as its own sentence, or a bare number when the system has no words for it.</summary>
+    private static string Message(int error)
+    {
+        string text = new System.ComponentModel.Win32Exception(error).Message;
+        return error == 0 ? "the reason was lost" : $"{text} (Win32 {error})";
+    }
+
+    /// <summary>
+    /// Why a launch was refused, when the reason is that the two are different widths — else null,
+    /// and the caller says what Windows said.
+    ///
+    /// Windows will not let a 32-bit debugger attach to a 64-bit program: <c>CreateProcess</c> with
+    /// the debug flags fails outright with ERROR_NOT_SUPPORTED, so the process never exists and the
+    /// check that reads its bitness afterwards never runs. Unexplained, that surfaced as "could not
+    /// start it: The request is not supported" — or, before the last-error fix above it, as "the
+    /// operation completed successfully", which looks like the whole application is broken rather
+    /// than like the one thing that actually is not allowed.
+    /// </summary>
+    private static string? WrongWidth(string path, int error)
+    {
+        if (error != Native.ERROR_NOT_SUPPORTED)
+        {
+            return null;
+        }
+
+        int width;
+        try
+        {
+            width = Core.PE.PeImage.Load(path).Bitness;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return null;   // not readable as a PE: let Windows' own words stand
+        }
+
+        string name = System.IO.Path.GetFileName(path);
+        return width == 64 && !Environment.Is64BitProcess
+            ? $"{name} is a 64-bit program, and this is the 32-bit Spydate — Windows does not allow a "
+              + "32-bit debugger to attach to a 64-bit process at all. Open it in the 64-bit Spydate, "
+              + "which debugs both."
+            : null;
+    }
+
     private void Loop(string path, string? arguments, string? workingDirectory, TaskCompletionSource<Exception?> ready)
     {
         var startup = new Native.STARTUPINFO { cb = (uint)Marshal.SizeOf<Native.STARTUPINFO>() };
@@ -1865,6 +1908,13 @@ public sealed class DebugSession : IDisposable
             }
         }
 
+        // Read here and nowhere later. A successful call clears the thread's last error, so the two
+        // CloseHandle calls just below — which succeed, because the handles are ours and valid —
+        // overwrite the reason the start failed with zero. Every launch failure then reported itself
+        // as "The operation completed successfully", which reads as a debugger that is broken rather
+        // than one that has been handed something it cannot run.
+        int error = started ? 0 : Marshal.GetLastPInvokeError();
+
         // This side's copies of the write ends go now, whether or not the start worked. While any
         // of them is open the pipe has a writer, so the reader would never see end-of-file even
         // after the debuggee had gone.
@@ -1882,7 +1932,7 @@ public sealed class DebugSession : IDisposable
         {
             ClosePipes();
             ready.SetResult(new InvalidOperationException(
-                $"could not start {path}: {Marshal.GetLastPInvokeErrorMessage()}"));
+                WrongWidth(path, error) ?? $"could not start {path}: {Message(error)}"));
             return;
         }
 
@@ -1900,9 +1950,9 @@ public sealed class DebugSession : IDisposable
         // two are different programs, and it is the host's width that decides how a thread is read.
         _wow64 = Native.IsWow64Process(info.hProcess, out bool wow64) && wow64;
 
-        // A 32-bit debugger cannot read a 64-bit thread at all — there is no call that reaches the
-        // other way, which is the mirror of why a 64-bit one needs the Wow64 pair. Said here, with
-        // the process killed, rather than left to fail register by register once it is running.
+        // A backstop. Windows refuses the launch outright in this case (see WrongWidth), so in
+        // practice a 64-bit program under the 32-bit build never gets this far — but a process that
+        // did would be unreadable register by register, so it is stopped here rather than run blind.
         if (!Environment.Is64BitProcess && !_wow64)
         {
             Native.TerminateProcess(info.hProcess, 0);

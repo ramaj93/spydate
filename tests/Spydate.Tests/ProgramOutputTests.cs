@@ -228,4 +228,29 @@ public sealed class ProgramOutputTests
 
         return until();
     }
+
+    /// <summary>
+    /// A launch that fails says why.
+    ///
+    /// It did not. The last Win32 error was read after the pipe write ends were closed, and a
+    /// successful CloseHandle sets that error to zero — so every refused launch, whatever the
+    /// reason, reported itself as "The operation completed successfully". Capturing output is what
+    /// creates those handles, so it has to be on for this to be the old bug rather than a new test.
+    /// </summary>
+    [Fact]
+    public void AFailedLaunchSaysWhyRatherThanSaying_ItWorked()
+    {
+        if (!Available)
+        {
+            return;
+        }
+
+        using var session = new DebugSession { ShowConsole = false, CaptureOutput = true };
+
+        var thrown = Assert.ThrowsAny<Exception>(
+            () => session.Start(System32("there-is-no-such-program.exe"), imageBase: 0, imageSize: 0));
+
+        Assert.DoesNotContain("operation completed successfully", thrown.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("cannot find the file", thrown.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }

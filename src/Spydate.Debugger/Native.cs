@@ -14,6 +14,9 @@ namespace Spydate.Debugger;
 internal static partial class Native
 {
     internal const uint DEBUG_ONLY_THIS_PROCESS = 0x00000002;
+
+    /// <summary>What CreateProcess answers when a 32-bit debugger asks to debug a 64-bit program.</summary>
+    internal const int ERROR_NOT_SUPPORTED = 50;
     internal const uint CREATE_SUSPENDED = 0x00000004;
     internal const uint CREATE_NEW_CONSOLE = 0x00000010;
 
