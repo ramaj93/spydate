@@ -497,7 +497,11 @@ read-only: the DAC names addresses, the native loop does every write.
 - ✅ Catch the first call. An int3 on `PreStubWorker` is armed while a cold managed breakpoint waits.
   Every method's first JIT passes through it, and the MethodDesc being compiled is the worker's argument
   — rdx on CoreCLR's free `PreStubWorker`, and the resolver falls back to `MethodDesc::DoPrestub` (rcx)
-  where a runtime has no free worker. `ManagedOverlay.MethodByHandle` turns that MethodDesc into a type
+  where a runtime has no free worker. On a 32-bit runtime the same declaration means what it says:
+  `STDCALL` pushes both arguments, so the MethodDesc is at `[esp+8]` at the worker's first byte, before
+  its prologue has run. Finding the worker there also means reading the PDB's *procedure* records as
+  well as its public symbols — the x64 coreclr publishes `PreStubWorker`, the x86 one, same version and
+  same source, does not. `ManagedOverlay.MethodByHandle` turns that MethodDesc into a type
   and token, and if it is the method wanted, a breakpoint at the prestub's return — where the method now
   has native code — plants the real breakpoint, in time for that same first call to reach it.
 - ✅ The details a real runtime forced. The method's native entry is the worker's return value (rax on
@@ -530,6 +534,22 @@ read-only: the DAC names addresses, the native loop does every write.
   fetch the PDB (a large download), so it skips where no symbols are available, which is also how the
   feature itself degrades — and on a cold cache the very first run of a once-called startup method can
   still miss it, because the PDB has to arrive before the arm; the run after warms the cache and catches.
+- ✅ Works when the module being read is the assembly rather than its host, which is how the window
+  debugs a DLL. It did not, and the failure was ugly: the catch is kept under a null module like any
+  breakpoint set at a bare address, and `Unplant` read a null module as "the module the listing is
+  about". A .NET assembly is mapped, unmapped and mapped again while its host starts, so the remap
+  re-planted the catch, found the int3 already standing there and saved **0xCC** as the byte to
+  restore — after which it wrote 0xCC back over the worker's first byte and wound the instruction
+  pointer onto it, forever. The debuggee printed nothing and never exited.
+  `AColdMethodIsCaughtWhenTheModuleBeingReadIsTheAssemblyAndNotItsHost` holds that shut; without the
+  fix it hangs for its full timeout rather than merely missing a stop.
+- ✅ 32-bit targets, under the 32-bit build. Verified end to end: a once-called `Main` in a `win-x86`
+  assembly stops on its first call and the program still runs to completion. The catch is **not** armed
+  when the two are different widths — a 64-bit Spydate on a 32-bit program can plant the int3 and then
+  never recognise anything it catches, because the DAC cannot cross that line (`ManagedOverlay
+  .Unreachable`), so it would only wrap a lift-step-replant around every JIT compile in the process.
+  The mirror case never arrives: Windows refuses to let a 32-bit debugger launch a 64-bit program at
+  all, and `DebugSession` now says so in words rather than passing on a cleared last-error.
 - ◑ The overlay had to be made thread-safe for this: the loop's prestub dance and the panel's pump read
   the DAC at once, and ClrMD is not safe across threads. Its reads are now serialized. Worth noting as a
   constraint, not a gap.
