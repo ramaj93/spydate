@@ -5,7 +5,15 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <RootNamespace>Spydate.App</RootNamespace>
-    <AssemblyName>Spydate</AssemblyName>
+    <!--
+      Two builds, side by side, the way dnSpy ships one. A 32-bit program can only be debugged by a
+      32-bit debugger - the CLR's data access layer has to match the runtime it reads, and the Wow64
+      thread calls only work one way round - so this is not a setting the 64-bit build could have
+      grown. Named and output apart so both can exist at once and neither overwrites the other:
+        dotnet build src\Spydate.App -p:PlatformTarget=x86
+    -->
+    <AssemblyName Condition="'$(PlatformTarget)' == 'x86'">Spydate-x86</AssemblyName>
+    <AssemblyName Condition="'$(PlatformTarget)' != 'x86'">Spydate</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets/spydate.ico</ApplicationIcon>
     <Description>Spydate: Windows PE disassembler and decompiler.</Description>

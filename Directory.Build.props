@@ -24,4 +24,27 @@
     <Optimize>true</Optimize>
   </PropertyGroup>
 
+  <!--
+    The 32-bit build keeps its own output and its own obj, for every project rather than only the
+    app. Without this the x86 build of a referenced library lands in the same bin as the x64 one and
+    quietly replaces it - the apphosts too, so spydate-mcp.exe becomes 32-bit - and the next x64 test
+    run picks up whichever was built last. The failure looks nothing like its cause: assemblies that
+    cannot be loaded, and a debugger reporting the wrong bitness for a process nobody rebuilt.
+
+    Both paths must be set here, in Directory.Build.props, because BaseIntermediateOutputPath is read
+    before NuGet's targets and a csproj is already too late.
+  -->
+  <PropertyGroup Condition="'$(PlatformTarget)' == 'x86'">
+    <BaseOutputPath>bin\x86\</BaseOutputPath>
+    <BaseIntermediateOutputPath>obj\x86\</BaseIntermediateOutputPath>
+    <!--
+      Moving the intermediate path is what makes this necessary. The SDK excludes only the
+      intermediate path it was given from the compile glob, so with obj\x86 as the answer the
+      ordinary obj\Debug stops being excluded and its generated AssemblyInfo.cs is compiled in
+      alongside the new one - two of every assembly attribute, and an error that names the
+      attribute rather than the layout.
+    -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**</DefaultItemExcludes>
+  </PropertyGroup>
+
 </Project>

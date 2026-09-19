@@ -39,3 +39,7 @@ Desktop.ini
 
 ## Local scratch (sample binaries the user drops in for testing)
 samples/local/
+
+# The 32-bit build keeps its own output and obj beside the 64-bit one.
+bin/x86/
+obj/x86/

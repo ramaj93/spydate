@@ -1586,7 +1586,7 @@ public sealed class DebugSession : IDisposable
         {
             fixed (byte* p = buffer)
             {
-                if (!Native.ReadProcessMemory(_process, runtimeAddress, p, (nuint)length, out nuint read))
+                if (!Native.ReadProcessMemory(_process, (nuint)runtimeAddress, p, (nuint)length, out nuint read))
                 {
                     return [];
                 }
@@ -1899,6 +1899,19 @@ public sealed class DebugSession : IDisposable
         // Asked of the running process rather than taken from the file being read: under a host the
         // two are different programs, and it is the host's width that decides how a thread is read.
         _wow64 = Native.IsWow64Process(info.hProcess, out bool wow64) && wow64;
+
+        // A 32-bit debugger cannot read a 64-bit thread at all — there is no call that reaches the
+        // other way, which is the mirror of why a 64-bit one needs the Wow64 pair. Said here, with
+        // the process killed, rather than left to fail register by register once it is running.
+        if (!Environment.Is64BitProcess && !_wow64)
+        {
+            Native.TerminateProcess(info.hProcess, 0);
+            ready.SetResult(new InvalidOperationException(
+                $"{System.IO.Path.GetFileName(path)} is a 64-bit program and this is the 32-bit Spydate, "
+                + "which cannot debug it. Use the 64-bit build for 64-bit programs."));
+            return;
+        }
+
         State = DebugState.Running;
         ready.SetResult(null);
 
@@ -2537,6 +2550,33 @@ public sealed class DebugSession : IDisposable
     /// does not wait for the session to be marked stopped: the prestub dance reads rdx and rsp from
     /// inside the event handler, before a stop is reported, and every thread is already suspended there.
     /// </summary>
+    /// <summary>
+    /// The stack pointer's name in the debuggee, which is not the same word in both worlds.
+    ///
+    /// Asking a 32-bit thread for "rsp" is not an error, it is a miss: the lookup returns zero and
+    /// whatever was going to be done with the stack pointer is done with address zero instead. That
+    /// is how the prestub dance failed on x86 without ever saying so.
+    /// </summary>
+    private string StackPointerName => _wow64 ? "esp" : "rsp";
+
+    /// <summary>The accumulator's name in the debuggee, where a return value arrives.</summary>
+    private string ReturnRegisterName => _wow64 ? "eax" : "rax";
+
+    /// <summary>How wide an address is in the debuggee — the size of a return address on its stack.</summary>
+    private int AddressWidth => _wow64 ? 4 : 8;
+
+    /// <summary>Reads one pointer-width value out of the debuggee, at the debuggee's width.</summary>
+    private ulong ReadPointer(ulong at)
+    {
+        byte[] bytes = ReadMemory(at, AddressWidth);
+        if (bytes.Length != AddressWidth)
+        {
+            return 0;
+        }
+
+        return AddressWidth == 8 ? BitConverter.ToUInt64(bytes) : BitConverter.ToUInt32(bytes);
+    }
+
     private ulong RegisterValue(uint threadId, string name)
     {
         var thread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
@@ -2586,6 +2626,19 @@ public sealed class DebugSession : IDisposable
     /// </param>
     private void EnablePrestubCatch(bool atModuleLoad = false)
     {
+        // Not on a 32-bit debuggee. The catch works by reading the MethodDesc out of the register
+        // PreStubWorker was given it in, and on x86 CoreCLR it is not given one: the function is
+        // __stdcall and its arguments come on the stack. Armed anyway, the int3 goes into the
+        // runtime's hot path, every JIT in the process stops on it, none of them ever matches, and
+        // the run pays for it without a single breakpoint being caught any sooner.
+        //
+        // Cold breakpoints still arrive, through PlantPending on a later call. What is lost is the
+        // very first call, which is the thing this exists for and is not worth a broken hot path.
+        if (_wow64)
+        {
+            return;
+        }
+
         if (_prestubRva != 0)
         {
             ArmPrestubIfPending();
@@ -2727,8 +2780,8 @@ public sealed class DebugSession : IDisposable
         _reArm = null;
         DisarmPrestub();
 
-        ulong rsp = RegisterValue(_threadId, "rsp");
-        ulong ret = rsp != 0 && ReadMemory(rsp, 8) is { Length: 8 } stack ? BitConverter.ToUInt64(stack) : 0;
+        ulong rsp = RegisterValue(_threadId, StackPointerName);
+        ulong ret = rsp != 0 ? ReadPointer(rsp) : 0;
         if (ret != 0 && AddBreakpoint(ret))
         {
             _danceReturn = ret;
@@ -2774,7 +2827,7 @@ public sealed class DebugSession : IDisposable
         // A nested JIT returning through the same shared address: its stack is still deeper than the
         // method we are catching (whose prestub was called at _danceRsp). Leave the return breakpoint
         // armed — via _reArm — and wait for the return that unwinds back to our frame.
-        if (RegisterValue(_threadId, "rsp") <= _danceRsp)
+        if (RegisterValue(_threadId, StackPointerName) <= _danceRsp)
         {
             return false;
         }
@@ -2799,7 +2852,7 @@ public sealed class DebugSession : IDisposable
             // the same place. Flush first so CoreCLR takes the exact path rather than this one.
             overlay.MarkMoved();
             var resolved = cold.Resolve(overlay);
-            ulong at = resolved.Ok ? resolved.Address : RegisterValue(_threadId, "rax");
+            ulong at = resolved.Ok ? resolved.Address : RegisterValue(_threadId, ReturnRegisterName);
             if (at != 0 && AddBreakpoint(at))
             {
                 lock (_pendingManaged)
@@ -3201,13 +3254,13 @@ public sealed class DebugSession : IDisposable
             return false;
         }
 
-        if (Native.WriteProcessMemory(_process, address, bytes, length, out nuint wrote) && wrote == length)
+        if (Native.WriteProcessMemory(_process, (nuint)address, bytes, length, out nuint wrote) && wrote == length)
         {
-            Native.FlushInstructionCache(_process, address, length);
+            Native.FlushInstructionCache(_process, (nuint)address, length);
             return true;
         }
 
-        if (!Native.VirtualProtectEx(_process, address, length, Native.PageExecuteReadWrite, out uint previous))
+        if (!Native.VirtualProtectEx(_process, (nuint)address, length, Native.PageExecuteReadWrite, out uint previous))
         {
             return false;
         }
@@ -3215,16 +3268,16 @@ public sealed class DebugSession : IDisposable
         bool written;
         try
         {
-            written = Native.WriteProcessMemory(_process, address, bytes, length, out wrote) && wrote == length;
+            written = Native.WriteProcessMemory(_process, (nuint)address, bytes, length, out wrote) && wrote == length;
         }
         finally
         {
-            Native.VirtualProtectEx(_process, address, length, previous, out _);
+            Native.VirtualProtectEx(_process, (nuint)address, length, previous, out _);
         }
 
         if (written)
         {
-            Native.FlushInstructionCache(_process, address, length);
+            Native.FlushInstructionCache(_process, (nuint)address, length);
         }
 
         return written;

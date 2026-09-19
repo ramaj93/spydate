@@ -1030,7 +1030,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                     return $"patch at {where} not applied: the process gave no handle to write through";
                 }
 
-                if (!Native.VirtualProtectEx(handle, address, (nuint)length, Native.PageReadWrite, out uint previous))
+                if (!Native.VirtualProtectEx(handle, (nuint)address, (nuint)length, Native.PageReadWrite, out uint previous))
                 {
                     return $"patch at {where} not applied: the IL page could not be made writable "
                            + $"(Win32 0x{Marshal.GetLastWin32Error():X})";
@@ -1045,13 +1045,13 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                     {
                         fixed (byte* p = bytes)
                         {
-                            wrote = Native.WriteProcessMemory(handle, address, p, (nuint)length, out written);
+                            wrote = Native.WriteProcessMemory(handle, (nuint)address, p, (nuint)length, out written);
                         }
                     }
                 }
                 finally
                 {
-                    Native.VirtualProtectEx(handle, address, (nuint)length, previous, out _);
+                    Native.VirtualProtectEx(handle, (nuint)address, (nuint)length, previous, out _);
                 }
 
                 if (!wrote || (int)written != length)
@@ -1059,7 +1059,7 @@ public sealed class ManagedDebugSession : IDisposable, IManagedEvents
                     return $"patch at {where} not applied: the write failed (Win32 0x{Marshal.GetLastWin32Error():X})";
                 }
 
-                Native.FlushInstructionCache(handle, address, (nuint)length);
+                Native.FlushInstructionCache(handle, (nuint)address, (nuint)length);
                 Note($"patched {where}: {length} byte(s) written before the method was compiled");
                 return null;
             }

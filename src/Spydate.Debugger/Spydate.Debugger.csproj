@@ -21,8 +21,12 @@
     <!-- Iced directly rather than Spydate.Disassembly: stepping over a call needs the length of one
          instruction, not function discovery or listings. -->
     <PackageReference Include="Iced" />
-    <!-- Native asset only: dbgshim.dll beside the output, loaded by name at run time. -->
-    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" GeneratePathProperty="true" />
+    <!-- Native asset only: dbgshim.dll beside the output, loaded by name at run time. It is native
+         code, so it has to match the build: the x86 Spydate loads the x86 one. -->
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x64" GeneratePathProperty="true"
+                      Condition="'$(PlatformTarget)' != 'x86'" />
+    <PackageReference Include="Microsoft.Diagnostics.DbgShim.win-x86" GeneratePathProperty="true"
+                      Condition="'$(PlatformTarget)' == 'x86'" />
     <!-- ClrMD: the passive managed overlay (ManagedOverlay). -->
     <PackageReference Include="Microsoft.Diagnostics.Runtime" />
   </ItemGroup>
@@ -35,7 +39,11 @@
   -->
   <ItemGroup>
     <None Include="$(PkgMicrosoft_Diagnostics_DbgShim_win-x64)\runtimes\win-x64\native\dbgshim.dll"
-          Condition="'$(PkgMicrosoft_Diagnostics_DbgShim_win-x64)' != ''"
+          Condition="'$(PkgMicrosoft_Diagnostics_DbgShim_win-x64)' != '' And '$(PlatformTarget)' != 'x86'"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(PkgMicrosoft_Diagnostics_DbgShim_win-x86)\runtimes\win-x86\native\dbgshim.dll"
+          Condition="'$(PkgMicrosoft_Diagnostics_DbgShim_win-x86)' != '' And '$(PlatformTarget)' == 'x86'"
           CopyToOutputDirectory="PreserveNewest"
           Visible="false" />
   </ItemGroup>

@@ -31,8 +31,20 @@ public abstract unsafe class ThreadContext : IDisposable
         NativeMemory.Clear(_buffer, (nuint)size);
     }
 
-    /// <summary>The right one for the thread being read. See the class summary for why it matters.</summary>
-    public static ThreadContext For(bool wow64) => wow64 ? new Wow64ThreadContext() : new X64ThreadContext();
+    /// <summary>
+    /// The right one for the thread being read. See the class summary for why it matters.
+    ///
+    /// <paramref name="target32Bit"/> is about the debuggee; which API reads it is also about this
+    /// process. A 32-bit thread has the same CONTEXT either way, but a 64-bit debugger reaches it
+    /// through <c>Wow64GetThreadContext</c> while a 32-bit one uses plain <c>GetThreadContext</c> —
+    /// the Wow64 calls exist to let a 64-bit process reach across, and a 32-bit process calling them
+    /// on its own kind gets nothing back. That is the whole of why an x86 build is a build and not a
+    /// flag: everything else about reading a 32-bit thread is identical.
+    /// </summary>
+    public static ThreadContext For(bool target32Bit)
+        => target32Bit
+            ? new X86ThreadContext(throughWow64: Environment.Is64BitProcess)
+            : new X64ThreadContext();
 
     protected byte* Buffer => _buffer;
 
@@ -182,15 +194,21 @@ public sealed unsafe class X64ThreadContext : ThreadContext
 }
 
 /// <summary>
-/// A 32-bit thread on 64-bit Windows, as <c>WOW64_CONTEXT</c>.
+/// A 32-bit thread, as <c>WOW64_CONTEXT</c> or <c>CONTEXT</c> — which are the same structure.
 ///
 /// Its general registers are not at a stride and not in a helpful order — the structure lists them
 /// Edi, Esi, Ebx, Edx, Ecx, Eax, Ebp, then Eip, and Esp after the flags — so each is named with its
 /// own offset rather than indexed.
+///
+/// The layout does not depend on who is reading; the call does. From a 64-bit debugger a 32-bit
+/// thread is reached with the Wow64 pair, and from a 32-bit debugger with the ordinary pair, which
+/// is what <paramref name="throughWow64"/> decides.
 /// </summary>
-public sealed unsafe class Wow64ThreadContext : ThreadContext
+public sealed unsafe class X86ThreadContext : ThreadContext
 {
     private const int Size = 716;
+
+    private readonly bool _throughWow64;
 
     // Offsets into WOW64_CONTEXT: ContextFlags, six debug registers, a 112-byte float save area,
     // four segment selectors, then the registers below.
@@ -206,20 +224,27 @@ public sealed unsafe class Wow64ThreadContext : ThreadContext
     private const int OffEFlags = 0xC0;
     private const int OffEsp = 0xC4;
 
-    public Wow64ThreadContext()
+    public X86ThreadContext(bool throughWow64)
         : base(Size)
-        => *(uint*)(Buffer + OffContextFlags) = Native.CONTEXT_WOW64_FULL;
+    {
+        _throughWow64 = throughWow64;
+        *(uint*)(Buffer + OffContextFlags) = Native.CONTEXT_WOW64_FULL;
+    }
 
     public override bool Read(IntPtr thread)
     {
         *(uint*)(Buffer + OffContextFlags) = Native.CONTEXT_WOW64_FULL;
-        return Native.Wow64GetThreadContext(thread, Buffer);
+        return _throughWow64
+            ? Native.Wow64GetThreadContext(thread, Buffer)
+            : Native.GetThreadContext(thread, Buffer);
     }
 
     public override bool Write(IntPtr thread)
     {
         *(uint*)(Buffer + OffContextFlags) = Native.CONTEXT_WOW64_FULL;
-        return Native.Wow64SetThreadContext(thread, Buffer);
+        return _throughWow64
+            ? Native.Wow64SetThreadContext(thread, Buffer)
+            : Native.SetThreadContext(thread, Buffer);
     }
 
     public override ulong InstructionPointer

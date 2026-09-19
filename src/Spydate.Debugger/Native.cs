@@ -120,34 +120,65 @@ internal static partial class Native
     }
 
     /// <summary>
-    /// The header, then the union as bytes. <c>Payload</c> begins at 16 rather than 12: the union's
-    /// widest members start with pointers, so the whole struct is pointer-aligned on x64.
+    /// The header, then the union as raw bytes.
+    ///
+    /// Every offset in here depends on the width of the process doing the debugging, and none of
+    /// them can be a constant because Spydate is built both ways. The union itself starts after the
+    /// three-word header — at 12 on x86, and at 16 on x64, where it is pushed out by alignment,
+    /// because the union's widest members begin with pointers. Inside it, every handle and address
+    /// is pointer-width, so each field after the first moves too.
+    ///
+    /// Read at the wrong width this does not fail: it yields addresses and handles that look
+    /// entirely plausible and are wrong, which is the worst way for a debugger to be broken. The
+    /// pairs below are (x64, x86) and are the whole of what makes the 32-bit build correct.
     /// </summary>
-    [StructLayout(LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
     internal unsafe struct DEBUG_EVENT
     {
         [FieldOffset(0)] public uint dwDebugEventCode;
         [FieldOffset(4)] public uint dwProcessId;
         [FieldOffset(8)] public uint dwThreadId;
-        [FieldOffset(16)] public fixed byte Payload[176];
+        [FieldOffset(0)] private fixed byte _raw[192];
+
+        /// <summary>Where the union begins: past the header, at the platform's pointer alignment.</summary>
+        private static int Union => IntPtr.Size == 8 ? 16 : 12;
+
+        private static int Pick(int x64, int x86) => IntPtr.Size == 8 ? x64 : x86;
+
+        /// <summary>A pointer-width field of the union, widened to the address type used throughout.</summary>
+        private ulong Address(int x64, int x86)
+        {
+            fixed (byte* p = _raw)
+            {
+                byte* at = p + Union + Pick(x64, x86);
+                return IntPtr.Size == 8 ? *(ulong*)at : *(uint*)at;
+            }
+        }
+
+        private IntPtr Handle(int x64, int x86)
+        {
+            fixed (byte* p = _raw)
+            {
+                return *(IntPtr*)(p + Union + Pick(x64, x86));
+            }
+        }
+
+        private uint Word(int x64, int x86)
+        {
+            fixed (byte* p = _raw)
+            {
+                return *(uint*)(p + Union + Pick(x64, x86));
+            }
+        }
 
         /// <summary>EXCEPTION_RECORD.ExceptionCode, first field of the exception payload.</summary>
-        public uint ExceptionCode
-        {
-            get { fixed (byte* p = Payload) { return *(uint*)p; } }
-        }
+        public uint ExceptionCode => Word(0, 0);
 
         /// <summary>EXCEPTION_RECORD.ExceptionAddress — after code, flags and the chained record.</summary>
-        public ulong ExceptionAddress
-        {
-            get { fixed (byte* p = Payload) { return *(ulong*)(p + 16); } }
-        }
+        public ulong ExceptionAddress => Address(16, 12);
 
         /// <summary>Whether the debugger is being offered it before the program's own handlers.</summary>
-        public bool FirstChance
-        {
-            get { fixed (byte* p = Payload) { return *(uint*)(p + 152) != 0; } }
-        }
+        public bool FirstChance => Word(152, 80) != 0;
 
         /// <summary>
         /// EXCEPTION_RECORD.NumberParameters — how many of <see cref="ExceptionInformation"/> are set.
@@ -155,38 +186,24 @@ internal static partial class Native
         /// The parameters are the whole content of a CLR DAC notification (<c>0x04242420</c>): the JIT
         /// one is three of them — a type tag, the MethodDesc, and the native code the JIT just produced.
         /// </summary>
-        public uint NumberParameters
-        {
-            get { fixed (byte* p = Payload) { return *(uint*)(p + 24); } }
-        }
+        public uint NumberParameters => Word(24, 16);
 
         /// <summary>
-        /// EXCEPTION_RECORD.ExceptionInformation[i], the exception's own parameters. On x64 the array
-        /// begins at offset 32 (after code, flags, the chained-record pointer, address, the count and
-        /// its padding), each entry a pointer-width value.
+        /// EXCEPTION_RECORD.ExceptionInformation[i], the exception's own parameters — each one
+        /// pointer-width, so both where the array starts and how far apart its entries are change
+        /// with the build.
         /// </summary>
         public ulong ExceptionInformation(int index)
-        {
-            fixed (byte* p = Payload) { return *(ulong*)(p + 32 + index * 8); }
-        }
+            => Address(32 + (index * 8), 20 + (index * 4));
 
         /// <summary>CREATE_PROCESS_DEBUG_INFO.lpBaseOfImage — after hFile, hProcess, hThread.</summary>
-        public ulong CreateProcessImageBase
-        {
-            get { fixed (byte* p = Payload) { return *(ulong*)(p + 24); } }
-        }
+        public ulong CreateProcessImageBase => Address(24, 12);
 
         /// <summary>CREATE_PROCESS_DEBUG_INFO.hThread, needed to read registers at the first stop.</summary>
-        public IntPtr CreateProcessThread
-        {
-            get { fixed (byte* p = Payload) { return *(IntPtr*)(p + 16); } }
-        }
+        public IntPtr CreateProcessThread => Handle(16, 8);
 
         /// <summary>LOAD_DLL_DEBUG_INFO.lpBaseOfDll — after hFile.</summary>
-        public ulong LoadDllBase
-        {
-            get { fixed (byte* p = Payload) { return *(ulong*)(p + 8); } }
-        }
+        public ulong LoadDllBase => Address(8, 4);
 
         /// <summary>
         /// LOAD_DLL_DEBUG_INFO.hFile, the first field. It is the only reliable way to find out which
@@ -194,44 +211,26 @@ internal static partial class Native
         /// null, and points into the debuggee. This handle is owned by the debugger and must be
         /// closed, or every module a long run loads is leaked.
         /// </summary>
-        public IntPtr LoadDllFile
-        {
-            get { fixed (byte* p = Payload) { return *(IntPtr*)p; } }
-        }
+        public IntPtr LoadDllFile => Handle(0, 0);
 
         /// <summary>CREATE_PROCESS_DEBUG_INFO.hFile, the first field. Also the debugger's to close.</summary>
-        public IntPtr CreateProcessFile
-        {
-            get { fixed (byte* p = Payload) { return *(IntPtr*)p; } }
-        }
+        public IntPtr CreateProcessFile => Handle(0, 0);
 
         /// <summary>UNLOAD_DLL_DEBUG_INFO.lpBaseOfDll, its only field.</summary>
-        public ulong UnloadDllBase
-        {
-            get { fixed (byte* p = Payload) { return *(ulong*)p; } }
-        }
+        public ulong UnloadDllBase => Address(0, 0);
 
         /// <summary>
         /// CREATE_THREAD_DEBUG_INFO.lpStartAddress — after hThread and lpThreadLocalBase. What the
         /// thread was made to go and do, which is the only thing that tells one apart from another
         /// before it has run anywhere.
         /// </summary>
-        public ulong CreateThreadStartAddress
-        {
-            get { fixed (byte* p = Payload) { return *(ulong*)(p + 16); } }
-        }
+        public ulong CreateThreadStartAddress => Address(16, 8);
 
         /// <summary>CREATE_PROCESS_DEBUG_INFO.lpStartAddress, for the thread the process starts on.</summary>
-        public ulong CreateProcessStartAddress
-        {
-            get { fixed (byte* p = Payload) { return *(ulong*)(p + 48); } }
-        }
+        public ulong CreateProcessStartAddress => Address(48, 28);
 
         /// <summary>EXIT_PROCESS_DEBUG_INFO.dwExitCode.</summary>
-        public uint ExitCode
-        {
-            get { fixed (byte* p = Payload) { return *(uint*)p; } }
-        }
+        public uint ExitCode => Word(0, 0);
     }
 
     // CreateProcessW may write into the command line, so it is passed as a mutable buffer. The
@@ -369,16 +368,16 @@ internal static partial class Native
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool ReadProcessMemory(
-        IntPtr hProcess, ulong lpBaseAddress, byte* lpBuffer, nuint nSize, out nuint lpNumberOfBytesRead);
+        IntPtr hProcess, nuint lpBaseAddress, byte* lpBuffer, nuint nSize, out nuint lpNumberOfBytesRead);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static unsafe partial bool WriteProcessMemory(
-        IntPtr hProcess, ulong lpBaseAddress, byte* lpBuffer, nuint nSize, out nuint lpNumberOfBytesWritten);
+        IntPtr hProcess, nuint lpBaseAddress, byte* lpBuffer, nuint nSize, out nuint lpNumberOfBytesWritten);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FlushInstructionCache(IntPtr hProcess, ulong lpBaseAddress, nuint dwSize);
+    internal static partial bool FlushInstructionCache(IntPtr hProcess, nuint lpBaseAddress, nuint dwSize);
 
     /// <summary>Page protection constants for <see cref="VirtualProtectEx"/>.</summary>
     internal const uint PageReadWrite = 0x04;
@@ -393,7 +392,7 @@ internal static partial class Native
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool VirtualProtectEx(
-        IntPtr hProcess, ulong lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
+        IntPtr hProcess, nuint lpAddress, nuint dwSize, uint flNewProtect, out uint lpflOldProtect);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     internal static partial IntPtr OpenThread(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwThreadId);

@@ -21,6 +21,7 @@
       reimplementing an undocumented startup handshake. See docs/DECISIONS.md.
     -->
     <PackageVersion Include="Microsoft.Diagnostics.DbgShim.win-x64" Version="10.0.745401" />
+    <PackageVersion Include="Microsoft.Diagnostics.DbgShim.win-x86" Version="10.0.745401" />
     <!--
       ClrMD: the managed overlay. It attaches to a running process *passively* - OpenProcess and
       ReadProcessMemory through the DAC, no debug port - so it reads managed threads, stacks, objects
