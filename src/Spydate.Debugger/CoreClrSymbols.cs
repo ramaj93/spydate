@@ -120,6 +120,12 @@ public static class CoreClrSymbols
         }
     }
 
+    /// <summary>A section-relative symbol address as an RVA, or 0 when the section is not there.</summary>
+    private static uint Rva(PeImage image, ushort segment, uint offset)
+        => segment == 0 || segment > image.Sections.Count
+            ? 0
+            : image.Sections[segment - 1].VirtualAddress + offset;
+
     private static uint Resolve(string runtimePath, string symbol, bool allowFetch)
     {
         try
@@ -155,18 +161,24 @@ public static class CoreClrSymbols
 
             foreach (var s in pdb.PublicSymbols)
             {
-                if (!string.Equals(s.Name, symbol, StringComparison.Ordinal))
+                if (string.Equals(s.Name, symbol, StringComparison.Ordinal))
                 {
-                    continue;
+                    // A public symbol's address is section-relative; the section table turns it into an RVA.
+                    return Rva(image, s.Segment, s.Offset);
                 }
+            }
 
-                // A public symbol's address is section-relative; the section table turns it into an RVA.
-                if (s.Segment == 0 || s.Segment > image.Sections.Count)
+            // Then the procedure records. The two lists are not the same list, and which one a symbol
+            // lands in is a property of how the build was linked rather than of the symbol: the x64
+            // coreclr publishes PreStubWorker, and the x86 one — same version, same source — carries
+            // it only as a procedure. Looking in one and giving up was why the whole first-call catch
+            // silently did nothing on a 32-bit runtime, while working on a 64-bit one.
+            foreach (var f in pdb.Functions)
+            {
+                if (string.Equals(f.Name, symbol, StringComparison.Ordinal))
                 {
-                    return 0;
+                    return Rva(image, f.Segment, f.Offset);
                 }
-
-                return image.Sections[s.Segment - 1].VirtualAddress + s.Offset;
             }
 
             return 0;

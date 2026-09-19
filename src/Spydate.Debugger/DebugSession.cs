@@ -2565,6 +2565,25 @@ public sealed class DebugSession : IDisposable
     /// <summary>How wide an address is in the debuggee — the size of a return address on its stack.</summary>
     private int AddressWidth => _wow64 ? 4 : 8;
 
+    /// <summary>
+    /// The MethodDesc PreStubWorker was handed, however this architecture hands it over.
+    ///
+    /// <c>PreStubWorker(TransitionBlock*, MethodDesc*)</c> is declared STDCALL, which on x64 means
+    /// nothing — the standard convention puts the second argument in rdx. On x86 it means what it
+    /// says: both arguments are pushed, so at the function's first byte, before its prologue has
+    /// run, the stack is return address, then the first argument, then the second.
+    /// </summary>
+    private ulong MethodDescAtPrestub()
+    {
+        if (!_wow64)
+        {
+            return RegisterValue(_threadId, _prestubRegister);
+        }
+
+        ulong sp = RegisterValue(_threadId, StackPointerName);
+        return sp == 0 ? 0 : ReadPointer(sp + 8);
+    }
+
     /// <summary>Reads one pointer-width value out of the debuggee, at the debuggee's width.</summary>
     private ulong ReadPointer(ulong at)
     {
@@ -2626,14 +2645,18 @@ public sealed class DebugSession : IDisposable
     /// </param>
     private void EnablePrestubCatch(bool atModuleLoad = false)
     {
-        // Not on a 32-bit debuggee. The catch works by reading the MethodDesc out of the register
-        // PreStubWorker was given it in, and on x86 CoreCLR it is not given one: the function is
-        // __stdcall and its arguments come on the stack. Armed anyway, the int3 goes into the
-        // runtime's hot path, every JIT in the process stops on it, none of them ever matches, and
-        // the run pays for it without a single breakpoint being caught any sooner.
+        // Held back on a 32-bit debuggee, for one reason and not the three it looked like.
         //
-        // Cold breakpoints still arrive, through PlantPending on a later call. What is lost is the
-        // very first call, which is the thing this exists for and is not worth a broken hot path.
+        // The symbol resolves now (see CoreClrSymbols.Resolve: x86 coreclr carries PreStubWorker as
+        // a procedure rather than a public symbol, which is what used to make this silently do
+        // nothing), and the MethodDesc is found — [esp+8] at the worker's first byte reads back as a
+        // real method through the DAC. What does not work yet is the step-and-re-arm after the hit:
+        // the same worker address comes back over and over with the same stack, and the debuggee
+        // stops making progress.
+        //
+        // A first call that is missed is a smaller harm than a program that does not run, so this
+        // stays off until that loop is understood. Cold breakpoints still arrive through
+        // PlantPending on a later call.
         if (_wow64)
         {
             return;
@@ -2765,7 +2788,8 @@ public sealed class DebugSession : IDisposable
         _reArm = (address, _threadId);
         _stepThread = null;
 
-        ulong methodDesc = RegisterValue(_threadId, _prestubRegister);
+        ulong methodDesc = MethodDescAtPrestub();
+
         HeldManaged? target = _overlay?.MethodByHandle(methodDesc) is { } who ? FindPending(who.Type, who.Token) : null;
         if (target is null)
         {
