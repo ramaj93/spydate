@@ -50,8 +50,25 @@ public interface IShell
 public sealed partial class FileViewModel : ObservableObject
 {
     private readonly IFileDialogService _dialogs;
-    private readonly DebuggerViewModel _debugger;
     private readonly IShell _shell;
+
+    /// <summary>
+    /// This file's debugger. The panel binds straight to it, so the Debug tab shows whichever tab
+    /// is in front — and a session left running in another one carries on running.
+    /// </summary>
+    private readonly DebuggerViewModel _debugger;
+
+    public DebuggerViewModel Debugger => _debugger;
+
+    /// <summary>A process of this file's is up, so its tab can say so.</summary>
+    public bool IsDebugging => _debugger.IsDebugging;
+
+    /// <summary>
+    /// A breakpoint came round in this file while the reader was in another tab, and they have not
+    /// been to look yet. The tab marks it; going to the tab clears it.
+    /// </summary>
+    [ObservableProperty]
+    private bool _hasUnseenStop;
     private CancellationTokenSource? _analysisCts;
 
     /// <summary>
@@ -71,12 +88,27 @@ public sealed partial class FileViewModel : ObservableObject
     /// <summary>Modules a symbol-server PDB fetch has already been started for, so it runs once each.</summary>
     private readonly HashSet<string> _symbolsWarmed = new(StringComparer.OrdinalIgnoreCase);
 
-    public FileViewModel(OpenedBinary binary, IFileDialogService dialogs, DebuggerViewModel debugger, IShell shell)
+    public FileViewModel(OpenedBinary binary, IFileDialogService dialogs, IShell shell)
     {
         Binary = binary;
         _dialogs = dialogs;
-        _debugger = debugger;
         _shell = shell;
+
+        // Its own, born with it and dying with it. One per window was the same thing while a window
+        // showed one file; now it is what lets two binaries be under a debugger at once, each with
+        // its own breakpoints, its own stack and its own process.
+        _debugger = new DebuggerViewModel(binary, dialogs);
+        _debugger.BreakpointsChanged += (_, _) => ReloadDocuments();
+        _debugger.StoppedAt += (_, va) => ShowWhereItStopped(va);
+        _debugger.NavigateRequested += (_, va) => ShowWhereItStopped(va);
+        _debugger.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(DebuggerViewModel.State) or nameof(DebuggerViewModel.IsStopped))
+            {
+                NotifyCaretCommands();
+                OnPropertyChanged(nameof(IsDebugging));
+            }
+        };
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
 
         // The tab shows a dot when there is work that is not on disk, so it has to hear about the
@@ -223,9 +255,16 @@ public sealed partial class FileViewModel : ObservableObject
         }
     }
 
-    /// <summary>Stops anything still running for this file. Called when its tab goes away.</summary>
+    /// <summary>
+    /// Stops anything still running for this file. Called when its tab goes away.
+    ///
+    /// The debugger first, and not optionally: a debugged process does not outlive its session, and
+    /// a tab closed while something was running must not leave an untrusted binary executing with
+    /// nothing left in the window attached to it.
+    /// </summary>
     public void Close()
     {
+        _debugger.Dispose();
         _analysisCts?.Cancel();
         Documents.Clear();
         _modules.Clear();

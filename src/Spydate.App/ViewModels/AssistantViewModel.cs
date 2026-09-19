@@ -83,7 +83,6 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private readonly WorkspaceService _workspace;
     private readonly ISecretStore _secrets;
     private readonly IFileDialogService _dialogs;
-    private readonly DebuggerViewModel _debugger;
     private Views.ProviderSettingsWindow? _providerDialog;
     private AssistantLine? _answer;
     private AnalysisAgent? _agent;
@@ -93,12 +92,20 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     /// <summary>The end of the conversation restored for this binary, or null when there was none.</summary>
     private string? _earlier;
 
-    public AssistantViewModel(WorkspaceService workspace, ISecretStore secrets, IFileDialogService dialogs, DebuggerViewModel debugger)
+    /// <summary>
+    /// The debugger the assistant's tools should drive: the one belonging to the file in front.
+    ///
+    /// Asked for rather than held, because there is one per open file now and the assistant is one
+    /// per window. It is read when an agent is built, and an agent is built afresh for each binary,
+    /// so the tools always drive the file the conversation is about.
+    /// </summary>
+    public Func<DebuggerViewModel?> DebuggerFor { get; set; } = () => null;
+
+    public AssistantViewModel(WorkspaceService workspace, ISecretStore secrets, IFileDialogService dialogs)
     {
         _workspace = workspace;
         _secrets = secrets;
         _dialogs = dialogs;
-        _debugger = debugger;
         Settings = AgentSettings.Load();
 
         // A different binary is a different conversation: the old one refers to addresses that mean
@@ -599,7 +606,10 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         // The settings object points the store at the debugger for the current engine now, and re-points
         // it whenever the agent changes the engine through debug_config — so the tools always drive the
         // one the run configuration names, without a person opening the Debug Program dialog.
-        _session.DebugSettings = new PanelDebugSettings(_debugger, _session);
+        if (DebuggerFor() is { } debugger)
+        {
+            _session.DebugSettings = new PanelDebugSettings(debugger, _session);
+        }
         var options = McpOptions.Default with { AllowDebug = true };
 
         _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, _earlier);

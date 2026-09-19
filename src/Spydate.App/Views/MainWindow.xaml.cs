@@ -21,6 +21,48 @@ public partial class MainWindow : FluentWindow
     private double _lastOutputHeight = DefaultOutputHeight;
     private bool _wasDebugging;
 
+    /// <summary>The active file's debugger, so it can be let go of when another tab comes forward.</summary>
+    private ViewModels.DebuggerViewModel? _watched;
+
+    private void WatchActiveDebugger()
+    {
+        if (_watched is not null)
+        {
+            _watched.PropertyChanged -= OnDebuggerStateChanged;
+        }
+
+        _watched = _viewModel.Active?.Debugger;
+        if (_watched is not null)
+        {
+            _watched.PropertyChanged += OnDebuggerStateChanged;
+        }
+
+        // Taken from the tab now in front rather than left as the last one's, so arriving on a tab
+        // whose process is already up does not read as a run that has just begun.
+        _wasDebugging = _watched?.IsDebugging ?? false;
+    }
+
+    /// <summary>
+    /// Brings the Debug pane forward when a run begins — that is where the run reports itself, and
+    /// where its registers, stack and threads are. Only on the start transition, so the reader who
+    /// steps over to another tab mid-session is not yanked back at the next stop.
+    /// </summary>
+    private void OnDebuggerStateChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(ViewModels.DebuggerViewModel.State) || _watched is null)
+        {
+            return;
+        }
+
+        bool debugging = _watched.IsDebugging;
+        if (debugging && !_wasDebugging)
+        {
+            DebugTab.IsSelected = true;
+        }
+
+        _wasDebugging = debugging;
+    }
+
     public MainWindow(MainViewModel viewModel)
     {
         _viewModel = viewModel;
@@ -33,24 +75,16 @@ public partial class MainWindow : FluentWindow
         InitializeComponent();
         _viewModel.Output.CollectionChanged += (_, _) => ScrollOutputToEnd();
 
-        // Bring the Debug pane forward when a run begins — that is where the run reports itself, and
-        // where its registers, stack and threads are. Only on the start transition, so the reader who
-        // steps over to another tab mid-session is not yanked back at the next stop.
-        _viewModel.Debugger.PropertyChanged += (_, e) =>
+        // Each file has its own debugger, so this follows whichever tab is in front rather than
+        // being wired once to the window's.
+        _viewModel.PropertyChanged += (_, e) =>
         {
-            if (e.PropertyName != nameof(DebuggerViewModel.State))
+            if (e.PropertyName == nameof(ViewModels.MainViewModel.Active))
             {
-                return;
+                WatchActiveDebugger();
             }
-
-            bool debugging = _viewModel.Debugger.IsDebugging;
-            if (debugging && !_wasDebugging)
-            {
-                DebugTab.IsSelected = true;
-            }
-
-            _wasDebugging = debugging;
         };
+        WatchActiveDebugger();
 
         _viewModel.Assistant.Transcript.CollectionChanged += (_, e) => OnTranscriptChanged(e);
 
@@ -228,7 +262,7 @@ public partial class MainWindow : FluentWindow
     {
         if (BreakpointsGrid.SelectedItem is BreakpointRow row)
         {
-            _viewModel.Debugger.GoToBreakpointCommand.Execute(row);
+            _viewModel.Active?.Debugger.GoToBreakpointCommand.Execute(row);
         }
     }
 
@@ -241,7 +275,7 @@ public partial class MainWindow : FluentWindow
     {
         if (RegisterGrid.SelectedItem is RegisterRow { Name: "rip" or "eip" })
         {
-            _viewModel.Debugger.GoToExecutionCommand.Execute(null);
+            _viewModel.Active?.Debugger.GoToExecutionCommand.Execute(null);
         }
     }
 
@@ -635,10 +669,19 @@ public partial class MainWindow : FluentWindow
 
     private void OnExitClick(object sender, RoutedEventArgs e) => Close();
 
-    /// <summary>Annotations are the user's own work, so they are written out rather than dropped on exit.</summary>
+    /// <summary>
+    /// Annotations are the user's own work, so they are written out rather than dropped on exit —
+    /// every open file's, not only the tab in front.
+    ///
+    /// Then every file is closed, which is what stops the processes. Windows would terminate a
+    /// debuggee when its debugger exits anyway, but leaving that to the OS means the moment an
+    /// untrusted binary stops running depends on how the window went away, and closing them here
+    /// makes it the same either way.
+    /// </summary>
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
         _viewModel.SaveAnnotationsIfDirty();
+        _viewModel.CloseAllFilesCommand.Execute(null);
         base.OnClosing(e);
     }
 

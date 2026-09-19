@@ -102,7 +102,7 @@ public sealed partial class BreakpointRow : ObservableObject
 [SupportedOSPlatform("windows")]
 public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 {
-    private readonly WorkspaceService _workspace;
+    private readonly OpenedBinary _binary;
     private ManagedDebugSession? _managed;
     private DebugSession? _session;
 
@@ -111,21 +111,24 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     private readonly IFileDialogService? _dialogs;
 
-    public DebuggerViewModel(WorkspaceService workspace, IFileDialogService? dialogs = null)
+    public DebuggerViewModel(OpenedBinary binary, IFileDialogService? dialogs = null)
     {
-        _workspace = workspace;
+        ArgumentNullException.ThrowIfNull(binary);
+
+        _binary = binary;
         _dialogs = dialogs;
-        workspace.CurrentChanged += (_, _) =>
-        {
-            StopSession();
-            RecallTarget();
-        };
+
+        // Once, here, rather than every time the window changed which file it was showing. A
+        // debugger belongs to one file for its whole life now, so there is no moment at which the
+        // binary underneath it changes — which is what used to force a session to be stopped on a
+        // switch, and is why switching tabs no longer kills what is running.
+        RecallTarget();
     }
 
     /// <summary>Reads back the host and arguments last used for the binary now open.</summary>
     private void RecallTarget()
     {
-        var target = _workspace.Current?.Image.Path is { Length: > 0 } path ? DebugTargets.For(path) : null;
+        var target = _binary.Image.Path is { Length: > 0 } path ? DebugTargets.For(path) : null;
 
         Host = target?.Host ?? string.Empty;
         Arguments = target?.Arguments ?? string.Empty;
@@ -173,7 +176,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private void RememberTarget()
     {
-        if (_workspace.Current?.Image.Path is not { Length: > 0 } path)
+        if (_binary.Image.Path is not { Length: > 0 } path)
         {
             return;
         }
@@ -343,7 +346,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private string _workingDirectory = string.Empty;
 
     /// <summary>Whether the open binary cannot be started without a host being chosen first.</summary>
-    public bool NeedsHost => _workspace.Current?.Image.IsDll == true && Host.Trim().Length == 0;
+    public bool NeedsHost => _binary.Image.IsDll == true && Host.Trim().Length == 0;
 
     /// <summary>
     /// Whether the open binary is an IL-only assembly.
@@ -354,7 +357,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// reachable by name, and stopping in one of those means the native loop has to own the process.
     /// So what the file is and what drives it are two questions, and this answers the first.
     /// </summary>
-    public bool IsManaged => _workspace.Current?.Image.ClrHeader?.IsILOnly == true;
+    public bool IsManaged => _binary.Image.ClrHeader?.IsILOnly == true;
 
     /// <summary>
     /// Drive this .NET program with the native loop instead of the CLR's interface.
@@ -410,7 +413,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// a native EXE", written as its negation: managed, or DLL-marked. Off during a run too, like the
     /// rest of the run configuration.
     /// </summary>
-    public bool CanEditHost => CanEditRun && (IsManaged || _workspace.Current?.Image.IsDll == true);
+    public bool CanEditHost => CanEditRun && (IsManaged || _binary.Image.IsDll == true);
 
     /// <summary>One row of a chooser: what it means, and what to call it on screen.</summary>
     public sealed record EngineChoice(bool Native, string Label);
@@ -567,10 +570,29 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private ulong? _arrivedAt;
 
+    /// <summary>
+    /// Whether the next stop is one somebody asked for — a start, a step, a continue, a run to
+    /// cursor — as opposed to a breakpoint coming round on its own.
+    ///
+    /// It decides whether a stop is allowed to pull the window to this file's tab. Nearly every
+    /// stop is asked for and going there is exactly what the reader wants. The one that is not is
+    /// a background process hitting a breakpoint while they are reading something else, and
+    /// yanking them away from it would be the window deciding it knows better.
+    /// </summary>
+    private bool _asked;
+
+    /// <summary>True when the stop being reported answers a command issued against this file.</summary>
+    public bool StopWasAskedFor { get; private set; }
+
+    /// <summary>Records that what happens next was asked for, so the stop it leads to can say so.</summary>
+    private void Expect() => _asked = true;
+
     /// <summary>Sends the window to a stop, and remembers where, so it can be sent there again.</summary>
     private void Arrive(ulong va)
     {
         _arrivedAt = va;
+        StopWasAskedFor = _asked;
+        _asked = false;
         StoppedAt?.Invoke(this, va);
     }
 
@@ -698,7 +720,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     // ------------------------------------------------------------------
 
-    private bool CanStart() => _workspace.Current is not null && !IsDebugging && !_starting;
+    private bool CanStart() => _binary is not null && !IsDebugging && !_starting;
 
     /// <summary>
     /// Whether a start is in flight. Not the same as running: getting hold of a runtime takes a
@@ -737,7 +759,8 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStart))]
     private async Task StartAsync()
     {
-        if (_workspace.Current is not { } binary || binary.Image.Path is not { Length: > 0 } path)
+        Expect();
+        if (_binary is not { } binary || binary.Image.Path is not { Length: > 0 } path)
         {
             return;
         }
@@ -1007,6 +1030,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(IsStopped))]
     private void Continue()
     {
+        Expect();
         if (!IsStopped)
         {
             return;
@@ -1027,6 +1051,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanPauseNow))]
     private void Pause()
     {
+        Expect();
         if (!IsRunning || _session is not { } session)
         {
             return;
@@ -1038,6 +1063,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(IsStopped))]
     private void StepInstruction()
     {
+        Expect();
         if (!IsStopped)
         {
             return;
@@ -1066,6 +1092,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(IsStopped))]
     private void StepOver()
     {
+        Expect();
         if (!IsStopped)
         {
             return;
@@ -1184,6 +1211,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        Expect();
         Resuming();
         _session?.RunTo(staticVa);
         State = DebugState.Running;
@@ -1248,7 +1276,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private (string Type, uint Token, uint Offset)? MixedTarget(ulong staticVa)
     {
-        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        if (_binary is not { } binary || binary.Bodies is not { } bodies)
         {
             return null;
         }
@@ -1430,7 +1458,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private void RememberBreakpoint(ulong staticVa, bool on)
     {
-        if (_workspace.Current is not { } binary || binary.Image.VaToRva(staticVa) is not { } rva)
+        if (_binary is not { } binary || binary.Image.VaToRva(staticVa) is not { } rva)
         {
             return;
         }
@@ -1457,7 +1485,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _pendingManaged.Clear();
         _disabledBreakpoints.Clear();   // enabled/disabled is a session matter; a reopened binary starts them on
 
-        if (_workspace.Current is { } binary)
+        if (_binary is { } binary)
         {
             bool managed = binary.Image.ClrHeader?.IsILOnly == true;
             foreach (uint rva in binary.Breakpoints.Snapshot())
@@ -1559,7 +1587,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private ulong? AddressOf(string module, uint methodToken, uint ilOffset)
     {
-        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        if (_binary is not { } binary || binary.Bodies is not { } bodies)
         {
             return null;
         }
@@ -1809,7 +1837,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private IReadOnlyDictionary<int, string> LocalNames(ManagedLocation? at)
     {
-        if (at is null || _workspace.Current is not { } binary || binary.Managed is not { } managed
+        if (at is null || _binary is not { } binary || binary.Managed is not { } managed
             || !string.Equals(at.Module, binary.Image.FileName, StringComparison.OrdinalIgnoreCase))
         {
             return NoNames;
@@ -2219,7 +2247,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private string BreakpointLocation(ulong va)
     {
-        if (_workspace.Current is not { } binary)
+        if (_binary is not { } binary)
         {
             return $"0x{va:X}";
         }
@@ -2301,7 +2329,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (_session is not { } session || _workspace.Current is not { } binary)
+        if (_session is not { } session || _binary is not { } binary)
         {
             return;
         }
@@ -2352,7 +2380,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return "nothing is running to try it in";
         }
 
-        if (_workspace.Current is not { Analysis: { } analysis } binary)
+        if (_binary is not { Analysis: { } analysis } binary)
         {
             return "open a function first";
         }
@@ -2394,7 +2422,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void KeepPatch(LivePatchRow? row)
     {
-        if (row is null || _workspace.Current is not { } binary)
+        if (row is null || _binary is not { } binary)
         {
             return;
         }
@@ -2463,7 +2491,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     {
         ExecutionAddress = null;
         StopMixedPump();
-        if (_workspace.Current is { } open)
+        if (_binary is { } open)
         {
             open.Patches.Changed -= OnSavedPatchChanged;
         }
@@ -2528,6 +2556,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStepOut))]
     private void StepOut()
     {
+        Expect();
         if (!IsStopped)
         {
             return;
@@ -2590,7 +2619,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// </summary>
     private void ToggleManagedBreakpoint(ulong staticVa)
     {
-        if (_workspace.Current is not { } binary || binary.Bodies is not { } bodies)
+        if (_binary is not { } binary || binary.Bodies is not { } bodies)
         {
             return;
         }
@@ -2760,6 +2789,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     [RelayCommand(CanExecute = nameof(CanStepIl))]
     private void StepIl()
     {
+        Expect();
         // One IL offset, descending into a managed call — the native loop's IL step in mixed mode, the
         // CLR engine's own IL step otherwise.
         if (StepMixed(IlStepKind.Into))
@@ -2813,7 +2843,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// <summary>The IL range of the statement it is stopped in, when the stop is in the open file.</summary>
     private (uint From, uint To)? Statement(ManagedLocation? at)
     {
-        if (at is null || _workspace.Current is not { } binary
+        if (at is null || _binary is not { } binary
             || binary.Bodies is not { } bodies || binary.Managed is not { } managed)
         {
             return null;

@@ -40,45 +40,66 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     /// </summary>
     private Preferences _preferences = PreferenceStore.Load();
 
-    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant, DebuggerViewModel debugger)
+    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant)
     {
         _dialogs = dialogs;
         workspace.ProjectChangedOnDisk += OnProjectChangedOnDisk;
         _workspace = workspace;
         Assistant = assistant;
-        Debugger = debugger;
-
-        // Breakpoints are drawn in the listings, so a toggle redraws them; a stop opens where it
-        // stopped, which is the whole reason for stopping there.
-        debugger.BreakpointsChanged += (_, _) => Active?.ReloadDocuments();
-        debugger.PropertyChanged += (_, e) =>
-        {
-            // Run to cursor and Test patch live are only offered while something is stopped, so
-            // they have to be re-asked when that changes.
-            if (e.PropertyName is nameof(DebuggerViewModel.State) or nameof(DebuggerViewModel.IsStopped))
-            {
-                Active?.NotifyCaretCommands();
-                OnPropertyChanged(nameof(IsDebuggingActive));
-            }
-
-            // Where the program stopped goes on the window's status bar rather than the Debug
-            // panel's own toolbar. It is the one line that changes at every stop and it was only
-            // readable with that tab forward — which is exactly when it is least needed, because
-            // the panel below already says everything the line does. Latest wins, as a status bar
-            // should: a patch made while stopped says so until the next step.
-            if (e.PropertyName is nameof(DebuggerViewModel.Status))
-            {
-                StatusText = Debugger.Status;
-            }
-        };
-        debugger.StoppedAt += (_, va) => Active?.ShowWhereItStopped(va);
-
-        // Double-clicking a breakpoint in the pane opens the code it is in — the same "show me where"
-        // as a stop, but moving no arrow, since the program is not there.
-        debugger.NavigateRequested += (_, va) => Active?.ShowWhereItStopped(va);
+        assistant.DebuggerFor = () => Active?.Debugger;
         Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
+    }
+
+    /// <summary>
+    /// Everything the window wants to hear from one file's debugger.
+    ///
+    /// Each file has its own now, so this is done per file as it opens rather than once in the
+    /// constructor — and the status bar becomes a place where several debuggers can speak, which
+    /// is why each line says which file it is about once more than one is open.
+    /// </summary>
+    private void Listen(FileViewModel file)
+    {
+        file.Debugger.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(DebuggerViewModel.Status))
+            {
+                // Latest wins, as a status bar should. Named, because with two processes up "Stopped
+                // at 0x…" on its own no longer says whose.
+                StatusText = Files.Count > 1
+                    ? $"{file.DisplayName}: {file.Debugger.Status}"
+                    : file.Debugger.Status;
+            }
+        };
+
+        file.Debugger.StoppedAt += (_, _) => OnStopped(file);
+    }
+
+    /// <summary>
+    /// A file stopped. Whether the window goes there depends on whether anybody asked it to.
+    ///
+    /// A stop that answers a step, a continue or a run to cursor is one the reader is waiting for,
+    /// and going to it is the whole point. A breakpoint coming round on its own in a file they are
+    /// not looking at is not: pulling them out of what they are reading would be the window
+    /// deciding it knows better. That one marks its tab and waits to be visited.
+    /// </summary>
+    private void OnStopped(FileViewModel file)
+    {
+        if (ReferenceEquals(Active, file))
+        {
+            return;
+        }
+
+        if (file.Debugger.StopWasAskedFor)
+        {
+            Active = file;
+            return;
+        }
+
+        file.HasUnseenStop = true;
+        Log($"{file.DisplayName} stopped at a breakpoint.");
+        StatusText = $"{file.DisplayName} stopped at a breakpoint — its tab is marked.";
     }
 
     // ------------------------------------------------------------------
@@ -90,9 +111,6 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     /// appears in them at once rather than after a reload.
     /// </summary>
     public AssistantViewModel Assistant { get; }
-
-    /// <summary>The debugger panel. Nothing it holds runs until somebody asks it to.</summary>
-    public DebuggerViewModel Debugger { get; }
 
     /// <summary>The open files, in the order their tabs appear.</summary>
     public ObservableCollection<FileViewModel> Files { get; } = new();
@@ -107,7 +125,16 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     [NotifyPropertyChangedFor(nameof(WindowTitle))]
     private FileViewModel? _active;
 
-    partial void OnActiveChanged(FileViewModel? value) => _workspace.Activate(value?.Binary);
+    partial void OnActiveChanged(FileViewModel? value)
+    {
+        _workspace.Activate(value?.Binary);
+
+        // Going to a tab is how a stop it was marked for gets seen.
+        if (value is not null)
+        {
+            value.HasUnseenStop = false;
+        }
+    }
 
     /// <summary>Timestamped log shown in the Output tool window.</summary>
     public ObservableCollection<string> Output { get; } = new();
@@ -121,9 +148,6 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     public bool HasBinary => Active is not null;
 
     public bool HasFiles => Files.Count > 0;
-
-    /// <summary>Whether a debuggee is up at all, for the tab that owns it to say so.</summary>
-    public bool IsDebuggingActive => Debugger.IsDebugging;
 
     public string WindowTitle => Active is null ? ProductTitle : $"{ProductTitle} — {Active.DisplayName}";
 
@@ -227,7 +251,8 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             var replacing = destination == OpenDestination.ReplaceCurrent ? Active : null;
             int at = replacing is null ? Files.Count : Files.IndexOf(replacing);
 
-            var file = new FileViewModel(opened, _dialogs, Debugger, this);
+            var file = new FileViewModel(opened, _dialogs, this);
+            Listen(file);
             Files.Insert(at, file);
 
             if (replacing is not null)
@@ -274,7 +299,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         {
             OpenDestination.NewTab => OpenDestination.NewTab,
             OpenDestination.ReplaceCurrent => OpenDestination.ReplaceCurrent,
-            _ => _dialogs.AskWhereToOpen(path, current.DisplayName, Debugger.IsDebugging),
+            _ => _dialogs.AskWhereToOpen(path, current.DisplayName, current.IsDebugging),
         };
     }
 

@@ -32,13 +32,13 @@
         <KeyBinding Key="P" Modifiers="Control" Command="{Binding Active.PatchCommand}" />
         <KeyBinding Key="P" Modifiers="Control+Shift" Command="{Binding Active.TestPatchLiveCommand}" />
         <KeyBinding Key="F9" Command="{Binding Active.ToggleBreakpointCommand}" />
-        <KeyBinding Key="F8" Command="{Binding Debugger.ContinueCommand}" />
-        <KeyBinding Key="F10" Command="{Binding Debugger.StepOverCommand}" />
+        <KeyBinding Key="F8" Command="{Binding Active.Debugger.ContinueCommand}" />
+        <KeyBinding Key="F10" Command="{Binding Active.Debugger.StepOverCommand}" />
         <KeyBinding Key="F10" Modifiers="Control" Command="{Binding Active.RunToCursorCommand}" />
-        <KeyBinding Key="F11" Command="{Binding Debugger.StepInstructionCommand}" />
-        <KeyBinding Key="F11" Modifiers="Control" Command="{Binding Debugger.StepIlCommand}" />
-        <KeyBinding Key="F11" Modifiers="Shift" Command="{Binding Debugger.StepOutCommand}" />
-        <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Debugger.StopDebuggingCommand}" />
+        <KeyBinding Key="F11" Command="{Binding Active.Debugger.StepInstructionCommand}" />
+        <KeyBinding Key="F11" Modifiers="Control" Command="{Binding Active.Debugger.StepIlCommand}" />
+        <KeyBinding Key="F11" Modifiers="Shift" Command="{Binding Active.Debugger.StepOutCommand}" />
+        <KeyBinding Key="F5" Modifiers="Shift" Command="{Binding Active.Debugger.StopDebuggingCommand}" />
         <KeyBinding Key="S" Modifiers="Control" Command="{Binding Active.SaveProjectCommand}" />
         <KeyBinding Key="Left" Modifiers="Alt" Command="{Binding Active.NavigateBackCommand}" />
         <KeyBinding Key="Right" Modifiers="Alt" Command="{Binding Active.NavigateForwardCommand}" />
@@ -164,25 +164,25 @@
                          engine, what to start, its arguments and where it should stop are all one
                          decision, made in one place, and the dialog comes up with whatever was used
                          for this binary last time. -->
-                    <MenuItem Header="_Start Debugging…" Command="{Binding Debugger.StartCommand}"
+                    <MenuItem Header="_Start Debugging…" Command="{Binding Active.Debugger.StartCommand}"
                               ToolTip="Choose how to run the open binary, then start it on this machine. It will do whatever it does." />
                     <!-- Not built yet, and shown rather than hidden so the gap is visible instead of
                          looking like an oversight. The debug loop can only launch a process today;
                          attaching to one already running is its own piece of work (see ROADMAP). -->
                     <MenuItem Header="Attach to _Process…" IsEnabled="False"
                               ToolTip="Not yet: the debugger can only start a process, not attach to one that is already running." />
-                    <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Debugger.StopDebuggingCommand}" />
+                    <MenuItem Header="_Stop" InputGestureText="Shift+F5" Command="{Binding Active.Debugger.StopDebuggingCommand}" />
                     <Separator />
-                    <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Debugger.ContinueCommand}" />
-                    <MenuItem Header="_Pause" Command="{Binding Debugger.PauseCommand}"
+                    <MenuItem Header="_Continue" InputGestureText="F8" Command="{Binding Active.Debugger.ContinueCommand}" />
+                    <MenuItem Header="_Pause" Command="{Binding Active.Debugger.PauseCommand}"
                               ToolTip="Stops it where it is, without ending it" />
-                    <MenuItem Header="Step _over" InputGestureText="F10" Command="{Binding Debugger.StepOverCommand}"
+                    <MenuItem Header="Step _over" InputGestureText="F10" Command="{Binding Active.Debugger.StepOverCommand}"
                               ToolTip="Runs a call to completion instead of stepping into it" />
-                    <MenuItem Header="Step _into" InputGestureText="F11" Command="{Binding Debugger.StepInstructionCommand}"
+                    <MenuItem Header="Step _into" InputGestureText="F11" Command="{Binding Active.Debugger.StepInstructionCommand}"
                               ToolTip="One statement, stopping inside any call it makes. One machine instruction, for a native process." />
-                    <MenuItem Header="Step one I_L instruction" InputGestureText="Ctrl+F11" Command="{Binding Debugger.StepIlCommand}"
+                    <MenuItem Header="Step one I_L instruction" InputGestureText="Ctrl+F11" Command="{Binding Active.Debugger.StepIlCommand}"
                               ToolTip="One IL instruction, for reading the IL view. .NET processes only." />
-                    <MenuItem Header="Step ou_t" InputGestureText="Shift+F11" Command="{Binding Debugger.StepOutCommand}"
+                    <MenuItem Header="Step ou_t" InputGestureText="Shift+F11" Command="{Binding Active.Debugger.StepOutCommand}"
                               ToolTip="Runs to the end of the current function and stops in whatever called it." />
                     <MenuItem Header="Run to c_ursor" InputGestureText="Ctrl+F10" Command="{Binding Active.RunToCursorCommand}" />
                     <Separator />
@@ -263,34 +263,34 @@
                 <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />
 
                 <!-- The debugger's run controls, moved off the Debug panel so they are reachable
-                     whatever tab is forward. Bound through Debugger since the toolbar's context is the
-                     main view model; each greys itself out through its own command's CanExecute. -->
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StartCommand}"
+                     whatever tab is forward. Bound through the active file, since the toolbar sits above the tabs and
+                     acts on whichever is forward; each greys itself out through its own CanExecute. -->
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.StartCommand}"
                         ToolTip="Run under the debugger" AutomationProperties.Name="Run under the debugger">
                     <ui:SymbolIcon Symbol="Play20" FontSize="14" Foreground="{DynamicResource Semantic.Success}" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.ContinueCommand}"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.ContinueCommand}"
                         ToolTip="Continue (F8)" AutomationProperties.Name="Continue running">
                     <ui:SymbolIcon Symbol="FastForward20" FontSize="14" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.PauseCommand}"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.PauseCommand}"
                         ToolTip="Pause — stop it where it is, without ending it" AutomationProperties.Name="Pause">
                     <ui:SymbolIcon Symbol="Pause20" FontSize="14" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StepOverCommand}"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.StepOverCommand}"
                         ToolTip="Step over (F10)" AutomationProperties.Name="Step over">
                     <ui:SymbolIcon Symbol="ArrowStepOver20" FontSize="14" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StepInstructionCommand}"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.StepInstructionCommand}"
                         ToolTip="Step into — one instruction (F11)" AutomationProperties.Name="Step one instruction">
                     <ui:SymbolIcon Symbol="ArrowStepIn20" FontSize="14" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StepOutCommand}"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.StepOutCommand}"
                         ToolTip="Step out — run to the end of this function and stop in its caller"
                         AutomationProperties.Name="Step out">
                     <ui:SymbolIcon Symbol="ArrowStepOut20" FontSize="14" />
                 </Button>
-                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Debugger.StopDebuggingCommand}"
+                <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.Debugger.StopDebuggingCommand}"
                         ToolTip="Stop, which ends the process (Shift+F5)" AutomationProperties.Name="Stop debugging">
                     <ui:SymbolIcon Symbol="Stop20" FontSize="14" Foreground="{DynamicResource Semantic.Error}" />
                 </Button>
@@ -322,6 +322,20 @@
                                    Foreground="{DynamicResource Accent.Hover}"
                                    ToolTip="Still analysing"
                                    Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
+
+                        <!-- A process of this file's is up. It keeps running while another tab is in
+                             front, so the strip is the only place that says so. -->
+                        <ui:SymbolIcon Symbol="Play20" FontSize="11" Margin="5,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Debug.Current}"
+                                       ToolTip="Being debugged"
+                                       Visibility="{Binding IsDebugging, Converter={StaticResource BoolToVisibility}}" />
+
+                        <!-- A breakpoint came round here while the reader was elsewhere. Marked
+                             rather than switched to, because they did not ask to be moved. -->
+                        <ui:SymbolIcon Symbol="Circle20" FontSize="11" Margin="5,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Debug.Breakpoint}"
+                                       ToolTip="Stopped at a breakpoint"
+                                       Visibility="{Binding HasUnseenStop, Converter={StaticResource BoolToVisibility}}" />
 
                         <Button Style="{StaticResource TabCloseButton}" ToolTip="Close file"
                                 AutomationProperties.Name="Close file tab"
@@ -463,7 +477,7 @@
                                            Text="{Binding SelectedItem.Header, ElementName=BottomTabs}"
                                            Visibility="{Binding IsSelected, ElementName=DebugTab, Converter={StaticResource InverseBoolToVisibility}}" />
                                 <TextBlock DockPanel.Dock="Left" Style="{StaticResource ToolWindowHeaderText}"
-                                           Text="{Binding Debugger.Caption}"
+                                           Text="{Binding Active.Debugger.Caption}"
                                            Visibility="{Binding IsSelected, ElementName=DebugTab, Converter={StaticResource BoolToVisibility}}" />
                             </DockPanel>
                         </Border>
@@ -502,7 +516,7 @@
                                 </ListBox>
                             </TabItem>
                             <TabItem Header="Debug" x:Name="DebugTab">
-                                <Grid DataContext="{Binding Debugger}">
+                                <Grid DataContext="{Binding Active.Debugger}">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="*" />

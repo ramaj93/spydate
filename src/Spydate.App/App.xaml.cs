@@ -31,7 +31,6 @@ public partial class App : Application
         // a file anyone with the disk can read.
         sc.AddSingleton<ISecretStore>(_ => new DpapiSecretStore());
         sc.AddSingleton<AssistantViewModel>();
-        sc.AddSingleton<DebuggerViewModel>();
         sc.AddSingleton<MainViewModel>();
         sc.AddSingleton<MainWindow>();
         _services = sc.BuildServiceProvider();
