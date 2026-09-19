@@ -27,6 +27,13 @@
                        Foreground="{DynamicResource Debug.Breakpoint}"
                        AutomationProperties.AutomationId="OpenWarning" />
 
+            <!-- Suppressible, now that Settings ▸ Preferences… can turn it back on. It remembers
+                 whichever button is pressed next, so the tick and the answer are one action. -->
+            <CheckBox x:Name="RememberBox" Margin="0,0,0,10"
+                      Content="Always do this — don't ask again"
+                      ToolTip="Settings ▸ Preferences… changes it back."
+                      AutomationProperties.Name="Always do this" />
+
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,2,0,0">
                 <Button Content="Cancel" MinWidth="86" Margin="0,0,6,0" IsCancel="True" Click="OnCancel"
                         AutomationProperties.Name="Cancel" />

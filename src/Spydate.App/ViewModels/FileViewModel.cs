@@ -32,6 +32,15 @@ public interface IShell
 
     /// <summary>The window's status bar. Latest wins.</summary>
     string StatusText { get; set; }
+
+    /// <summary>How the reader wants a module stepped into to be shown.</summary>
+    ForeignModuleView ModuleView { get; }
+
+    /// <summary>
+    /// Shows a module stepped into as a read-only file tab of its own, reusing its tab if it
+    /// already has one. Null when the window declined to open it.
+    /// </summary>
+    FileViewModel? ShowModuleTab(OpenedBinary module);
 }
 
 /// <summary>
@@ -194,7 +203,7 @@ public sealed partial class FileViewModel : ObservableObject
     /// and a constructor that does either is one that cannot be called from a test or a tab strip
     /// without side effects.
     /// </summary>
-    public void Begin()
+    public void Begin(bool discover = true)
     {
         Explorer.Clear();
         Explorer.Add(ExplorerTreeBuilder.Build(Binary));
@@ -249,10 +258,31 @@ public sealed partial class FileViewModel : ObservableObject
         Binary.Patches.Changed += (_, _) => Application.Current?.Dispatcher.Invoke(RefreshPatches);
         RefreshPatches();
 
-        if (Binary.Analysis is { } analysis)
+        // Not for a module stepped into. Walking the whole of ntdll to fill a tree nobody asked for
+        // costs seconds and hundreds of megabytes, and the functions that are actually wanted —
+        // the ones execution reaches — are discovered one at a time as it reaches them.
+        if (discover && Binary.Analysis is { } analysis)
         {
             _ = RunDiscoveryAsync(analysis);
         }
+        else
+        {
+            AnalysisText = "functions found as they are reached";
+        }
+    }
+
+    /// <summary>
+    /// Opens the function an address is in and puts the execution arrow on it. What a stop in a
+    /// module shown as its own tab needs: the module is not the thing being debugged, so its own
+    /// debugger has no session — but the arrow is drawn from an address, not from a session.
+    /// </summary>
+    public void ShowStoppedFunction(Function function, ulong va)
+    {
+        ArgumentNullException.ThrowIfNull(function);
+
+        OpenTarget(new DisassemblyTarget(function.EntryVa, NameOf(function.EntryVa)));
+        _debugger.ExecutionAddress = va;
+        ScrollTo(va);
     }
 
     /// <summary>
@@ -436,6 +466,16 @@ public sealed partial class FileViewModel : ObservableObject
         var function = analysis.FunctionContaining(listingVa)
                        ?? analysis.GetOrDiscoverFunction(listingVa);
         string moduleName = System.IO.Path.GetFileName(module.Path);
+
+        // A tab of its own, when that is what the reader has asked for. It keeps this file's own
+        // documents to this file, at the cost of a tab appearing while stepping — which is why it
+        // is off unless chosen.
+        if (_shell.ModuleView == ForeignModuleView.OwnTab
+            && _shell.ShowModuleTab(moduleBinary) is { } tab)
+        {
+            tab.ShowStoppedFunction(function, listingVa);
+            return true;
+        }
 
         // Already reading this foreign function where the arrow can follow it — its disassembly or its
         // decompiled C? Leave the reader on it: only the arrow moves. Without this a step inside a

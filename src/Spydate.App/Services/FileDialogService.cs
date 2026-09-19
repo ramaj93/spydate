@@ -32,7 +32,12 @@ public interface IFileDialogService
     /// Asks where a newly opened file should go when one is already open. Null when the reader
     /// cancelled, which is different from either answer: nothing is opened at all.
     /// </summary>
-    Spydate.Core.Project.OpenDestination? AskWhereToOpen(string incoming, string current, bool currentIsDebugging);
+    OpenChoice? AskWhereToOpen(string incoming, string current, bool currentIsDebugging);
+
+    /// <summary>
+    /// Shows the preferences, returning what was chosen or null when nothing was.
+    /// </summary>
+    Spydate.Core.Project.Preferences? EditPreferences(Spydate.Core.Project.Preferences current);
 
     /// <summary>Asks where to write a file; returns the chosen path or null.</summary>
     string? SaveFile(string title, string filter, string suggestedName);
@@ -43,6 +48,12 @@ public interface IFileDialogService
 /// a binary is. The three functions are the whole of it: text to bytes, bytes back to text, and how
 /// far a replacement of a given size reaches at this address.
 /// </summary>
+/// <summary>
+/// What the open-destination prompt came back with: where the file goes, and whether to stop
+/// asking. The two are separate because the second is a preference and the first is one answer.
+/// </summary>
+public sealed record OpenChoice(Spydate.Core.Project.OpenDestination Destination, bool Remember);
+
 /// <param name="Original">The bytes there now — what both boxes start out saying.</param>
 public sealed record PatchPrompt(
     string Title,
@@ -92,14 +103,24 @@ public sealed class FileDialogService : IFileDialogService
         return prompt.ShowDialog() == true ? prompt.Value : null;
     }
 
-    public Spydate.Core.Project.OpenDestination? AskWhereToOpen(string incoming, string current, bool currentIsDebugging)
+    public OpenChoice? AskWhereToOpen(string incoming, string current, bool currentIsDebugging)
     {
         var chooser = new OpenDestinationWindow(incoming, current, currentIsDebugging)
         {
             Owner = Application.Current?.MainWindow,
         };
 
-        return chooser.ShowDialog() == true ? chooser.Choice : null;
+        return chooser.ShowDialog() == true ? new OpenChoice(chooser.Choice, chooser.Remember) : null;
+    }
+
+    public Spydate.Core.Project.Preferences? EditPreferences(Spydate.Core.Project.Preferences current)
+    {
+        var window = new PreferencesWindow(current)
+        {
+            Owner = Application.Current?.MainWindow,
+        };
+
+        return window.ShowDialog() == true ? window.Result : null;
     }
 
     public string? AskForPatch(PatchPrompt prompt)

@@ -164,6 +164,17 @@ Each one ships and is verifiable on its own.
 | 3 | Concurrent debugging | 22 `{Binding Debugger.X}` → `Active.Debugger.X` |
 | 4 | Preferences window — General and Debugging pages | Module-tab option, "don't ask again" |
 
+All four are done. Two things came out differently from the sketch above:
+
+- **A module tab does not run discovery.** Walking the whole of a system DLL to fill a tree nobody
+  asked for costs seconds and hundreds of megabytes, and the functions actually wanted are the ones
+  execution reaches, which arrive one at a time anyway. Its tree still has sections, imports and
+  exports; what it lacks is a complete function list.
+- **A module tab is read-only in a sharper sense than "no patches".** It is not in the workspace's
+  open set, nothing writes a project file for it, and its own debugger never starts anything — the
+  process belongs to the file that is running. The arrow is drawn there from an address, not from a
+  session of its own.
+
 Phase 0 is first because it is the cheapest thing that could invalidate the rest, and finding that
 out after the phase 1 refactor would be the expensive order.
 

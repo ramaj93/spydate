@@ -36,6 +36,9 @@ public partial class OpenDestinationWindow : Window
     /// <summary>What was chosen, once the dialog has been accepted.</summary>
     public OpenDestination Choice { get; private set; } = OpenDestination.NewTab;
 
+    /// <summary>Whether that answer should become the setting, so this stops being asked.</summary>
+    public bool Remember => RememberBox.IsChecked == true;
+
     private void OnNewTab(object sender, RoutedEventArgs e)
     {
         Choice = OpenDestination.NewTab;

@@ -153,6 +153,37 @@ public sealed partial class MainViewModel : ObservableObject, IShell
 
     public void Log(string message) => Output.Add($"{DateTime.Now:HH:mm:ss}  {message}");
 
+    /// <summary>How the reader wants a module stepped into to be shown.</summary>
+    public ForeignModuleView ModuleView => _preferences.ForeignModule;
+
+    /// <summary>
+    /// Shows a module stepped into as a tab of its own, reusing the tab it already has.
+    ///
+    /// Read-only in the sense that matters: it is not in the workspace's open set, nothing saves a
+    /// project file for it, and its own debugger never starts anything — the process belongs to the
+    /// file that is running, and this is only somewhere to read its code with the arrow on it.
+    /// Discovery is skipped, because walking the whole of a system DLL to fill a tree nobody asked
+    /// for is the cost this option would otherwise quietly carry.
+    /// </summary>
+    public FileViewModel? ShowModuleTab(OpenedBinary module)
+    {
+        ArgumentNullException.ThrowIfNull(module);
+
+        if (Files.FirstOrDefault(f => ReferenceEquals(f.Binary, module)) is { } open)
+        {
+            Active = open;
+            return open;
+        }
+
+        var tab = new FileViewModel(module, _dialogs, this);
+        Listen(tab);
+        Files.Add(tab);
+        Active = tab;
+        tab.Begin(discover: false);
+        Log($"Opened {module.DisplayName} in its own tab — execution stepped into it.");
+        return tab;
+    }
+
     // ------------------------------------------------------------------
     // File commands
     // ------------------------------------------------------------------
@@ -295,12 +326,22 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             return OpenDestination.NewTab;
         }
 
-        return _preferences.OpenDestination switch
+        if (_preferences.OpenDestination is OpenDestination.NewTab or OpenDestination.ReplaceCurrent)
         {
-            OpenDestination.NewTab => OpenDestination.NewTab,
-            OpenDestination.ReplaceCurrent => OpenDestination.ReplaceCurrent,
-            _ => _dialogs.AskWhereToOpen(path, current.DisplayName, current.IsDebugging),
-        };
+            return _preferences.OpenDestination;
+        }
+
+        if (_dialogs.AskWhereToOpen(path, current.DisplayName, current.IsDebugging) is not { } choice)
+        {
+            return null;
+        }
+
+        if (choice.Remember)
+        {
+            Remember(choice.Destination);
+        }
+
+        return choice.Destination;
     }
 
     /// <summary>Closes the tab in front.</summary>
@@ -357,6 +398,37 @@ public sealed partial class MainViewModel : ObservableObject, IShell
 
     [RelayCommand]
     private void ClearOutput() => Output.Clear();
+
+    /// <summary>
+    /// The per-user settings. Held here as well as on disk because the open-destination prompt asks
+    /// for them on every open, and reading a file each time to answer a question nobody changes is
+    /// work for nothing.
+    /// </summary>
+    [RelayCommand]
+    private void EditPreferences()
+    {
+        if (_dialogs.EditPreferences(_preferences) is not { } chosen)
+        {
+            return;
+        }
+
+        _preferences = chosen;
+        Log(PreferenceStore.Save(chosen)
+            ? "Saved preferences."
+            : "Could not write the preferences file; the settings apply to this session only.");
+    }
+
+    /// <summary>
+    /// Stops the open-destination prompt asking again, for the reader who ticked the box on it.
+    /// Written straight through, the way the debug run settings are: the setting most worth keeping
+    /// is the one somebody chose and then never opened a dialog to confirm.
+    /// </summary>
+    private void Remember(OpenDestination destination)
+    {
+        _preferences = _preferences with { OpenDestination = destination };
+        PreferenceStore.Save(_preferences);
+        Log($"Files will now open in {(destination == OpenDestination.NewTab ? "a new tab" : "the current tab")} without asking. Settings ▸ Preferences… changes it back.");
+    }
 
     /// <summary>
     /// Writes one file's annotations out when it is being put away. Renames are the user's work, so
