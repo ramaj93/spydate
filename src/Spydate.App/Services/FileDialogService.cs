@@ -28,6 +28,12 @@ public interface IFileDialogService
     /// </summary>
     string? AskForPatch(PatchPrompt prompt);
 
+    /// <summary>
+    /// Asks where a newly opened file should go when one is already open. Null when the reader
+    /// cancelled, which is different from either answer: nothing is opened at all.
+    /// </summary>
+    Spydate.Core.Project.OpenDestination? AskWhereToOpen(string incoming, string current, bool currentIsDebugging);
+
     /// <summary>Asks where to write a file; returns the chosen path or null.</summary>
     string? SaveFile(string title, string filter, string suggestedName);
 }
@@ -84,6 +90,16 @@ public sealed class FileDialogService : IFileDialogService
         };
 
         return prompt.ShowDialog() == true ? prompt.Value : null;
+    }
+
+    public Spydate.Core.Project.OpenDestination? AskWhereToOpen(string incoming, string current, bool currentIsDebugging)
+    {
+        var chooser = new OpenDestinationWindow(incoming, current, currentIsDebugging)
+        {
+            Owner = Application.Current?.MainWindow,
+        };
+
+        return chooser.ShowDialog() == true ? chooser.Choice : null;
     }
 
     public string? AskForPatch(PatchPrompt prompt)

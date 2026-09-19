@@ -70,48 +70,107 @@ public sealed class OpenedBinary : IDisposable
     public void Dispose() => Managed?.Dispose();
 }
 
-/// <summary>Loads files and owns the current <see cref="OpenedBinary"/>.</summary>
+/// <summary>
+/// The files that are open, and which of them the window is showing.
+///
+/// It used to hold one. Holding several changes almost nothing about what it does — a file is
+/// loaded, watched, saved and disposed exactly as before — but it does mean the difference between
+/// "the open file" and "the file in front of the reader", which were the same thing and are not any
+/// more. <see cref="Current"/> is the second of those, and it is what everything outside a tab
+/// (the debugger, the assistant) still asks for.
+/// </summary>
 public sealed class WorkspaceService : IDisposable
 {
-    private ProjectFileWatcher? _watcher;
+    private readonly List<OpenedBinary> _open = new();
 
+    /// <summary>One project-file watcher per open file, so each is told about its own.</summary>
+    private readonly Dictionary<OpenedBinary, ProjectFileWatcher> _watchers = new();
+
+    /// <summary>Everything open, oldest first.</summary>
+    public IReadOnlyList<OpenedBinary> Open => _open;
+
+    /// <summary>The one the window is showing, or null when nothing is.</summary>
     public OpenedBinary? Current { get; private set; }
 
     public event EventHandler? CurrentChanged;
 
     /// <summary>
-    /// Raised, off the UI thread, when this image's project file was rewritten by something else —
-    /// an agent driving the MCP server, or another copy of Spydate.
+    /// Raised, off the UI thread, when an open binary's project file was rewritten by something
+    /// else — an agent driving the MCP server, or another copy of Spydate. It names which, because
+    /// the file it happened to is no longer necessarily the one being looked at.
     /// </summary>
-    public event EventHandler? ProjectChangedOnDisk;
+    public event EventHandler<OpenedBinary>? ProjectChangedOnDisk;
 
+    /// <summary>
+    /// Loads a file and adds it to the open set. It does not become <see cref="Current"/> — where a
+    /// newly opened file goes is the window's decision, and the reader may be asked about it.
+    /// </summary>
     public async Task<OpenedBinary> OpenAsync(string path, CancellationToken cancellationToken = default)
     {
         var opened = await Task.Run(() => Load(path), cancellationToken).ConfigureAwait(true);
-        Current?.Dispose();
-        Current = opened;
+        _open.Add(opened);
         Watch(opened);
-        CurrentChanged?.Invoke(this, EventArgs.Empty);
         return opened;
     }
 
-    public void Close()
+    /// <summary>The open file loaded from this path, or null. Opening one twice should find its tab.</summary>
+    public OpenedBinary? FindByPath(string path)
+        => _open.FirstOrDefault(b => string.Equals(b.Image.Path, path, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Shows one of the open files, or nothing.</summary>
+    public void Activate(OpenedBinary? binary)
     {
-        StopWatching();
-        Current?.Dispose();
-        Current = null;
+        if (ReferenceEquals(Current, binary))
+        {
+            return;
+        }
+
+        Current = binary;
         CurrentChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
-    /// Re-reads the project file over the top of what is in memory. Replaces rather than merges: the
+    /// Closes one file: stops watching it, lets go of it, and moves off it if it was the one being
+    /// shown. Saving anything unsaved is the caller's to do first, while it still knows what it had.
+    /// </summary>
+    public void Close(OpenedBinary binary)
+    {
+        ArgumentNullException.ThrowIfNull(binary);
+
+        if (_watchers.Remove(binary, out var watcher))
+        {
+            watcher.Dispose();
+        }
+
+        _open.Remove(binary);
+        binary.Dispose();
+
+        if (ReferenceEquals(Current, binary))
+        {
+            Current = null;
+            CurrentChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public void CloseAll()
+    {
+        foreach (var binary in _open.ToList())
+        {
+            Close(binary);
+        }
+    }
+
+    /// <summary>
+    /// Re-reads a project file over the top of what is in memory. Replaces rather than merges: the
     /// file is already the merged truth, so anything no longer in it was removed on purpose and has
     /// to go from here too. Clearing announces each removal, which is how the names leave the symbol
     /// table as well as the store.
     /// </summary>
-    public ProjectLoadResult? ReloadProject()
+    public ProjectLoadResult? ReloadProject(OpenedBinary binary)
     {
-        if (Current is not { Analysis: { } analysis } binary)
+        ArgumentNullException.ThrowIfNull(binary);
+
+        if (binary.Analysis is not { } analysis)
         {
             return null;
         }
@@ -123,33 +182,48 @@ public sealed class WorkspaceService : IDisposable
 
     private void Watch(OpenedBinary opened)
     {
-        StopWatching();
         if (opened.Analysis is null)
         {
             return;   // nothing to annotate, so nothing to notice
         }
 
-        _watcher = new ProjectFileWatcher(opened.Image);
-        _watcher.Changed += (_, _) => ProjectChangedOnDisk?.Invoke(this, EventArgs.Empty);
-    }
-
-    private void StopWatching()
-    {
-        _watcher?.Dispose();
-        _watcher = null;
+        var watcher = new ProjectFileWatcher(opened.Image);
+        watcher.Changed += (_, _) => ProjectChangedOnDisk?.Invoke(this, opened);
+        _watchers[opened] = watcher;
     }
 
     public void Dispose()
     {
-        StopWatching();
-        Current?.Dispose();
-        Current = null;
+        CloseAll();
     }
 
-    /// <summary>Saves the open file's annotations if any have changed. Returns where they went.</summary>
-    public string? SaveIfDirty()
+    /// <summary>Saves one file's annotations if any have changed. Returns where they went.</summary>
+    public static string? SaveIfDirty(OpenedBinary? binary)
+        => binary is { HasUnsavedAnnotations: true } ? binary.SaveProject() : null;
+
+    /// <summary>
+    /// Saves every open file that has unsaved work, returning where each went. Closing the window
+    /// has to write all of them, not only the tab that happens to be in front.
+    /// </summary>
+    public IReadOnlyList<string> SaveAllIfDirty()
     {
-        return Current is { HasUnsavedAnnotations: true } binary ? binary.SaveProject() : null;
+        var written = new List<string>();
+        foreach (var binary in _open)
+        {
+            try
+            {
+                if (SaveIfDirty(binary) is { } path)
+                {
+                    written.Add(path);
+                }
+            }
+            catch (IOException)
+            {
+                // One file that cannot be written must not stop the others being saved.
+            }
+        }
+
+        return written;
     }
 
     private static OpenedBinary Load(string path)

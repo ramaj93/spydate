@@ -51,6 +51,8 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <!-- The file tabs, between the toolbar and everything they govern. -->
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -99,7 +101,12 @@
                     <MenuItem Header="Save _patched copy…" Command="{Binding Active.SavePatchedCommand}"
                               IsEnabled="{Binding Active.HasPatches}"
                               ToolTip="Writes a new file with the patches applied. The original is never modified." />
-                    <MenuItem Header="_Close file" Command="{Binding CloseFileCommand}" />
+                    <MenuItem Header="_Close file" Command="{Binding CloseFileCommand}"
+                              IsEnabled="{Binding HasBinary}" />
+                    <MenuItem Header="Close _other files" Command="{Binding CloseOtherFilesCommand}"
+                              IsEnabled="{Binding HasBinary}" />
+                    <MenuItem Header="Close a_ll files" Command="{Binding CloseAllFilesCommand}"
+                              IsEnabled="{Binding HasBinary}" />
                     <Separator />
                     <MenuItem Header="E_xit" InputGestureText="Alt+F4" Click="OnExitClick" />
                 </MenuItem>
@@ -290,8 +297,50 @@
             </DockPanel>
         </Border>
 
+        <!-- ============================ File tabs ============================
+             Across the whole width, explorer included, because what a file tab switches is the
+             tree as much as the documents. Hidden entirely when nothing is open, so an empty
+             window does not carry an empty strip. -->
+        <ListBox Grid.Row="3" x:Name="FileTabs" Style="{StaticResource FileTabStrip}"
+                 ItemsSource="{Binding Files}" SelectedItem="{Binding Active}"
+                 AutomationProperties.Name="Open files"
+                 Visibility="{Binding HasFiles, Converter={StaticResource BoolToVisibility}}">
+            <ListBox.ItemTemplate>
+                <DataTemplate DataType="{x:Type vm:FileViewModel}">
+                    <StackPanel Orientation="Horizontal" ToolTip="{Binding FullPath}">
+                        <TextBlock Text="{Binding DisplayName}" VerticalAlignment="Center"
+                                   MaxWidth="220" TextTrimming="CharacterEllipsis" />
+
+                        <!-- Unsaved work, as a dot rather than an asterisk in the name: the name is
+                             what the reader scans the strip by, and it should not change shape. -->
+                        <TextBlock Text="&#x25CF;" Margin="5,0,0,0" VerticalAlignment="Center" FontSize="8"
+                                   Foreground="{DynamicResource Text.Secondary}"
+                                   ToolTip="Unsaved names, comments or patches"
+                                   Visibility="{Binding IsDirty, Converter={StaticResource BoolToVisibility}}" />
+
+                        <TextBlock Text="&#x25CF;" Margin="5,0,0,0" VerticalAlignment="Center" FontSize="8"
+                                   Foreground="{DynamicResource Accent.Hover}"
+                                   ToolTip="Still analysing"
+                                   Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
+
+                        <Button Style="{StaticResource TabCloseButton}" ToolTip="Close file"
+                                AutomationProperties.Name="Close file tab"
+                                Command="{Binding DataContext.CloseFileTabCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+            <ListBox.ContextMenu>
+                <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                    <MenuItem Header="_Close" Command="{Binding CloseFileCommand}" />
+                    <MenuItem Header="Close _others" Command="{Binding CloseOtherFilesCommand}" />
+                    <MenuItem Header="Close _all" Command="{Binding CloseAllFilesCommand}" />
+                </ContextMenu>
+            </ListBox.ContextMenu>
+        </ListBox>
+
         <!-- ============================ Main area ============================ -->
-        <Grid Grid.Row="3">
+        <Grid Grid.Row="4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="ExplorerColumn" Width="280" MinWidth="0" />
                 <ColumnDefinition Width="Auto" />
@@ -1071,7 +1120,7 @@
         </Grid>
 
         <!-- =========================== Status bar ============================ -->
-        <Border Grid.Row="4" Background="{DynamicResource Chrome.Background}"
+        <Border Grid.Row="5" Background="{DynamicResource Chrome.Background}"
                 BorderBrush="{DynamicResource Chrome.Border}" BorderThickness="0,1,0,0">
             <Grid Height="21">
                 <ProgressBar IsIndeterminate="True" VerticalAlignment="Top" Height="2"

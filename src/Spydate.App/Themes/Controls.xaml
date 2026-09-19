@@ -853,6 +853,75 @@
         </Setter>
     </Style>
 
+    <!--
+        The file tabs across the top. A ListBoxItem rather than a TabItem: what a file tab switches
+        is not one content area but the whole window below it - the tree, the documents, the xrefs -
+        so there is nothing for a TabControl to host, and a TabControl with no content is a control
+        fighting its own template. It is drawn to match the document tabs, because a reader should
+        not have to learn two kinds of tab in one window.
+    -->
+    <Style x:Key="FileTabItem" TargetType="{x:Type ListBoxItem}">
+        <Setter Property="Foreground" Value="{DynamicResource Text.Secondary}" />
+        <Setter Property="FontFamily" Value="{DynamicResource App.FontFamily}" />
+        <Setter Property="FontSize" Value="{DynamicResource App.FontSize}" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                    <Grid>
+                        <Border x:Name="Bd" Background="{DynamicResource Tab.Background}"
+                                BorderBrush="{DynamicResource Chrome.Border}" BorderThickness="0,0,1,0"
+                                Height="{DynamicResource Tab.Height}" Padding="8,0" SnapsToDevicePixels="True">
+                            <ContentPresenter VerticalAlignment="Center" />
+                        </Border>
+                        <Border x:Name="Accent" Height="2" VerticalAlignment="Top" Background="Transparent" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Tab.Hover.Background}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Tab.Selected.Background}" />
+                            <Setter TargetName="Accent" Property="Background" Value="{DynamicResource Accent}" />
+                            <Setter Property="Foreground" Value="{DynamicResource Text.Primary}" />
+                            <Setter Property="Panel.ZIndex" Value="1" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="FileTabStrip" TargetType="{x:Type ListBox}">
+        <Setter Property="Background" Value="{DynamicResource TabStrip.Background}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="ItemContainerStyle" Value="{StaticResource FileTabItem}" />
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Hidden" />
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+        <Setter Property="ItemsPanel">
+            <Setter.Value>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                </ItemsPanelTemplate>
+            </Setter.Value>
+        </Setter>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ListBox}">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{DynamicResource Chrome.Border}" BorderThickness="0,0,0,1">
+                        <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled"
+                                      Focusable="False">
+                            <ItemsPresenter />
+                        </ScrollViewer>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style x:Key="DocumentTabControl" TargetType="{x:Type TabControl}">
         <Setter Property="Background" Value="{DynamicResource Document.Background}" />
         <Setter Property="BorderThickness" Value="0" />

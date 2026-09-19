@@ -1,0 +1,40 @@
+<Window x:Class="Spydate.App.Views.OpenDestinationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SizeToContent="Height"
+        Width="470"
+        WindowStyle="SingleBorderWindow"
+        Background="{DynamicResource Chrome.Background}"
+        Foreground="{DynamicResource Text.Primary}"
+        FontFamily="{DynamicResource App.FontFamily}"
+        FontSize="{DynamicResource App.FontSize}">
+    <Border Padding="12" BorderThickness="1" BorderBrush="{DynamicResource Chrome.Border}">
+        <StackPanel>
+            <TextBlock x:Name="QuestionText" TextWrapping="Wrap" Margin="0,0,0,4"
+                       AutomationProperties.AutomationId="OpenQuestion" />
+
+            <TextBlock x:Name="CurrentText" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"
+                       Foreground="{DynamicResource Text.Tertiary}"
+                       AutomationProperties.AutomationId="OpenCurrent" />
+
+            <!-- Only when replacing would kill a running process. Annotations need no warning here:
+                 they are already written on the way out. -->
+            <TextBlock x:Name="WarningText" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"
+                       Visibility="Collapsed"
+                       Foreground="{DynamicResource Debug.Breakpoint}"
+                       AutomationProperties.AutomationId="OpenWarning" />
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,2,0,0">
+                <Button Content="Cancel" MinWidth="86" Margin="0,0,6,0" IsCancel="True" Click="OnCancel"
+                        AutomationProperties.Name="Cancel" />
+                <Button x:Name="ReplaceButton" Content="Replace current tab" MinWidth="130" Margin="0,0,6,0"
+                        Click="OnReplace" AutomationProperties.Name="Replace current tab" />
+                <Button x:Name="NewTabButton" Content="Open in a new tab" MinWidth="130" IsDefault="True"
+                        Click="OnNewTab" AutomationProperties.Name="Open in a new tab" />
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

@@ -19,13 +19,12 @@ public sealed record RecentEntry(string Path, string Name, string Folder, System
 public sealed record XrefRow(string From, string Function, string Kind, string Instruction, ulong FromVa, ulong? FunctionEntryVa);
 
 /// <summary>
-/// The window: what is open, what has been opened lately, the output log, the status bar, and the
-/// panels shared by everything in it.
+/// The window: which files are open, which one is in front, what has been opened lately, the output
+/// log, the status bar, and the panels shared by everything in it.
 ///
-/// What it is not is the file. Everything about a particular binary — its tree, its tabs, its
-/// xrefs, its patches, where the reader has been in it — lives in a <see cref="FileViewModel"/>,
-/// and this holds the one that is <see cref="Active"/>. There is exactly one today; the point of
-/// the split is that there need not be (docs/MULTI-FILE.md).
+/// What it is not is a file. Everything about a particular binary — its tree, its tabs, its xrefs,
+/// its patches, where the reader has been in it — lives in a <see cref="FileViewModel"/>, and the
+/// window holds a strip of them with one <see cref="Active"/>.
 /// </summary>
 public sealed partial class MainViewModel : ObservableObject, IShell
 {
@@ -34,6 +33,12 @@ public sealed partial class MainViewModel : ObservableObject, IShell
 
     private readonly IFileDialogService _dialogs;
     private readonly WorkspaceService _workspace;
+
+    /// <summary>
+    /// Read once at startup. Nothing in the window writes it yet — the page that does arrives with
+    /// the Preferences window — so a value other than the default is one somebody put there by hand.
+    /// </summary>
+    private Preferences _preferences = PreferenceStore.Load();
 
     public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant, DebuggerViewModel debugger)
     {
@@ -53,6 +58,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             if (e.PropertyName is nameof(DebuggerViewModel.State) or nameof(DebuggerViewModel.IsStopped))
             {
                 Active?.NotifyCaretCommands();
+                OnPropertyChanged(nameof(IsDebuggingActive));
             }
 
             // Where the program stopped goes on the window's status bar rather than the Debug
@@ -70,6 +76,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         // Double-clicking a breakpoint in the pane opens the code it is in — the same "show me where"
         // as a stop, but moving no arrow, since the program is not there.
         debugger.NavigateRequested += (_, va) => Active?.ShowWhereItStopped(va);
+        Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
     }
@@ -87,14 +94,20 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     /// <summary>The debugger panel. Nothing it holds runs until somebody asks it to.</summary>
     public DebuggerViewModel Debugger { get; }
 
+    /// <summary>The open files, in the order their tabs appear.</summary>
+    public ObservableCollection<FileViewModel> Files { get; } = new();
+
     /// <summary>
-    /// The file the window is showing, or null when nothing is open. Everything the menus, the tree
-    /// and the tabs act on hangs off this.
+    /// The file in front. Everything the menus, the tree and the tabs act on hangs off this, and
+    /// setting it is what makes a tab the current one everywhere else — the debugger and the
+    /// assistant both ask the workspace which binary is current rather than being told.
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasBinary))]
     [NotifyPropertyChangedFor(nameof(WindowTitle))]
     private FileViewModel? _active;
+
+    partial void OnActiveChanged(FileViewModel? value) => _workspace.Activate(value?.Binary);
 
     /// <summary>Timestamped log shown in the Output tool window.</summary>
     public ObservableCollection<string> Output { get; } = new();
@@ -106,6 +119,11 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     private bool _isBusy;
 
     public bool HasBinary => Active is not null;
+
+    public bool HasFiles => Files.Count > 0;
+
+    /// <summary>Whether a debuggee is up at all, for the tab that owns it to say so.</summary>
+    public bool IsDebuggingActive => Debugger.IsDebugging;
 
     public string WindowTitle => Active is null ? ProductTitle : $"{ProductTitle} — {Active.DisplayName}";
 
@@ -169,10 +187,28 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         OnPropertyChanged(nameof(HasRecent));
     }
 
+    /// <summary>
+    /// Opens a file, asking where it should go when something is already open.
+    ///
+    /// Every way in comes through here — the menu, the recent list, a file dropped on the window,
+    /// the command line — so they all behave the same way. Opening a file that is already open is
+    /// not a question at all: it shows the tab that has it.
+    /// </summary>
     public async Task OpenPathAsync(string path)
     {
-        SaveAnnotationsIfDirty();
-        Active?.Close();
+        if (_workspace.FindByPath(path) is { } already
+            && Files.FirstOrDefault(f => ReferenceEquals(f.Binary, already)) is { } openTab)
+        {
+            Active = openTab;
+            StatusText = $"{openTab.DisplayName} is already open.";
+            return;
+        }
+
+        if (WhereToOpen(path) is not { } destination)
+        {
+            return;   // cancelled: nothing is opened, and what was open is untouched
+        }
+
         IsBusy = true;
         StatusText = $"Loading {Path.GetFileName(path)}…";
         Log($"Loading {path}");
@@ -186,9 +222,21 @@ public sealed partial class MainViewModel : ObservableObject, IShell
                 $"{pe.Sections.Count} sections, {pe.Imports.Count + pe.DelayImports.Count} imported modules, " +
                 $"{pe.Exports?.Entries.Count ?? 0} exports{(pe.IsManaged ? ", managed" : string.Empty)}.");
 
+            // Where the new tab goes, worked out before the old one is closed so that replacing
+            // puts it back in the same place in the strip rather than at the end.
+            var replacing = destination == OpenDestination.ReplaceCurrent ? Active : null;
+            int at = replacing is null ? Files.Count : Files.IndexOf(replacing);
+
+            var file = new FileViewModel(opened, _dialogs, Debugger, this);
+            Files.Insert(at, file);
+
+            if (replacing is not null)
+            {
+                CloseFileTab(replacing);
+            }
+
             // In place before Begin, because Begin opens the overview tab and starts discovery, and
             // both of those are things the window has to already be showing this file to display.
-            var file = new FileViewModel(opened, _dialogs, Debugger, this);
             Active = file;
             file.Begin();
 
@@ -208,30 +256,93 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         }
     }
 
-    [RelayCommand]
-    private void CloseFile()
+    /// <summary>
+    /// Whether the new file takes a tab of its own or the current one's place. Null to do neither.
+    ///
+    /// Nothing open is not a question. Otherwise it is the reader's, unless they have said in the
+    /// preferences that it is not — which today they can only do by editing the file, since the
+    /// page that sets it comes with the Preferences window.
+    /// </summary>
+    private OpenDestination? WhereToOpen(string path)
     {
-        SaveAnnotationsIfDirty();
-        Active?.Close();
-        Active = null;
-        _workspace.Close();
-        StatusText = "Ready";
-        Log("File closed.");
+        if (Active is not { } current)
+        {
+            return OpenDestination.NewTab;
+        }
+
+        return _preferences.OpenDestination switch
+        {
+            OpenDestination.NewTab => OpenDestination.NewTab,
+            OpenDestination.ReplaceCurrent => OpenDestination.ReplaceCurrent,
+            _ => _dialogs.AskWhereToOpen(path, current.DisplayName, Debugger.IsDebugging),
+        };
+    }
+
+    /// <summary>Closes the tab in front.</summary>
+    [RelayCommand]
+    private void CloseFile() => CloseFileTab(Active);
+
+    /// <summary>Closes one tab, saving its work and moving to a neighbour if it was in front.</summary>
+    [RelayCommand]
+    private void CloseFileTab(FileViewModel? file)
+    {
+        if (file is null)
+        {
+            return;
+        }
+
+        SaveIfDirty(file);
+
+        int index = Files.IndexOf(file);
+        bool wasActive = ReferenceEquals(Active, file);
+
+        file.Close();
+        Files.Remove(file);
+        _workspace.Close(file.Binary);
+
+        if (wasActive)
+        {
+            Active = Files.Count == 0 ? null : Files[Math.Clamp(index - 1, 0, Files.Count - 1)];
+        }
+
+        Log($"Closed {file.DisplayName}.");
+        if (Files.Count == 0)
+        {
+            StatusText = "Ready";
+        }
+    }
+
+    [RelayCommand]
+    private void CloseOtherFiles()
+    {
+        foreach (var file in Files.Where(f => !ReferenceEquals(f, Active)).ToList())
+        {
+            CloseFileTab(file);
+        }
+    }
+
+    [RelayCommand]
+    private void CloseAllFiles()
+    {
+        foreach (var file in Files.ToList())
+        {
+            CloseFileTab(file);
+        }
     }
 
     [RelayCommand]
     private void ClearOutput() => Output.Clear();
 
     /// <summary>
-    /// Writes annotations out when the file is being put away. Renames are the user's work, so they are
-    /// not thrown away silently - but where they went is logged, since the file may have landed in the
-    /// per-user store rather than beside a binary nobody can write to.
+    /// Writes one file's annotations out when it is being put away. Renames are the user's work, so
+    /// they are not thrown away silently - but where they went is logged, since the file may have
+    /// landed in the per-user store rather than beside a binary nobody can write to.
     /// </summary>
-    public void SaveAnnotationsIfDirty()
+    private void SaveIfDirty(FileViewModel file)
     {
         try
         {
-            if (_workspace.SaveIfDirty() is { } path)
+            if (WorkspaceService.SaveIfDirty(file.Binary) is { } path)
             {
                 Log($"Saved annotations to {path}");
             }
@@ -243,17 +354,29 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     }
 
     /// <summary>
+    /// Writes out every open file that has unsaved work. The window closing has to save all of
+    /// them, not only the tab that happens to be in front.
+    /// </summary>
+    public void SaveAnnotationsIfDirty()
+    {
+        foreach (string path in _workspace.SaveAllIfDirty())
+        {
+            Log($"Saved annotations to {path}");
+        }
+    }
+
+    /// <summary>
     /// Something else rewrote a binary's project file — an agent driving the MCP server, or a second
     /// copy of Spydate. The watcher fires on a thread-pool thread, and everything the file does about
-    /// it is UI-thread only.
+    /// it is UI-thread only. It names which file, because that need not be the one being looked at.
     /// </summary>
-    private void OnProjectChangedOnDisk(object? sender, EventArgs e)
+    private void OnProjectChangedOnDisk(object? sender, Services.OpenedBinary binary)
     {
         Application.Current?.Dispatcher.InvokeAsync(async () =>
         {
-            if (Active is { } file)
+            if (Files.FirstOrDefault(f => ReferenceEquals(f.Binary, binary)) is { } file)
             {
-                await file.ReloadProjectAsync(_workspace.ReloadProject).ConfigureAwait(true);
+                await file.ReloadProjectAsync(() => _workspace.ReloadProject(binary)).ConfigureAwait(true);
             }
         });
     }

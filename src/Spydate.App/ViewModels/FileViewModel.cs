@@ -78,12 +78,46 @@ public sealed partial class FileViewModel : ObservableObject
         _debugger = debugger;
         _shell = shell;
         Documents.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasDocuments));
+
+        // The tab shows a dot when there is work that is not on disk, so it has to hear about the
+        // work. Both stores, because either can be written without the other — a rename through the
+        // assistant, a patch from the menu.
+        if (Binary.Annotations is { } annotations)
+        {
+            annotations.Changed += (_, _) => NotifyDirty();
+        }
+
+        Binary.Patches.Changed += (_, _) => NotifyDirty();
     }
 
     /// <summary>The image, its analyses, its patches and its breakpoints. A file view model is one of these.</summary>
     public OpenedBinary Binary { get; }
 
     public string DisplayName => Binary.DisplayName;
+
+    /// <summary>
+    /// The whole path, for the tab's tooltip: two files of one name are told apart by where they
+    /// are, and a strip of tabs is exactly where that happens.
+    /// </summary>
+    public string FullPath => Binary.Image.Path ?? Binary.DisplayName;
+
+    /// <summary>Names, comments, patches or breakpoints that are not on disk yet.</summary>
+    public bool IsDirty => Binary.HasUnsavedAnnotations;
+
+    /// <summary>Discovery is running, so the tab shows it is still working.</summary>
+    [ObservableProperty]
+    private bool _isBusy;
+
+    private void NotifyDirty()
+    {
+        if (Application.Current?.Dispatcher is { } dispatcher && !dispatcher.CheckAccess())
+        {
+            dispatcher.Invoke(() => OnPropertyChanged(nameof(IsDirty)));
+            return;
+        }
+
+        OnPropertyChanged(nameof(IsDirty));
+    }
 
     public ObservableCollection<ExplorerNodeViewModel> Explorer { get; } = new();
 
@@ -934,6 +968,7 @@ public sealed partial class FileViewModel : ObservableObject
         var cts = _analysisCts = new CancellationTokenSource();
         var progress = new Progress<AnalysisProgress>(p => AnalysisText = $"{p.FunctionsFound} functions  ·  {p.Message}");
         AnalysisText = "Discovering functions…";
+        IsBusy = true;
         var started = DateTime.UtcNow;
         try
         {
@@ -956,6 +991,10 @@ public sealed partial class FileViewModel : ObservableObject
             AnalysisText = "Analysis failed";
             Log($"ERROR during discovery: {ex.Message}");
             Warnings.Add($"Function discovery failed: {ex.Message}");
+        }
+        finally
+        {
+            IsBusy = false;
         }
     }
 
@@ -1237,6 +1276,7 @@ public sealed partial class FileViewModel : ObservableObject
             string? path = Binary.SaveProject();
             Log(path is null ? "Nothing to save: no names or comments yet." : $"Saved {Binary.Annotations.Count} annotation(s) to {path}");
             StatusText = path is null ? "Nothing to save" : "Project saved";
+            NotifyDirty();
         }
         catch (IOException ex)
         {
