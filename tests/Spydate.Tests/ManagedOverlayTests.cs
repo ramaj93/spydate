@@ -92,28 +92,66 @@ public sealed class ManagedOverlayTests
     /// Main runs. So this pauses, checks that <c>Spin</c> is on a managed stack, and if not lets the
     /// process run on and pauses again. Once Spin is there the type is loaded and its static
     /// constructor has run, so statics are readable too.
+    ///
+    /// It fails here rather than handing back an overlay it knows is in the wrong state. Returning
+    /// one and letting the caller's assertions speak was worse than it sounds: both callers assume
+    /// Spin was reached, so an exhausted loop surfaced as whatever they looked at next. It cost a
+    /// real diagnosis — a run reported <c>Label</c> reading "null", which cannot happen, because it
+    /// is a static initializer set by the type's constructor long before Spin exists. The pause had
+    /// simply landed before that constructor ran, and the test blamed the field.
+    ///
+    /// Bounded by the clock rather than by a count of attempts. An attempt is a pause, a stack walk,
+    /// a continue and two waits, so its cost is set by how loaded the machine is — which made "40
+    /// attempts" mean six seconds of patience on an idle box and rather more on a busy one, and the
+    /// failures only ever showed up on busy ones.
     /// </summary>
     private static ManagedOverlay PauseInManagedCode(DebugSession session)
     {
         Assert.True(Wait(() => session.Managed?.HasClr == true), "no CLR appeared in the debuggee");
         var overlay = session.Managed!;
 
-        for (int attempt = 0; attempt < 40; attempt++)
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var budget = TimeSpan.FromSeconds(30);
+        int attempts = 0;
+        var lastSeen = new List<string>();
+
+        while (clock.Elapsed < budget)
         {
+            attempts++;
             Assert.True(session.Pause(), "could not pause the running debuggee");
             Assert.True(Wait(() => session.State == DebugState.Stopped), "the pause never stopped it");
 
-            if (overlay.Threads().SelectMany(t => t.Frames).Any(f => f.Method?.Contains(SpinFrame, StringComparison.Ordinal) == true))
+            var methods = overlay.Threads()
+                .SelectMany(t => t.Frames)
+                .Select(f => f.Method)
+                .OfType<string>()
+                .ToList();
+
+            if (methods.Any(m => m.Contains(SpinFrame, StringComparison.Ordinal)))
             {
                 return overlay;
             }
+
+            // What the stack did hold, so a failure can say where it was instead of only where it
+            // was not. Empty is itself the answer in the case that prompted this: paused so early
+            // that no managed frame existed yet.
+            lastSeen = methods;
 
             session.Continue();
             Assert.True(Wait(() => session.State == DebugState.Running), "the debuggee never resumed");
             Thread.Sleep(150);
         }
 
-        return overlay;   // let the caller's assertions report what did not turn up
+        string saw = lastSeen.Count == 0
+            ? "no managed frames at all"
+            : string.Join(", ", lastSeen.Distinct().Take(8));
+
+        Assert.Fail(
+            $"never caught the debuggee in {SpinFrame}: {attempts} attempts over {clock.Elapsed.TotalSeconds:F0}s, "
+            + $"last stack held {saw}. Nothing below this point is readable, so the assertions that "
+            + "follow would have reported a symptom of this rather than a fault of their own.");
+
+        return overlay;   // unreachable: Assert.Fail throws
     }
 
     [Fact]
