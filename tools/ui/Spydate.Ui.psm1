@@ -18,6 +18,13 @@
 #   * A modal dialog is invisible to UIA - there is no button to find. Answer it with a keystroke,
 #     after waiting for a #32770 to take the foreground, and photograph only once it is gone:
 #     Save-Shot fronts the main window and would push the dialog behind it.
+#   * Not every modal is one of those. Start Debugging puts up a WPF window of the app's own, which
+#     does publish a tree and is not class #32770 - so Confirm-Dialog waits for a foreground that
+#     never comes, types its keystroke into whatever box has focus, and returns as though it had
+#     worked. The run never starts and the next menu item is merely disabled. Confirm-RunDialog is
+#     the one for that.
+#   * The 32-bit build is a different exe in a different folder, and it is the only one that can
+#     debug a 32-bit program at all - so Start-Spydate takes -From and -Exe.
 #
 # Usage:
 #   Import-Module .\tools\ui\Spydate.Ui.psm1
@@ -82,10 +89,14 @@ function Start-Spydate {
     .SYNOPSIS Runs a copy of the built app and waits for its window.
     .PARAMETER Open  A binary to open on the command line.
     .PARAMETER From  The build output to copy. Defaults to the debug build.
+    .PARAMETER Exe   The executable in that output. The 32-bit build is a different file in a
+                     different folder (bin\x86\... \Spydate-x86.exe), and it is the only way to
+                     debug a 32-bit program, so driving it needs both of these.
     #>
     param(
         [string]$Open,
         [string]$From = "$PSScriptRoot\..\..\src\Spydate.App\bin\Debug\net10.0-windows",
+        [string]$Exe = "Spydate.exe",
         [string]$Copy = "$env:TEMP\spydate-ui",
         [int]$Settle = 10)
 
@@ -97,7 +108,7 @@ function Start-Spydate {
     Copy-Item "$From\*" $Copy -Recurse -Force
 
     $arguments = if ($Open) { @("`"$Open`"") } else { @() }
-    $app = Start-Process (Join-Path $Copy "Spydate.exe") -ArgumentList $arguments -PassThru
+    $app = Start-Process (Join-Path $Copy $Exe) -ArgumentList $arguments -PassThru
 
     $window = [IntPtr]::Zero
     foreach ($i in 1..80) {
@@ -266,6 +277,40 @@ function Confirm-Dialog {
     throw "the dialog did not answer to '$Key'"
 }
 
+function Confirm-RunDialog {
+    <#
+    .SYNOPSIS Presses Debug on the run-configuration window that Start Debugging puts up.
+
+              Not the same thing as Confirm-Dialog, and the difference matters. That one answers a
+              Win32 MessageBox, which publishes nothing to UIA and has to be answered by keystroke.
+              This is a WPF window of the app's own - it has a real automation tree, so its button
+              can be found and invoked - and it is *not* class #32770, so Confirm-Dialog waits for a
+              foreground that never arrives, sends its keystroke into whatever text box has focus,
+              and returns as though it had worked. The run then never starts and the next menu item
+              is disabled, which is a confusing way to find out.
+
+              Searched from the desktop root, like a menu popup: it is a window of its own and so
+              is not under the main window's element.
+    #>
+    param($Ui, [string]$Button = "Debug", [int]$Wait = 15)
+
+    foreach ($i in 1..($Wait * 4)) {
+        $all = $script:A::RootElement.FindAll($script:Scope,
+            [System.Windows.Automation.PropertyCondition]::new(
+                $script:A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))
+        foreach ($b in $all) {
+            if ($b.Current.Name -eq $Button -and $b.Current.IsEnabled) {
+                $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+                Start-Sleep -Milliseconds 800
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw "no enabled '$Button' button appeared - the run dialog never came up, or it is named something else"
+}
+
 function Save-Shot {
     <#
     .SYNOPSIS Photographs the window from the screen. Not PrintWindow: that draws the window on its
@@ -340,4 +385,4 @@ function Open-TreeItem {
 }
 
 Export-ModuleMember -Function Start-Spydate, Stop-Spydate, Find-Element, Click-Element, Select-Pane,
-    Invoke-Menu, Confirm-Dialog, Save-Shot, Get-PanelText, Expand-Tree, Open-TreeItem
+    Invoke-Menu, Confirm-Dialog, Confirm-RunDialog, Save-Shot, Get-PanelText, Expand-Tree, Open-TreeItem
