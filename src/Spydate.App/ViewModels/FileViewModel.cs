@@ -1581,6 +1581,14 @@ public sealed partial class FileViewModel : ObservableObject
     /// </summary>
     private void GoToDefinition(SourceReference reference, ManagedAssembly viewed)
     {
+        // A P/Invoke's library, not a metadata reference: the code it names is native and lives in
+        // another file entirely. See ManagedCodeDocumentViewModel.WithNativeModules.
+        if (reference.Token == NativeImports.ModuleToken)
+        {
+            OpenNativeModule(reference.Assembly);
+            return;
+        }
+
         var target = reference.Assembly == viewed.SimpleName
             ? viewed
             : viewed.References.FirstOrDefault(r => r.Name == reference.Assembly) is { } refx
@@ -1597,6 +1605,59 @@ public sealed partial class FileViewModel : ObservableObject
         OpenTarget(located.Member is { } member
             ? new ManagedMemberTarget(located.Type, member, external)
             : new ManagedTypeTarget(located.Type, external));
+    }
+
+    /// <summary>
+    /// Opens the DLL a P/Invoke names, as a tab of its own.
+    ///
+    /// A tab rather than a document inside this one, and without asking the preference, because
+    /// this is not the debugger wandering into a library while stepping — somebody clicked the
+    /// name. Wanting to look at it is the whole of what the click means.
+    ///
+    /// Where it is, in the order that is right most often: the copy already loaded by the running
+    /// program, then beside the assembly that imports it — which is where a project's own native
+    /// dependencies sit — then the system directory. The import table is no help here: a managed
+    /// assembly has no native imports to resolve, which is why the native path could not be reused.
+    /// </summary>
+    private void OpenNativeModule(string name)
+    {
+        string bare = TrimExtension(name);
+        string file = bare + ".dll";
+
+        string? path = _debugger.ModulePath(file);
+
+        if (path is null && System.IO.Path.GetDirectoryName(Binary.Image.Path) is { Length: > 0 } beside)
+        {
+            string candidate = System.IO.Path.Combine(beside, file);
+            path = File.Exists(candidate) ? candidate : null;
+        }
+
+        if (path is null)
+        {
+            string system = Binary.Image.Is64Bit
+                ? Environment.GetFolderPath(Environment.SpecialFolder.System)
+                : Environment.GetFolderPath(Environment.SpecialFolder.SystemX86);
+            string candidate = System.IO.Path.Combine(system, file);
+            path = File.Exists(candidate) ? candidate : null;
+        }
+
+        if (path is null)
+        {
+            StatusText = $"Could not find {file} — not loaded, not beside {Binary.DisplayName}, not in the system directory.";
+            Log($"{file} was not found to open.");
+            return;
+        }
+
+        if (ModuleAnalysis(path) is not { } module)
+        {
+            StatusText = $"Could not read {System.IO.Path.GetFileName(path)}.";
+            return;
+        }
+
+        if (_shell.ShowModuleTab(module) is null)
+        {
+            StatusText = $"Could not open {System.IO.Path.GetFileName(path)}.";
+        }
     }
 
     private void OpenFunctionGraph(Function f)

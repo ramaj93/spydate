@@ -190,6 +190,23 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             ? ManagedDecompiler.Addressed(source, image.Bodies, image.ImageBase)
             : source.Text;
 
+    /// <summary>
+    /// The decompiler references plus the libraries named in DllImport attributes, so a P/Invoke
+    /// declaration can be followed to the DLL it actually calls. See NativeImports.
+    /// </summary>
+    private static IReadOnlyList<SourceReference> WithNativeModules(IReadOnlyList<SourceReference> references, string text)
+    {
+        var native = NativeImports.In(text);
+        if (native.Count == 0)
+        {
+            return references;
+        }
+
+        var all = new List<SourceReference>(native);
+        all.AddRange(references);
+        return all;
+    }
+
     private string Produce(ManagedLanguage language, CancellationToken ct)
     {
         var d = _assembly.Decompiler;
@@ -203,17 +220,19 @@ public sealed partial class ManagedCodeDocumentViewModel : DocumentViewModel
             case (ManagedLanguage.CSharp, { } m, _):
             {
                 var source = d.SourceForMember(m, ct);
-                _lastReferences = source.References;
+                string addressed = Addressed(source);
+                _lastReferences = WithNativeModules(source.References, addressed);
                 _lastDeclarations = source.Declarations;
-                return Addressed(source);
+                return addressed;
             }
 
             case (ManagedLanguage.CSharp, null, { } t):
             {
                 var source = d.SourceForType(t, ct);
-                _lastReferences = source.References;
+                string addressed = Addressed(source);
+                _lastReferences = WithNativeModules(source.References, addressed);
                 _lastDeclarations = source.Declarations;
-                return Addressed(source);
+                return addressed;
             }
 
             case (ManagedLanguage.CSharp, null, null):

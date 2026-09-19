@@ -42,6 +42,69 @@ public readonly record struct SourceReference(int Line, int Column, int Length, 
 public readonly record struct SourceDeclaration(int Token, int Line);
 
 /// <summary>
+/// The libraries named in <c>DllImport</c> attributes, as references a click can follow.
+///
+/// The decompiler's own references are metadata — types, methods, fields — and the library in a
+/// P/Invoke is none of those: it is a string literal, which is why it was the one thing in a
+/// declaration that could not be followed, while the declaration is precisely what says where the
+/// code actually lives.
+///
+/// Read out of the produced text rather than from metadata, because the text is what gets clicked
+/// and the two can differ — the attribute may be written across lines, or carry a name the
+/// metadata spells differently.
+/// </summary>
+public static class NativeImports
+{
+    /// <summary>
+    /// The token these carry. Zero is not a valid metadata token, so a caller can tell a synthetic
+    /// reference from a real one without a second field.
+    /// </summary>
+    public const int ModuleToken = 0;
+
+    /// <summary>
+    /// One reference per <c>DllImport("…")</c>, spanning the name inside the quotes. The
+    /// <see cref="SourceReference.Assembly"/> of each is the library name.
+    /// </summary>
+    public static IReadOnlyList<SourceReference> In(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        var found = new List<SourceReference>();
+        string[] lines = text.Split('\n');
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i];
+            int at = line.IndexOf("DllImport", StringComparison.Ordinal);
+            if (at < 0)
+            {
+                continue;
+            }
+
+            int open = line.IndexOf('"', at);
+            if (open < 0)
+            {
+                continue;
+            }
+
+            int close = line.IndexOf('"', open + 1);
+            if (close <= open + 1)
+            {
+                continue;   // no name, or an empty one: nothing to open
+            }
+
+            string module = line[(open + 1)..close];
+
+            // 1-based, as the decompiler records columns, and naming the text inside the quotes
+            // rather than the quotes themselves.
+            found.Add(new SourceReference(i + 1, open + 2, module.Length, module, ModuleToken));
+        }
+
+        return found;
+    }
+}
+
+/// <summary>
 /// One statement's IL, from its first instruction to the first of the next.
 ///
 /// This is the unit a debugger moves in and the unit a breakpoint goes at. The boundaries are the

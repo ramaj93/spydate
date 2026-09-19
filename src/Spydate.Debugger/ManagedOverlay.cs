@@ -102,6 +102,16 @@ public sealed class ManagedOverlay : IDisposable
     public bool HasClr => Runtime() is not null;
 
     /// <summary>
+    /// Why the attach cannot succeed, when it cannot succeed at all. Null while there is merely no
+    /// CLR up yet, which is ordinary and temporary.
+    ///
+    /// The difference is worth keeping. "No runtime has started" and "no runtime in this process
+    /// can ever be read from here" look identical from the outside — nothing works — and only the
+    /// second is worth telling somebody about, because only the second is not going to fix itself.
+    /// </summary>
+    public string? Unreachable { get; private set; }
+
+    /// <summary>
     /// The runtime, attached lazily and flushed when the debuggee has moved. Null when there is no CLR
     /// in the process yet, or the attach failed — both of which are ordinary, not exceptional.
     /// </summary>
@@ -142,6 +152,23 @@ public sealed class ManagedOverlay : IDisposable
                 _runtime = _target.ClrVersions[0].CreateRuntime();
                 _moved = false;
                 return _runtime;
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("architecture", StringComparison.OrdinalIgnoreCase))
+            {
+                // The one failure that never comes right, and the one worth naming.
+                //
+                // The DAC that reads a runtime has to match the runtime's bitness, and a 64-bit
+                // process cannot load the 32-bit one. So a 64-bit Spydate can watch a 32-bit
+                // program's native code perfectly well — int3 goes in, the loop stops, the
+                // registers read — and can never see a single managed thing in it. Nothing here
+                // can work around that; it wants a 32-bit build of the debugger.
+                _target?.Dispose();
+                _target = null;
+                _runtime = null;
+                Unreachable = $"Spydate is {(Environment.Is64BitProcess ? "64-bit" : "32-bit")} and this program is not, "
+                    + "so its .NET side cannot be read from here: managed breakpoints cannot be planted, and the managed "
+                    + "panes stay empty. Native breakpoints and stepping are unaffected.";
+                return null;
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {

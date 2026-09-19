@@ -1429,10 +1429,25 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         PumpMixed();
     }
 
+    /// <summary>Said once per run, not on every tick of the pump.</summary>
+    private bool _toldAboutBitness;
+
     private void PumpMixed()
     {
         if (_session is not { } session)
         {
+            StopMixedPump();
+            return;
+        }
+
+        // A managed side that can never be reached is worth saying out loud, once. Without this the
+        // reader sets a breakpoint, runs, and nothing happens — no mark, no message, no stop — and
+        // the only thing the window has told them is that their breakpoint is red.
+        if (!_toldAboutBitness && session.Managed?.Unreachable is { } unreachable)
+        {
+            _toldAboutBitness = true;
+            Add(unreachable);
+            Status = unreachable;
             StopMixedPump();
             return;
         }
@@ -1459,6 +1474,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         _mixedPump?.Stop();
         _mixedPump = null;
         _seededMixed.Clear();
+        _toldAboutBitness = false;
     }
 
     /// <summary>
