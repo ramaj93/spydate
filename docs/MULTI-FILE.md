@@ -107,10 +107,10 @@ and `Remember` saved it under the wrong binary's log. Two binaries disagree comp
 been said about them, so the conversation belongs to the file. The one genuinely window-wide part —
 which provider, model and key to talk through — splits out into `AssistantProvider`, a shared
 singleton the per-file assistants read and hear change; that is what keeps a key entered once and lets
-Configure work with no file open. The window draws one transcript into one `RichTextBox`, so
-`MainWindow` re-points the transcript events at the active tab's assistant on switch
-(`WatchActiveAssistant`, beside `WatchActiveDebugger`) and redraws — resuming a mid-answer stream if
-the tab it lands on has one.
+Configure work with no file open. The transcript is a bound, virtualized list (`ChatTranscript`), so a
+tab switch is the active tab's `Transcript` becoming its `ItemsSource` — no code-behind redraw, no
+events to move onto the new tab; the list follows its own tail and keeps its own selection (see
+DECISIONS.md).
 
 ### A stop in a tab that is not forward
 

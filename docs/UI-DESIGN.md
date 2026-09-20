@@ -128,7 +128,10 @@ Type → Member** nodes that open C#/IL documents.
 - Disassembly documents render one function (or an explicit byte range).
 - Decompilation and metadata loading run in `Task.Run`; the document shows
   "working…" and the status bar shows an indeterminate 2px bar.
-- Trees, grids and the output list are virtualized (`VirtualizationMode=Recycling`).
+- Trees, grids, the output list and the assistant transcript are virtualized
+  (`VirtualizationMode=Recycling`). The transcript is a `ChatTranscript` list of
+  one message per line, pixel-scrolled, that carries its own cross-message
+  selection in the lines' flat text rather than in a control (see DECISIONS.md).
 - The graph is drawn directly into a `DrawingContext` rather than as a control per
   block: a few hundred blocks of thirty instructions is tens of thousands of runs of
   text. Only what the scroller says is on screen is built, and below 45% zoom the

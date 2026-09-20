@@ -732,3 +732,53 @@ and it got Y" would be teaching exactly that. And nothing new forgets: `Trim` st
 exchanges oldest-first at the start of a turn when the history no longer fits the configured budget,
 so a restored history too big for a since-lowered context window is cut before the first request,
 with the reader told how much left the assistant's memory.
+
+
+## The transcript is a virtualized list that owns its selection, and Markdig parses the answers
+
+The assistant transcript was one read-only `RichTextBox` holding one `FlowDocument` for the whole
+conversation. Every paragraph and run was a live object in one text container, measured as one flow
+with no virtualization, so a long chat cost its full length in memory and layout; `MainWindow`
+rebuilt the document from scratch on every tab switch; and the find bar walked the whole document
+into a `TextPointer` array on every keystroke. A FlowDocument was chosen because it made the answer
+selectable across messages and scrolled by content rather than by item — real wins that a naive
+list of `TextBlock`s gives up.
+
+It is now a virtualized `ListBox` (`ChatTranscript`) of one `ChatMessage` per line, which realizes
+only what is on screen; a tab switch is the `ItemsSource` changing under it, not a rebuild; and a
+search reads the lines rather than a document. The selection that the FlowDocument gave for free is
+kept by hand, and the way it is kept is the point: it lives in the lines' **flat text** — a line
+index and a character offset — not in any control. WPF has no selectable `TextBlock` (there is no
+`IsTextSelectionEnabled` in `PresentationFramework`), so a list of them could not be selected the
+ordinary way; keeping the selection as data instead means an unrealized line is still inside a
+select-all, copying reads the line's text and never a visual, and the find match is the same
+adorner over the same offsets — which is what finally makes a **question bubble searchable**, the
+one thing the document never managed. The offsets are shared, not agreed: `MarkdownWalk` walks a
+parsed answer once, `FlatText` is that walk into a string, and `MarkdownView` is the same walk into
+controls that registers, for every text block it draws, the slice of the flat text it covers — so
+an offset means the same character to the renderer, the copier and the search by construction. One
+`SelectionAdorner` over the scroll surface paints the selection (translucent, dimmed when the list
+is unfocused, the way a text control's is) and the match (amber). A streaming answer is still drawn
+as plain text until it settles and only then parsed, because half a Markdown construct renders as
+something other than what it becomes, and reparsing a growing answer per token was the cost the old
+design already avoided.
+
+The answers are parsed by **Markdig** (BSD-2) behind the existing `Markdown.Parse` boundary, not the
+hand-written scanner that preceded it, which knew only headings, fences, flat lists and
+bold/italic/code. Only its syntax tree is used — the window renders that itself and never touches
+its HTML — so tables, block quotes, nested and task lists, strikethrough and links come out right
+without a hand-rolled parser leaking on their edges. HTML is disabled, so a `<b>` or a leaked
+tool-call template in angle brackets is shown as the text it is; of the extra emphasis markers only
+`~~strike~~` is on, because `~`, `^` and `==` are code in this domain, not subscript, superscript
+and highlight; and a soft line break stays a hard one, because answers list addresses and names one
+per line. A link opens only an `http`, `https` or `mailto` URL through the shell — a `file:` or a
+custom scheme is a way to make a security tool run something, so those are left inert with the
+address on their tooltip — and an image is drawn as its alt text and never fetched, because nothing
+a model writes into an answer should make the tool issue a request.
+
+`Spydate.App` has no tests, so this was driven in a shown window through the panel probe: the table
+renders as a real `Grid`, a word only in a question bubble and one only in a table cell are both
+found, copying a match returns exactly that word, and a select-all copies the lines' flat text. That
+run earned its keep — it caught a selection adorner that never attached (the adorner layer is not
+reachable at apply-template time) and a highlight transformed to the wrong ancestor, two bugs a
+green build showed nothing of.
