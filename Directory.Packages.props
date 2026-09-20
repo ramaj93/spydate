@@ -68,6 +68,12 @@
     <PackageVersion Include="Anthropic" Version="12.44.0" />
     <!-- DPAPI, so an API key is encrypted to the Windows account rather than sitting in a file. -->
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
+    <!--
+      CommonMark + GFM parser for the assistant's answers (BSD-2). Only its syntax tree is used — the
+      window renders that itself and never touches its HTML — so tables, quotes and nested lists come
+      out right without a hand-written parser leaking on its edge cases.
+    -->
+    <PackageVersion Include="Markdig" Version="1.4.0" />
   </ItemGroup>
 
   <ItemGroup Label="Testing">

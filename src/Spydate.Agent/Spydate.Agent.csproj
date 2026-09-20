@@ -11,6 +11,7 @@
     <PackageReference Include="OpenAI" />
     <PackageReference Include="Anthropic" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+    <PackageReference Include="Markdig" />
   </ItemGroup>
 
   <ItemGroup>

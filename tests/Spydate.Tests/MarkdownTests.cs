@@ -16,11 +16,17 @@ public sealed class MarkdownTests
         => string.Concat(spans.Select(s => s switch
         {
             TextSpan t => t.Text,
-            StrongSpan t => t.Text,
-            EmphasisSpan t => t.Text,
             CodeSpan t => t.Text,
+            LineBreakSpan => "\n",
+            StrongSpan t => Flatten(t.Children),
+            EmphasisSpan t => Flatten(t.Children),
+            StrikeSpan t => Flatten(t.Children),
+            LinkSpan t => Flatten(t.Children),
             _ => string.Empty,
         }));
+
+    private static IReadOnlyList<MarkdownSpan> Spans(MarkdownBlock block)
+        => Assert.IsType<ParagraphBlock>(block).Spans;
 
     [Fact]
     public void PlainProseIsOneParagraph()
@@ -56,7 +62,7 @@ public sealed class MarkdownTests
                 var list = Assert.IsType<ListBlock>(b);
                 Assert.False(list.Ordered);
                 Assert.Equal(2, list.Items.Count);
-                Assert.Equal("reads the header", Flatten(list.Items[0].Spans));
+                Assert.Equal("reads the header", Flatten(Spans(list.Items[0].Blocks[0])));
             },
             b =>
             {
@@ -87,7 +93,7 @@ public sealed class MarkdownTests
         var blocks = Markdown.Parse("Call **CreateFileW** through `sub_401000_helper` now.");
         var spans = Assert.IsType<ParagraphBlock>(Assert.Single(blocks)).Spans;
 
-        Assert.Contains(spans, s => s is StrongSpan { Text: "CreateFileW" });
+        Assert.Contains(spans, s => s is StrongSpan strong && Flatten(strong.Children) == "CreateFileW");
 
         // The underscores inside the code span must survive as themselves.
         Assert.Contains(spans, s => s is CodeSpan { Text: "sub_401000_helper" });
@@ -124,7 +130,7 @@ public sealed class MarkdownTests
     public void EmphasisWithUnderscoresStillWorksBetweenWords()
     {
         var spans = Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse("this is _really_ important"))).Spans;
-        Assert.Contains(spans, s => s is EmphasisSpan { Text: "really" });
+        Assert.Contains(spans, s => s is EmphasisSpan emphasis && Flatten(emphasis.Children) == "really");
     }
 
     [Fact]
@@ -144,6 +150,113 @@ public sealed class MarkdownTests
         Assert.Equal("int f(void)", Assert.IsType<CodeBlock>(blocks[1]).Text);
     }
 
+    [Fact]
+    public void APipeTableComesOutWithItsHeaderRowAndAlignments()
+    {
+        var blocks = Markdown.Parse("""
+            | Name | Address |
+            |:-----|--------:|
+            | main | 0x401000 |
+            | init | 0x401020 |
+            """);
+
+        var table = Assert.IsType<TableBlock>(Assert.Single(blocks));
+        Assert.Equal(3, table.Rows.Count);
+        Assert.True(table.Rows[0].IsHeader);
+        Assert.False(table.Rows[1].IsHeader);
+        Assert.Equal(2, table.Rows[0].Cells.Count);
+        Assert.Equal("Name", Flatten(table.Rows[0].Cells[0]));
+        Assert.Equal("0x401000", Flatten(table.Rows[1].Cells[1]));
+        Assert.Equal([TableAlign.Left, TableAlign.Right], table.Aligns);
+    }
+
+    [Fact]
+    public void AQuoteHoldsItsOwnBlocks()
+    {
+        var quote = Assert.IsType<QuoteBlock>(Assert.Single(Markdown.Parse("> the model is guessing here")));
+        Assert.Equal("the model is guessing here", Flatten(Spans(Assert.Single(quote.Blocks))));
+    }
+
+    [Fact]
+    public void AnIndentedBulletNestsInsideItsParent()
+    {
+        var blocks = Markdown.Parse("""
+            - outer
+              - inner
+            """);
+
+        var outer = Assert.IsType<ListBlock>(Assert.Single(blocks));
+        var item = Assert.Single(outer.Items);
+
+        // The item holds its own paragraph and, as another of its blocks, the nested list.
+        Assert.Contains(item.Blocks, b => b is ListBlock);
+        var inner = Assert.IsType<ListBlock>(item.Blocks.First(b => b is ListBlock));
+        Assert.Equal("inner", Flatten(Spans(Assert.Single(inner.Items).Blocks[0])));
+    }
+
+    [Fact]
+    public void ATaskItemCarriesItsBoxAndNotTheBracketsAsText()
+    {
+        var blocks = Markdown.Parse("""
+            - [x] done
+            - [ ] todo
+            """);
+
+        var list = Assert.IsType<ListBlock>(Assert.Single(blocks));
+        Assert.Equal(2, list.Items.Count);
+        Assert.True(list.Items[0].Checked);
+        Assert.False(list.Items[1].Checked);
+        Assert.Equal("done", Flatten(Spans(list.Items[0].Blocks[0])));
+        Assert.Equal("todo", Flatten(Spans(list.Items[1].Blocks[0])));
+    }
+
+    [Fact]
+    public void StrikethroughIsItsOwnSpan()
+    {
+        var spans = Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse("this is ~~wrong~~ now"))).Spans;
+        Assert.Contains(spans, s => s is StrikeSpan strike && Flatten(strike.Children) == "wrong");
+    }
+
+    [Fact]
+    public void ALinkKeepsItsTextAndUrl()
+    {
+        var link = Assert.IsType<LinkSpan>(Assert.Single(
+            Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse("[the docs](http://example.com/x)"))).Spans));
+
+        Assert.Equal("the docs", Flatten(link.Children));
+        Assert.Equal("http://example.com/x", link.Url);
+    }
+
+    [Fact]
+    public void AnImageIsALinkOfItsAltTextAndIsNeverFetched()
+    {
+        // The record for an image is a LinkSpan: nothing in the tree can make a request, and its
+        // children are the alt text so the reader sees what it was meant to show.
+        var span = Assert.Single(
+            Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse("![a diagram](http://example.com/y.png)"))).Spans);
+
+        var link = Assert.IsType<LinkSpan>(span);
+        Assert.Equal("a diagram", Flatten(link.Children));
+        Assert.Equal("http://example.com/y.png", link.Url);
+    }
+
+    [Theory]
+    [InlineData("<b>bold</b>")]
+    [InlineData("<||DSML||tool_calls> find_strings")]
+    public void HtmlAndToolTemplatesStayLiteralText(string input)
+    {
+        // HTML is off, so a tag or a leaked tool-call template is shown as the characters it is,
+        // never interpreted. Every one of them survives in the flattened text.
+        string rendered = Flatten(Assert.IsType<ParagraphBlock>(Assert.Single(Markdown.Parse(input))).Spans);
+        Assert.Equal(input, rendered);
+    }
+
+    [Fact]
+    public void AThematicBreakIsARule()
+    {
+        Assert.IsType<RuleBlock>(Assert.Single(Markdown.Parse("---")));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(null)]
@@ -155,10 +268,115 @@ public sealed class MarkdownTests
     [InlineData("1.")]
     [InlineData("`` ` ``")]
     [InlineData("**")]
+    [InlineData("| a |")]
+    [InlineData("|---|")]
+    [InlineData(">")]
+    [InlineData("~~")]
+    [InlineData("- [ ]")]
     public void NothingAtAllThrows(string? input)
     {
         var blocks = Markdown.Parse(input);
         Assert.NotNull(blocks);
+    }
+}
+
+/// <summary>
+/// The plain text an answer reads as — what copying gives and searching looks through. It is one
+/// walk over the parsed answer, the same walk the window draws from, so an offset into this text is
+/// an offset into what is on screen.
+/// </summary>
+public sealed class FlatTextTests
+{
+    [Fact]
+    public void ParagraphsAreSeparatedByABlankLine()
+    {
+        Assert.Equal("one\n\ntwo", FlatText.Of("one\n\ntwo"));
+    }
+
+    [Fact]
+    public void CodeIsKeptVerbatim()
+    {
+        string flat = FlatText.Of("```c\nint f(void) { return 1; }\n```");
+        Assert.Equal("int f(void) { return 1; }", flat);
+    }
+
+    [Fact]
+    public void ATableIsTabsBetweenCellsAndNewlinesBetweenRows()
+    {
+        string flat = FlatText.Of("""
+            | a | b |
+            |---|---|
+            | 1 | 2 |
+            """);
+
+        Assert.Equal("a\tb\n1\t2", flat);
+    }
+
+    [Fact]
+    public void AListKeepsItsMarkers()
+    {
+        string flat = FlatText.Of("- one\n- two");
+        Assert.Equal("- one\n- two", flat);
+    }
+
+    [Fact]
+    public void ATaskListReadsAsBoxes()
+    {
+        string flat = FlatText.Of("- [x] done\n- [ ] todo");
+        Assert.Equal("☑ done\n☐ todo", flat);
+    }
+
+    [Fact]
+    public void EveryCharacterIsAccountedForByExactlyOneSinkCall()
+    {
+        // The invariant the whole selection design rests on: the counting sink and FlatText see the
+        // same length, because every character of the flat text comes through one sink call.
+        const string markdown = """
+            # Heading
+
+            A paragraph with **bold**, _italic_, `code`, ~~strike~~ and [a link](http://x).
+
+            - one
+              - nested
+            - [x] a task
+
+            > a quote
+
+            | h1 | h2 |
+            |----|----|
+            | c1 | c2 |
+
+            ```c
+            int f(void);
+            ```
+
+            ---
+            """;
+
+        var blocks = Markdown.Parse(markdown);
+        var counter = new CountingSink();
+        MarkdownWalk.Walk(blocks, counter);
+
+        Assert.Equal(FlatText.Of(blocks).Length, counter.Count);
+    }
+
+    private sealed class CountingSink : IMarkdownSink
+    {
+        public int Count { get; private set; }
+
+        public void Open(BlockKind kind, BlockInfo info)
+        {
+        }
+
+        public void Close(BlockKind kind)
+        {
+        }
+
+        public void Text(string text, SpanInfo style) => Count += text.Length;
+
+        public void Marker(string text) => Count += text.Length;
+
+        public void Glue(string text) => Count += text.Length;
     }
 }
 

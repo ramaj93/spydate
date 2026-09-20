@@ -57,7 +57,9 @@ internal static class MarkdownFlow
                 CodeBlock code => Code(code),
                 MdList list => Bulleted(list),
                 ParagraphBlock paragraph => Paragraph(paragraph.Spans),
-                _ => Paragraph([new TextSpan(string.Empty)]),
+                // A transitional shim: tables, quotes and rules are rendered as their plain text
+                // here. The list-owning renderer that replaces this file draws them properly.
+                _ => Paragraph([new TextSpan(FlatText.Of([block]))]),
             };
         }
     }
@@ -364,7 +366,8 @@ internal static class MarkdownFlow
 
         foreach (MdListItem item in block.Items)
         {
-            var paragraph = Paragraph(item.Spans);
+            var spans = item.Blocks is [ParagraphBlock first, ..] ? first.Spans : [new TextSpan(FlatText.Of(item.Blocks))];
+            var paragraph = Paragraph(spans);
             paragraph.Margin = new Thickness(0, 0, 0, 2);
             list.ListItems.Add(new System.Windows.Documents.ListItem(paragraph));
         }
@@ -378,32 +381,59 @@ internal static class MarkdownFlow
 
         foreach (var span in spans)
         {
-            switch (span)
-            {
-                case StrongSpan strong:
-                    paragraph.Inlines.Add(new Bold(new Run(strong.Text)));
-                    break;
-
-                case EmphasisSpan emphasis:
-                    paragraph.Inlines.Add(new Italic(new Run(emphasis.Text)));
-                    break;
-
-                case CodeSpan code:
-                    paragraph.Inlines.Add(new Run(code.Text)
-                    {
-                        FontFamily = Mono,
-                        Background = CodeBackground,
-                    });
-                    break;
-
-                case TextSpan text:
-                    AppendWithLineBreaks(paragraph.Inlines, text.Text);
-                    break;
-            }
+            AppendSpan(paragraph.Inlines, span);
         }
 
         return paragraph;
     }
+
+    /// <summary>Transitional: the nesting spans are flattened to their text with one level of style.</summary>
+    private static void AppendSpan(InlineCollection inlines, MarkdownSpan span)
+    {
+        switch (span)
+        {
+            case StrongSpan strong:
+                inlines.Add(new Bold(new Run(FlatSpans(strong.Children))));
+                break;
+
+            case EmphasisSpan emphasis:
+                inlines.Add(new Italic(new Run(FlatSpans(emphasis.Children))));
+                break;
+
+            case StrikeSpan strike:
+                inlines.Add(new Run(FlatSpans(strike.Children)) { TextDecorations = TextDecorations.Strikethrough });
+                break;
+
+            case LinkSpan link:
+                inlines.Add(new Run(FlatSpans(link.Children)) { Foreground = Resource("Accent") as Brush ?? Brushes.SteelBlue });
+                break;
+
+            case CodeSpan code:
+                inlines.Add(new Run(code.Text) { FontFamily = Mono, Background = CodeBackground });
+                break;
+
+            case LineBreakSpan:
+                inlines.Add(new LineBreak());
+                break;
+
+            case TextSpan text:
+                AppendWithLineBreaks(inlines, text.Text);
+                break;
+        }
+    }
+
+    private static string FlatSpans(IReadOnlyList<MarkdownSpan> spans) =>
+        string.Concat(spans.Select(s => s switch
+        {
+            TextSpan t => t.Text,
+            CodeSpan c => c.Text,
+            LineBreakSpan => "\n",
+            StrongSpan x => FlatSpans(x.Children),
+            EmphasisSpan x => FlatSpans(x.Children),
+            StrikeSpan x => FlatSpans(x.Children),
+            LinkSpan x => FlatSpans(x.Children),
+            _ => string.Empty,
+        }));
 
     /// <summary>A Run cannot hold a newline, so the breaks have to become real ones.</summary>
     private static void AppendWithLineBreaks(InlineCollection inlines, string text)
