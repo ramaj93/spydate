@@ -113,10 +113,23 @@ internal static class MarkdownFlow
     /// </summary>
     public static IEnumerable<Block> Bubble(string text)
     {
-        var block = new TextBlock
+        // A read-only TextBox, not a TextBlock: a TextBlock cannot be selected, so a question drawn
+        // in one could not be copied — and it is the reader's own words they most often want back.
+        // Borderless and transparent, it keeps the rounded bubble the Border draws around it while
+        // becoming selectable and Ctrl+C-copyable like the rest of the transcript.
+        var block = new TextBox
         {
             Text = text,
+            IsReadOnly = true,
+            IsReadOnlyCaretVisible = false,
             TextWrapping = TextWrapping.Wrap,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Padding = new Thickness(0),
+            // Override the chrome TextBox style so the bubble keeps its old size: no minimum height,
+            // and text from the top when a question wraps to more than one line.
+            MinHeight = 0,
+            VerticalContentAlignment = VerticalAlignment.Top,
             Foreground = Resource("Text.Primary") as Brush ?? Brushes.White,
         };
 

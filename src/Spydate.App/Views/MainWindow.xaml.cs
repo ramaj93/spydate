@@ -101,6 +101,7 @@ public partial class MainWindow : FluentWindow
     private void Redraw()
     {
         AssistantTranscript.Document.Blocks.Clear();
+        ClearMatchHighlight();
         StopStreaming();
         _anchor = null;
         _followTranscript = true;
@@ -557,6 +558,7 @@ public partial class MainWindow : FluentWindow
         if (e.Action == NotifyCollectionChangedAction.Reset)
         {
             AssistantTranscript.Document.Blocks.Clear();
+            ClearMatchHighlight();
             StopStreaming();
             _anchor = null;
             _followTranscript = true;
@@ -624,6 +626,7 @@ public partial class MainWindow : FluentWindow
         // only the one at the end. A transcript is a few hundred blocks and this happens once a
         // turn at most.
         AssistantTranscript.Document.Blocks.Clear();
+        ClearMatchHighlight();
         StopStreaming();
 
         foreach (var line in _assistant?.Transcript ?? [])
@@ -740,6 +743,7 @@ public partial class MainWindow : FluentWindow
 
     private void HideAssistantFind()
     {
+        ClearMatchHighlight();
         AssistantFindBar.Visibility = Visibility.Collapsed;
         AssistantFindStatus.Text = string.Empty;
         AssistantTranscript.Focus();
@@ -833,10 +837,41 @@ public partial class MainWindow : FluentWindow
         int start = matches[pick];
         var from = points[start];
         var to = points[Math.Min(start + query.Length, points.Length - 1)];
-        AssistantTranscript.Selection.Select(from, to);
+
+        // Paint the match's own background rather than lean on the selection: a read-only RichTextBox
+        // whose focus is in the find box draws its selection with the system's inactive brush, which
+        // is all but invisible on the dark panel. A background on the range shows whatever has focus.
+        ClearMatchHighlight();
+        var range = new System.Windows.Documents.TextRange(from, to);
+        try { range.ApplyPropertyValue(TextElement.BackgroundProperty, MatchBrush); } catch { }
+        _matchHighlight = range;
+
+        AssistantTranscript.Selection.Select(from, to);   // still selected, so Ctrl+C copies the hit
         BringMatchIntoView(from);
 
         AssistantFindStatus.Text = $"{pick + 1} of {matches.Count}";
+    }
+
+    /// <summary>The amber wash behind the current match. Frozen so it can be shared and is cheap to apply.</summary>
+    private static readonly Brush MatchBrush = FrozenBrush(Color.FromArgb(0x99, 0xF2, 0xC7, 0x44));
+
+    private static Brush FrozenBrush(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
+    /// <summary>The range painted for the current match, so it can be un-painted before the next one.</summary>
+    private System.Windows.Documents.TextRange? _matchHighlight;
+
+    private void ClearMatchHighlight()
+    {
+        if (_matchHighlight is { } range)
+        {
+            try { range.ApplyPropertyValue(TextElement.BackgroundProperty, null); } catch { }
+            _matchHighlight = null;
+        }
     }
 
     /// <summary>The transcript's text, and a pointer at the start of each character (plus an end one).</summary>
