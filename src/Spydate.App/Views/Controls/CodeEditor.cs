@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using ICSharpCode.AvalonEdit;
+using ICSharpCode.AvalonEdit.Search;
 using Spydate.App.Services;
 using Spydate.Core.Text;
 using Spydate.Decompiler.Managed;
@@ -125,6 +126,13 @@ public sealed class CodeEditor : TextEditor
         StyleLineNumberMargin();
 
         TextArea.LeftMargins.Insert(0, new BreakpointMargin(this));
+
+        // Ctrl+F find, F3 / Shift+F3 to cycle, Esc to close — AvalonEdit's own search panel. The dark,
+        // flush-right look is the SearchPanel style in Themes/Controls.xaml; only MarkerBrush is set
+        // here, because from a Style it fires MarkerBrushChangedCallback before the renderer exists and
+        // throws (see the note in Controls.xaml).
+        SearchPanel.Install(this).MarkerBrush = Resource<Brush>("Editor.Selection") ?? Brushes.SteelBlue;
+
         TextArea.Caret.PositionChanged += (_, _) => UpdateCaretContext();
         PreviewMouseRightButtonDown += MoveCaretToClick;
         PreviewMouseLeftButtonDown += NoteReferenceUnderPress;

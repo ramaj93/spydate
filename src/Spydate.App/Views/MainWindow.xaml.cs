@@ -693,6 +693,224 @@ public partial class MainWindow : FluentWindow
         return count;
     }
 
+    // ------------------------------------------------------------------
+    // Find in the conversation
+    //
+    // The transcript is a FlowDocument, not an AvalonEdit editor, so the editor's SearchPanel does
+    // not reach it. This is the equivalent: a find bar over the RichTextBox that selects and scrolls
+    // to each match. The document is walked into a flat string with a per-character pointer map on
+    // every search rather than cached, because the transcript is rebuilt whenever an answer streams,
+    // a tab switches or a template is scrubbed, and a cached pointer into an old document is invalid.
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Ctrl+F opens the find bar over the conversation, the way it opens the search panel over an
+    /// editor, and F3 / Shift+F3 cycle once it is open. On the panel rather than the transcript alone,
+    /// so it works whether focus is in the transcript, the question box or anywhere between.
+    /// </summary>
+    private void OnAssistantPanelKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            ShowAssistantFind();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F3 && AssistantFindBar.Visibility == Visibility.Visible)
+        {
+            FindInTranscript(forward: (Keyboard.Modifiers & ModifierKeys.Shift) == 0, fromMatchEnd: true);
+            e.Handled = true;
+        }
+    }
+
+    private void OnAssistantFindOpen(object sender, RoutedEventArgs e) => ShowAssistantFind();
+
+    private void ShowAssistantFind()
+    {
+        AssistantFindBar.Visibility = Visibility.Visible;
+
+        // Seed with the selected word, as an editor's search does, so "find this" is one gesture.
+        if (AssistantTranscript.Selection is { IsEmpty: false } sel && sel.Text.Length is > 0 and < 80)
+        {
+            AssistantFindBox.Text = sel.Text;
+        }
+
+        AssistantFindBox.Focus();
+        AssistantFindBox.SelectAll();
+    }
+
+    private void HideAssistantFind()
+    {
+        AssistantFindBar.Visibility = Visibility.Collapsed;
+        AssistantFindStatus.Text = string.Empty;
+        AssistantTranscript.Focus();
+    }
+
+    private void OnAssistantFindClose(object sender, RoutedEventArgs e) => HideAssistantFind();
+
+    private void OnAssistantFindNext(object sender, RoutedEventArgs e) => FindInTranscript(forward: true, fromMatchEnd: true);
+
+    private void OnAssistantFindPrevious(object sender, RoutedEventArgs e) => FindInTranscript(forward: false, fromMatchEnd: false);
+
+    private void OnAssistantFindOptionChanged(object sender, RoutedEventArgs e) => FindInTranscript(forward: true, fromMatchEnd: false);
+
+    private void OnAssistantFindTextChanged(object sender, TextChangedEventArgs e)
+        // As the query grows, search from where the current match starts rather than after it, so the
+        // selection settles on the first hit for what has been typed instead of skipping past it.
+        => FindInTranscript(forward: true, fromMatchEnd: false);
+
+    private void OnAssistantFindKeyDown(object sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Enter:
+                FindInTranscript(forward: (Keyboard.Modifiers & ModifierKeys.Shift) == 0, fromMatchEnd: true);
+                e.Handled = true;
+                break;
+            case Key.Escape:
+                HideAssistantFind();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Selects the next (or previous) match for what is in the find box, wrapping round the ends, and
+    /// writes "n of m" or "No matches". <paramref name="fromMatchEnd"/> is false while typing and when
+    /// options change (stay on the current hit) and true for an explicit next (move past it).
+    /// </summary>
+    private void FindInTranscript(bool forward, bool fromMatchEnd)
+    {
+        string query = AssistantFindBox.Text;
+        if (query.Length == 0)
+        {
+            AssistantFindStatus.Text = string.Empty;
+            return;
+        }
+
+        var (text, points) = IndexTranscript();
+        if (text.Length == 0)
+        {
+            AssistantFindStatus.Text = "No matches";
+            return;
+        }
+
+        var comparison = AssistantFindCase.IsChecked == true
+            ? StringComparison.Ordinal
+            : StringComparison.OrdinalIgnoreCase;
+
+        // Every match, for the "n of m" count and to pick the one after (or before) where we are.
+        var matches = new List<int>();
+        for (int i = text.IndexOf(query, comparison); i >= 0; i = text.IndexOf(query, i + 1, comparison))
+        {
+            matches.Add(i);
+        }
+
+        if (matches.Count == 0)
+        {
+            AssistantFindStatus.Text = "No matches";
+            return;
+        }
+
+        // Where we are now, as offsets into the flat text.
+        int selStart = OffsetOf(points, AssistantTranscript.Selection.Start);
+        int selEnd = OffsetOf(points, AssistantTranscript.Selection.End);
+
+        // Forward: the first match at or after here — past the current one on an explicit next, still
+        // on it while typing. Backward: the last match strictly before the current one. Both wrap.
+        int pick;
+        if (forward)
+        {
+            int threshold = fromMatchEnd ? selEnd : selStart;
+            pick = matches.FindIndex(m => m >= threshold);
+            if (pick < 0) { pick = 0; }
+        }
+        else
+        {
+            pick = FindLastIndex(matches, m => m < selStart);
+            if (pick < 0) { pick = matches.Count - 1; }
+        }
+
+        int start = matches[pick];
+        var from = points[start];
+        var to = points[Math.Min(start + query.Length, points.Length - 1)];
+        AssistantTranscript.Selection.Select(from, to);
+        BringMatchIntoView(from);
+
+        AssistantFindStatus.Text = $"{pick + 1} of {matches.Count}";
+    }
+
+    /// <summary>The transcript's text, and a pointer at the start of each character (plus an end one).</summary>
+    private (string Text, System.Windows.Documents.TextPointer[] Points) IndexTranscript()
+    {
+        var builder = new System.Text.StringBuilder();
+        var points = new List<System.Windows.Documents.TextPointer>();
+
+        var pointer = AssistantTranscript.Document.ContentStart;
+        while (pointer is not null)
+        {
+            if (pointer.GetPointerContext(LogicalDirection.Forward) == TextPointerContext.Text)
+            {
+                string run = pointer.GetTextInRun(LogicalDirection.Forward);
+                for (int i = 0; i < run.Length; i++)
+                {
+                    builder.Append(run[i]);
+                    points.Add(pointer.GetPositionAtOffset(i) ?? pointer);
+                }
+            }
+
+            pointer = pointer.GetNextContextPosition(LogicalDirection.Forward);
+        }
+
+        points.Add(AssistantTranscript.Document.ContentEnd);   // the end of the last character
+        return (builder.ToString(), points.ToArray());
+    }
+
+    /// <summary>The index in the point map of the first character at or after <paramref name="edge"/>.</summary>
+    private static int OffsetOf(System.Windows.Documents.TextPointer[] points, System.Windows.Documents.TextPointer edge)
+    {
+        for (int i = 0; i < points.Length; i++)
+        {
+            if (points[i].CompareTo(edge) >= 0)
+            {
+                return i;
+            }
+        }
+
+        return points.Length - 1;
+    }
+
+    private static int FindLastIndex(List<int> list, Predicate<int> match)
+    {
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            if (match(list[i]))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Scrolls a match into view without the follow logic reading it as the reader's own move.</summary>
+    private void BringMatchIntoView(System.Windows.Documents.TextPointer at)
+    {
+        _followTranscript = false;   // they are searching, not watching the end
+
+        Rect rect = at.GetCharacterRect(LogicalDirection.Forward);
+        if (rect.IsEmpty)
+        {
+            return;
+        }
+
+        double top = AssistantTranscript.VerticalOffset + rect.Top;
+        double viewport = AssistantTranscript.ViewportHeight;
+        if (rect.Top < 0 || rect.Bottom > viewport)
+        {
+            Scrolling(() => AssistantTranscript.ScrollToVerticalOffset(Math.Max(0, top - viewport / 3)));
+        }
+    }
+
     /// <summary>
     /// After layout, not during it. Blocks have just been added and the document has not been
     /// measured yet, so scrolling now scrolls to the end of what was there a moment ago — which for
