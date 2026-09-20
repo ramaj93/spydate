@@ -54,11 +54,11 @@ Warnings · ActiveDocument · history · Binary · AnalysisText · _analysisCts
 
 **Per file** — the `OpenedBinary` (image, analysis, decompiler, patches, breakpoints, annotations),
 the explorer tree, the document tabs and the active one, back/forward history, Xrefs, Warnings, the
-Patches list, analysis status and its cancellation, the import map, the module cache, **and its own
-debugger**.
+Patches list, analysis status and its cancellation, the import map, the module cache, **its own
+debugger, and its own assistant conversation**.
 
-**Per window** — the Output log, recent files, the status bar, the assistant, the tool-window
-layout, preferences.
+**Per window** — the Output log, recent files, the status bar, which provider and model the
+assistant talks through, the tool-window layout, preferences.
 
 The dividing question is not "is there one of these on screen" but "would two files disagree about
 it". There is one Output panel, but two files do not disagree about what was logged — it is a
@@ -96,8 +96,21 @@ constructor into the file that owns it, so `ShowWhereItStopped` uses *its own* a
 reaching for whatever is current. `ReloadDocuments()` narrows to the owning file at the same time;
 redrawing every document in every tab on each breakpoint toggle would be quadratic in open files.
 
-`AssistantViewModel` stays window-wide and reaches the active file's debugger through an
-indirection. It uses it in exactly one place, building `PanelDebugSettings`.
+### The assistant gets its own conversation per tab
+
+`AssistantViewModel` becomes per file too, born in `FileViewModel` with its `OpenedBinary` and that
+file's debugger, and dying in `Close`. It used to be one per window that reloaded itself from disk on
+every `WorkspaceService.CurrentChanged` — the same shape the debugger's deleted `CurrentChanged`
+handler had, and the same bug: switching tabs cleared the transcript and, if a turn was streaming,
+the `Progress` callbacks went on appending one tab's answer into what was now another tab's transcript
+and `Remember` saved it under the wrong binary's log. Two binaries disagree completely about what has
+been said about them, so the conversation belongs to the file. The one genuinely window-wide part —
+which provider, model and key to talk through — splits out into `AssistantProvider`, a shared
+singleton the per-file assistants read and hear change; that is what keeps a key entered once and lets
+Configure work with no file open. The window draws one transcript into one `RichTextBox`, so
+`MainWindow` re-points the transcript events at the active tab's assistant on switch
+(`WatchActiveAssistant`, beside `WatchActiveDebugger`) and redraws — resuming a mid-answer stream if
+the tab it lands on has one.
 
 ### A stop in a tab that is not forward
 

@@ -699,3 +699,36 @@ the line it draws is now "what the listing writes", which is a rule that can be 
 list that drifts. Where the two sides genuinely cannot agree — an encoding the formatter spells one
 way and the assembler builds another, like the redundant-REX `40 53` for `push rbx` — the dialog
 opens on the hex box, because the bytes are what is really there.
+
+## The assistant's conversation is its history, kept and replayed
+
+A conversation is restored by rebuilding the agent from the model's own message history — the tool
+calls it made and the results they returned included — not from a text recap of the display
+transcript. The old design kept only what was on screen and handed the next agent a few thousand
+characters of prose framed as "a record to read, not a memory". The theory was that a stored tool
+call cannot be replayed, so the durable half of a session is only the names and comments in the
+project. In practice that left the model re-reading functions it had read minutes earlier and
+re-reaching conclusions it had already reached, which is the opposite of what a memory is for and
+paid the tokens twice. So the history is now stored beside the transcript (in the same
+`%LOCALAPPDATA%\Spydate\chats` file, serialised with Microsoft.Extensions.AI's own type resolver so
+the polymorphic content parts carry their `$type`), and replayed on the next turn.
+
+What a restart genuinely takes away is the live process — a breakpoint reached, a module loaded, a
+register read are all gone — so a conversation restored from an earlier *run* gets one marker line at
+the join saying re-run and re-read before relying on debugger state. A switch between conversations
+within one run gets no such line, because nothing has restarted. The names and comments made then are
+durable and already in the project, which the system prompt points at; the marker rides on its own
+message so `Trim` sheds it with the exchange it introduces once the window fills.
+
+Two things bound the replay. It goes back as the tool blocks it is only when the provider kind
+matches the one that produced it and that provider is not DeepSeek (`AnalysisAgent.Replayable`):
+call ids and tool-message shapes are provider-specific, and DeepSeek demands the reasoning behind
+each call handed back with it — reasoning that rides on `ChatMessage.RawRepresentation`, which is not
+serialised, so a replayed DeepSeek tool call is a 400 on the first question. Otherwise the history is
+flattened to text (`ChatLog.Flatten`): every call and result becomes a plain user-role record
+message, which any provider takes. User-role and not assistant-role on purpose — the window already
+fights models that write tool-call markup as prose, and an assistant message full of "you called X
+and it got Y" would be teaching exactly that. And nothing new forgets: `Trim` still drops whole
+exchanges oldest-first at the start of a turn when the history no longer fits the configured budget,
+so a restored history too big for a since-lowered context window is cut before the first request,
+with the reader told how much left the assistant's memory.

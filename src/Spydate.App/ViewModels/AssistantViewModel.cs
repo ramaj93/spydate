@@ -1,10 +1,9 @@
 using System.Collections.ObjectModel;
-using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Extensions.AI;
 using Spydate.Agent;
 using Spydate.Agent.Providers;
-using Spydate.Agent.Secrets;
 using Spydate.Agent.Text;
 using Spydate.App.Services;
 using Spydate.Mcp;
@@ -60,6 +59,18 @@ public sealed partial class ChatSessionRow : ObservableObject
     /// <summary>What was said, as last stashed. The live one is in the panel's Transcript.</summary>
     public IReadOnlyList<ChatEntry> Entries { get; set; } = [];
 
+    /// <summary>
+    /// The model's own message history for this conversation, without the system message — the thing
+    /// the next agent is rebuilt from, so a restored chat is a memory and not just a transcript to
+    /// read. Empty for a conversation nothing has been asked in yet.
+    /// </summary>
+    public IReadOnlyList<ChatMessage> History { get; set; } = [];
+
+    /// <summary>Which provider and model produced <see cref="History"/> — the replay decision needs it.</summary>
+    public ProviderKind Provider { get; set; } = ProviderKind.Anthropic;
+
+    public string Model { get; set; } = string.Empty;
+
     [ObservableProperty]
     private string _title = "New chat";
 
@@ -80,39 +91,45 @@ public sealed partial class ChatSessionRow : ObservableObject
 /// </summary>
 public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 {
-    private readonly WorkspaceService _workspace;
-    private readonly ISecretStore _secrets;
-    private readonly IFileDialogService _dialogs;
-    private Views.ProviderSettingsWindow? _providerDialog;
+    private readonly OpenedBinary _binary;
+    private readonly DebuggerViewModel _debugger;
+    private readonly AssistantProvider _provider;
     private AssistantLine? _answer;
     private AnalysisAgent? _agent;
     private SessionStore? _session;
     private CancellationTokenSource? _turn;
 
-    /// <summary>The end of the conversation restored for this binary, or null when there was none.</summary>
-    private string? _earlier;
+    /// <summary>The conversation restored for this binary to carry into the next agent, or null.</summary>
+    private RestoredHistory? _restored;
 
     /// <summary>
-    /// The debugger the assistant's tools should drive: the one belonging to the file in front.
+    /// The assistant for one open file: its own conversation about its own binary, driving its own
+    /// debugger.
     ///
-    /// Asked for rather than held, because there is one per open file now and the assistant is one
-    /// per window. It is read when an agent is built, and an agent is built afresh for each binary,
-    /// so the tools always drive the file the conversation is about.
+    /// One per <see cref="FileViewModel"/> rather than one per window, the way the debugger is. Two
+    /// binaries disagree completely about what has been said about them, so a shared panel that
+    /// reloaded itself on every tab switch both lost the place and, mid-turn, wrote one tab's answer
+    /// under another tab's name. Which model to talk to is still a window-wide decision — that is
+    /// <see cref="AssistantProvider"/>, shared, and this hears it change through <c>Changed</c>.
     /// </summary>
-    public Func<DebuggerViewModel?> DebuggerFor { get; set; } = () => null;
-
-    public AssistantViewModel(WorkspaceService workspace, ISecretStore secrets, IFileDialogService dialogs)
+    public AssistantViewModel(OpenedBinary binary, DebuggerViewModel debugger, AssistantProvider provider)
     {
-        _workspace = workspace;
-        _secrets = secrets;
-        _dialogs = dialogs;
-        Settings = AgentSettings.Load();
+        _binary = binary;
+        _debugger = debugger;
+        _provider = provider;
+        LogPath = ChatLog.PathFor(binary.Image.Path ?? binary.Image.FileName);
 
-        // A different binary is a different conversation: the old one refers to addresses that mean
-        // nothing now, and carrying it over would have the model reason about the wrong program.
-        // What was said about the new one last time is read back in, which is not the same thing —
-        // see Recall.
-        workspace.CurrentChanged += (_, _) => OnBinaryChanged();
+        // A new provider or model knows nothing of the conversation so far, so the agent is dropped
+        // and rebuilt from the stored history on the next turn — flattened to text when the provider
+        // kind changed, since tool blocks are provider-shaped. What is on screen stays: it is a
+        // record, and changing model is no reason to destroy it.
+        provider.Changed += (_, _) =>
+        {
+            ResetAgent();
+            UpdateStatus();
+        };
+
+        Recall();
         UpdateStatus();
     }
 
@@ -145,7 +162,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         }
 
         ResetAgent();
-        LoadInto(newValue);
+        LoadInto(newValue, fromEarlierRun: false);
         Remember();
         UpdateStatus();
     }
@@ -159,10 +176,21 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             .ToList();
 
         row.Title = ChatLog.TitleOf(row.Entries);
+
+        // The model's own history, without the system message it rebuilds each time. Only when an
+        // agent exists: Remember runs after ResetAgent in NewSession and StartOver, and a null agent
+        // there must not overwrite a stored history with nothing. When it does exist, its provider
+        // and model are what the replay decision reads on the way back in.
+        if (_agent is { } agent)
+        {
+            row.History = agent.History.Skip(1).ToList();
+            row.Provider = Settings.Provider;
+            row.Model = Settings.Model;
+        }
     }
 
-    /// <summary>Puts a stored conversation on screen, and hands its end to the next agent built.</summary>
-    private void LoadInto(ChatSessionRow row)
+    /// <summary>Puts a stored conversation on screen, and holds its history for the next agent built.</summary>
+    private void LoadInto(ChatSessionRow row, bool fromEarlierRun)
     {
         Transcript.Clear();
 
@@ -171,7 +199,9 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             Transcript.Add(new AssistantLine(entry.Kind, entry.Text, entry.At));
         }
 
-        _earlier = ChatLog.Recap(row.Entries);
+        _restored = row.History.Count > 0
+            ? new RestoredHistory(row.History, row.Provider, fromEarlierRun)
+            : null;
     }
 
     private void Select(ChatSessionRow row)
@@ -204,12 +234,16 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
         ResetAgent();
         Select(blank);
-        LoadInto(blank);
+        LoadInto(blank, fromEarlierRun: false);
         Remember();
         UpdateStatus();
     }
 
-    public AgentSettings Settings { get; private set; }
+    /// <summary>Which provider, model and key to talk through — shared by every tab's conversation.</summary>
+    public AssistantProvider Provider => _provider;
+
+    /// <summary>The model settings, read through the shared provider.</summary>
+    private AgentSettings Settings => _provider.Settings;
 
     [ObservableProperty]
     private string _question = string.Empty;
@@ -240,7 +274,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     private const string Idle = "Idle";
 
     /// <summary>True once a provider, a model and a key are all present.</summary>
-    public bool IsConfigured => Settings.Model.Length > 0 && !string.IsNullOrEmpty(_secrets.Get(Settings.Provider.ToString()));
+    public bool IsConfigured => _provider.IsConfigured;
 
     [RelayCommand(CanExecute = nameof(CanAsk))]
     private async Task AskAsync()
@@ -375,11 +409,12 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     {
         ResetAgent();
         Transcript.Clear();
-        _earlier = null;       // nothing on screen to refer back to, so nothing to resolve against
+        _restored = null;      // nothing on screen to refer back to, so no history to carry forward
 
         if (ActiveSession is { } active)
         {
             active.Entries = [];
+            active.History = [];
             active.Title = "New chat";
         }
 
@@ -395,22 +430,8 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         _answer = null;
     }
 
-    private void OnBinaryChanged()
-    {
-        ResetAgent();
-        Transcript.Clear();
-
-        // Cleared before Recall rather than by it: Recall returns early when the new binary has no
-        // stored conversation, and the previous binary's would otherwise still be sitting here.
-        _earlier = null;
-        Recall();
-        UpdateStatus();
-    }
-
-    /// <summary>Where this binary's conversation is kept, or null when nothing is open.</summary>
-    private string? LogPath => _workspace.Current is { } binary
-        ? ChatLog.PathFor(binary.Image.Path ?? binary.Image.FileName)
-        : null;
+    /// <summary>Where this binary's conversation is kept. Fixed for the life of the file.</summary>
+    private string LogPath { get; }
 
     /// <summary>
     /// Writes the conversation out. Called at the end of every turn rather than on exit, because the
@@ -431,19 +452,27 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         ChatLog.SaveBook(path, new ChatBook
         {
             Sessions = Sessions
-                .Select(row => new ChatSession { Id = row.Id, At = row.At, Entries = row.Entries })
+                .Select(row => new ChatSession
+                {
+                    Id = row.Id,
+                    At = row.At,
+                    Entries = row.Entries,
+                    History = row.History,
+                    Provider = row.Provider,
+                    Model = row.Model,
+                })
                 .ToList(),
             Active = ActiveSession?.Id,
         });
     }
 
     /// <summary>
-    /// Reads back what was said about this binary before.
+    /// Reads back the conversations held about this binary, and puts the last one in front.
     ///
-    /// The model is not given any of it: a restored conversation is a record to read, not a memory
-    /// it can reason from, and the note says so. Quietly reloading it into the history would be the
-    /// worse choice — it would double the cost of every turn and let a stale conclusion from weeks
-    /// ago steer a fresh one, without anyone being told that is what happened.
+    /// The chosen one's message history is carried into the next agent through <see cref="_restored"/>,
+    /// so the model picks up where it left off — it does not re-read what it already read, and a
+    /// one-word "yes" the window was closed on still means something. What no longer fits the budget
+    /// is dropped oldest-first by <see cref="AnalysisAgent.Trim"/> on the first turn, not here.
     /// </summary>
     private void Recall()
     {
@@ -468,6 +497,9 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
                 Id = session.Id,
                 At = session.At,
                 Entries = session.Entries,
+                History = session.History,
+                Provider = session.Provider,
+                Model = session.Model,
                 Title = ChatLog.TitleOf(session.Entries),
             });
         }
@@ -482,66 +514,15 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         }
 
         Select(pick);
-        LoadInto(pick);
+        LoadInto(pick, fromEarlierRun: true);
 
-        // LoadInto has already handed the end of it to the next agent built for this binary, so that
-        // answering the question the last session ended on means something. See AnalysisAgent.Earlier.
-        //
-        // Nothing is added to say so. There was a line here explaining that the conversation had
-        // been restored and how much of it the assistant would be given, which was two sentences of
-        // apology for a discontinuity that no longer exists: it picks up from the end of this, and
-        // the names are in the project. A panel that explains itself every time it opens is one
-        // more thing to read past.
+        // LoadInto has handed the picked conversation's history to the next agent built for this
+        // binary, marked as being from an earlier run — so the agent is told, in one line, that any
+        // process it was debugging is gone and to re-read before relying on it, and otherwise carries
+        // straight on. See AnalysisAgent's restored-history marker. Nothing is added to the transcript
+        // to say so: it picks up from the end of what is already on screen, and the names are in the
+        // project. A panel that explains itself every time it opens is one more thing to read past.
     }
-
-    /// <summary>
-    /// Asks for a provider, a model and a key, and remembers all but the key in plain text.
-    ///
-    /// There are two ways in — the panel's button and the View menu — with one command behind both,
-    /// so this refuses to open a second copy and brings the open one forward instead. Modality is
-    /// not enough on its own to rely on: it turns on the owner being set, and two dialogs saving the
-    /// same settings is worth ruling out outright rather than by argument.
-    /// </summary>
-    [RelayCommand(CanExecute = nameof(CanConfigure))]
-    private void Configure()
-    {
-        if (_providerDialog is { } already)
-        {
-            already.Activate();
-            return;
-        }
-
-        var window = new Views.ProviderSettingsWindow(Settings, _secrets) { Owner = Application.Current?.MainWindow };
-        _providerDialog = window;
-        ConfigureCommand.NotifyCanExecuteChanged();
-
-        try
-        {
-            if (window.ShowDialog() != true)
-            {
-                return;
-            }
-
-            Settings = window.Result;
-            Settings.Save();
-
-            // The agent goes, because the new provider knows nothing of the old conversation. What
-            // is on screen stays: it is a record, and changing model is no reason to destroy it.
-            ResetAgent();
-            UpdateStatus();
-            // Which provider and model is on the line above the transcript, so this says only the
-            // part that is not: that what follows cannot see what came before it.
-            Add("note", "— fresh conversation from here —");
-        }
-        finally
-        {
-            _providerDialog = null;
-            ConfigureCommand.NotifyCanExecuteChanged();
-        }
-    }
-
-    /// <summary>False while the dialog is open, so both ways in show as unavailable.</summary>
-    private bool CanConfigure() => _providerDialog is null;
 
     private AnalysisAgent Agent()
     {
@@ -550,12 +531,12 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             return _agent;
         }
 
-        if (_workspace.Current is not { Analysis: not null } binary)
+        if (_binary is not { Analysis: not null } binary)
         {
-            throw new InvalidOperationException("Open a binary first — there is nothing to look at.");
+            throw new InvalidOperationException("This file cannot be analysed — there is nothing to look at.");
         }
 
-        string key = _secrets.Get(Settings.Provider.ToString())
+        string key = _provider.Key
                      ?? throw new InvalidOperationException($"No API key for {Settings.Provider}. Use Configure to add one.");
 
         if (Settings.Model.Length == 0)
@@ -606,13 +587,20 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         // The settings object points the store at the debugger for the current engine now, and re-points
         // it whenever the agent changes the engine through debug_config — so the tools always drive the
         // one the run configuration names, without a person opening the Debug Program dialog.
-        if (DebuggerFor() is { } debugger)
-        {
-            _session.DebugSettings = new PanelDebugSettings(debugger, _session);
-        }
+        //
+        // This file's own debugger, held from construction rather than asked for: the conversation
+        // is about this binary and drives the process this binary starts, whichever tab is forward.
+        _session.DebugSettings = new PanelDebugSettings(_debugger, _session);
         var options = McpOptions.Default with { AllowDebug = true };
 
-        _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, _earlier);
+        // Flattened to text when the provider kind differs from the one that produced the history —
+        // tool blocks and their call ids are provider-shaped, and DeepSeek needs a reasoning field
+        // that does not survive being saved. See AnalysisAgent.Replayable.
+        var restored = _restored is { } r
+            ? r with { Messages = AnalysisAgent.Replayable(provider.Kind, r.Provider) ? r.Messages : ChatLog.Flatten(r.Messages) }
+            : null;
+
+        _agent = new AnalysisAgent(ChatProviders.Create(provider, key), _session, options, provider, restored);
         return _agent;
     }
 
@@ -688,9 +676,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
     {
         Status = !IsConfigured
             ? "Not set up yet — Configure to choose a provider and add a key."
-            : _workspace.Current is null
-                ? $"{Settings.Provider} / {Settings.Model} — open a binary to begin."
-                : $"{Settings.Provider} / {Settings.Model}";
+            : $"{Settings.Provider} / {Settings.Model}";
 
         OnPropertyChanged(nameof(IsConfigured));
     }

@@ -12,6 +12,17 @@ using Spydate.Mcp.Tools;
 
 namespace Spydate.Agent;
 
+/// <summary>
+/// A conversation to rebuild an agent from: the model's own messages (without the system message),
+/// the provider kind that produced them, and whether they come from an earlier run of the program.
+///
+/// The provider kind drives <see cref="AnalysisAgent.Replayable"/> — whether the tool blocks can go
+/// back as they are or must be flattened to text. FromEarlierRun drives the one-line marker that
+/// warns any debugger state in them is stale; a switch between conversations within one run needs no
+/// such warning, because nothing has restarted.
+/// </summary>
+public sealed record RestoredHistory(IReadOnlyList<ChatMessage> Messages, ProviderKind Provider, bool FromEarlierRun);
+
 /// <summary>One turn's worth of what happened, so the panel can show working rather than a spinner.</summary>
 public sealed record AgentStep(string Kind, string Text)
 {
@@ -62,11 +73,11 @@ public sealed class AnalysisAgent : IDisposable
     /// </summary>
     private IProgress<AgentStep>? _progress;
 
-    /// <param name="earlier">
-    /// The end of a conversation somebody had about this binary before, or null. See
-    /// <see cref="Earlier"/> for why it is given at all and why it is only the end.
+    /// <param name="restored">
+    /// A conversation held about this binary before, to carry on from, or null for a fresh one. See
+    /// <see cref="RestoredHistory"/> and the marker note below for how it is treated.
     /// </param>
-    public AnalysisAgent(IChatClient client, SessionStore store, McpOptions options, ProviderSettings settings, string? earlier = null)
+    public AnalysisAgent(IChatClient client, SessionStore store, McpOptions options, ProviderSettings settings, RestoredHistory? restored = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(store);
@@ -104,14 +115,24 @@ public sealed class AnalysisAgent : IDisposable
         _options = new ChatOptions { Tools = ToolsFor(store, options).Cast<AITool>().ToList() };
         _history.Add(new ChatMessage(ChatRole.System, SystemPrompt));
 
-        // First in the conversation rather than folded into the instructions. The instructions are
-        // about this binary and never stop being true; this is about one particular afternoon and
-        // stops mattering as soon as the reference it exists to resolve has been resolved. Sat here
-        // it is the oldest exchange, so it is the first thing Trim sheds when the window fills —
-        // which is exactly the right order to shed things in, and needs no code to arrange.
-        if (earlier is { Length: > 0 } recap)
+        // The earlier conversation replayed as the model's own history, so it carries on rather than
+        // starting over — it does not re-read what it already read, and a "yes" the window was closed
+        // on still resolves. Run through Salvage first: a file written by a crash between two saves
+        // can hold a tool call with no result, and a provider rejects that half-pair outright.
+        //
+        // Then, only when it is from an earlier run of the program, one line at the join saying so —
+        // any debugged process is gone, so re-read before relying on it; the names are in the project;
+        // everything else above is the model's to build on. It sits after the restored messages and
+        // before the first new question, so Trim sheds it together with the exchange it introduces
+        // once the window fills, rather than being left behind describing nothing.
+        if (restored is { Messages.Count: > 0 } carried)
         {
-            _history.Add(new ChatMessage(ChatRole.User, Earlier(recap)));
+            _history.AddRange(Salvage(carried.Messages.ToList()));
+
+            if (carried.FromEarlierRun)
+            {
+                _history.Add(new ChatMessage(ChatRole.User, EarlierRunMarker));
+            }
         }
     }
 
@@ -669,32 +690,34 @@ public sealed class AnalysisAgent : IDisposable
         """;
 
     /// <summary>
-    /// The end of an earlier conversation, framed so it is not mistaken for what the user just said.
+    /// The one line added when a conversation is restored from an earlier run of the program, so the
+    /// model is not left reasoning from process state that has since evaporated.
     ///
-    /// The panel restores that conversation on screen, which makes it look continuous, and somebody
-    /// who closed the window on "want me to do that?" reasonably answers "yes". Without this the
-    /// model receives that "yes" with nothing before it and sixteen tools in hand, which is the
-    /// worst of both: it looks like it remembers and it does not.
-    ///
-    /// It is the end of the transcript and not the history, because the history is not kept — and
-    /// could not be replayed if it were, since a stored tool call has no result and a call without
-    /// its result is rejected outright. So it is a record to resolve a reference against, and says
-    /// so. The durable half of the earlier session is not in here at all: it is the names and
-    /// comments in the project, loaded and current, which the instructions point at instead.
-    ///
-    /// Everything about how to treat the record lives in the same message as the record, so that
-    /// when the window fills and this is dropped, the caveats about it go at the same moment rather
-    /// than being left behind describing something that is no longer there.
+    /// The history above it is real and replayed, tool results included, so the model carries on from
+    /// it rather than re-deriving it. What a restart takes away is the live process: a breakpoint it
+    /// reached, a module it had loaded, a register it had read are all gone, and only a marker at the
+    /// join tells it so. Names and comments made then are durable — they went into the project — and
+    /// the system prompt already points at list_annotations for those. It rides on a message of its
+    /// own at the join, so Trim sheds it with the exchange it introduces once the window fills.
     /// </summary>
-    private static string Earlier(string recap) => $"""
-        [Spydate: below is the end of an earlier conversation about this binary. It is on screen in
-        front of the person you are talking to; they did not type it now. Use it only to work out
-        what they mean when they refer back to it — "yes", "carry on", "the one you mentioned". You
-        did not run those tools in this conversation and you do not have what they returned, so do
-        not act on a plan from it as though you still held the evidence for it: say what you are
-        about to do, check it against the binary again, and only then do it. Anything that was named
-        or commented then is in the project now, and list_annotations shows it.]
+    private const string EarlierRunMarker =
+        "[Spydate: everything above is from an earlier run of Spydate, replayed so you can carry on "
+        + "from it. Any process you were debugging then has ended, so re-run and re-read before "
+        + "relying on debugger state — a breakpoint, a register, a loaded module. Names and comments "
+        + "you made are in the project (list_annotations). Everything else above is yours to build on.]";
 
-        {recap}
-        """;
+    /// <summary>
+    /// Whether a stored history can be replayed to the current provider as the tool blocks it is,
+    /// rather than flattened to text.
+    ///
+    /// Two things have to hold. The provider kind must match the one that produced it, because call
+    /// ids and tool-message shapes are provider-specific — a history OpenAI made is not handed to
+    /// Anthropic as tool blocks. And it must not be DeepSeek: DeepSeek demands the reasoning that
+    /// produced each tool call back alongside it, that reasoning rides on a message's
+    /// RawRepresentation, and RawRepresentation is not serialised — so a replayed DeepSeek tool call
+    /// is a 400 on the first question (see Salvage, and AgentTests). Flattened to text, any provider
+    /// takes it: it is then just a record of what was found, in words.
+    /// </summary>
+    public static bool Replayable(ProviderKind current, ProviderKind saved)
+        => current == saved && current != ProviderKind.DeepSeek;
 }

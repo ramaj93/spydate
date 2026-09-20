@@ -24,6 +24,12 @@ public partial class MainWindow : FluentWindow
     /// <summary>The active file's debugger, so it can be let go of when another tab comes forward.</summary>
     private ViewModels.DebuggerViewModel? _watched;
 
+    /// <summary>
+    /// The active file's assistant, whose transcript this window is drawing. Held so its events can
+    /// be let go of when another tab comes forward — each file has its own conversation now.
+    /// </summary>
+    private ViewModels.AssistantViewModel? _assistant;
+
     private void WatchActiveDebugger()
     {
         if (_watched is not null)
@@ -40,6 +46,84 @@ public partial class MainWindow : FluentWindow
         // Taken from the tab now in front rather than left as the last one's, so arriving on a tab
         // whose process is already up does not read as a run that has just begun.
         _wasDebugging = _watched?.IsDebugging ?? false;
+    }
+
+    /// <summary>
+    /// Draws the active tab's conversation, and moves the transcript events onto it.
+    ///
+    /// Each file has its own assistant now, so switching tabs is switching conversations. The window
+    /// draws one transcript into one RichTextBox, so the events that grow and finish a line have to
+    /// follow the tab in front — detached from the one leaving, attached to the one arriving — and
+    /// the document is rebuilt from the arriving conversation, resuming a mid-answer stream if there
+    /// is one. With no file open there is nothing to draw and nothing to listen to.
+    /// </summary>
+    private void WatchActiveAssistant()
+    {
+        if (_assistant is not null)
+        {
+            _assistant.Transcript.CollectionChanged -= OnAssistantTranscriptChanged;
+            _assistant.Advancing -= OnAssistantAdvancing;
+            _assistant.Discarding -= OnAssistantDiscarding;
+            _assistant.TurnFinished -= OnAssistantTurnFinished;
+        }
+
+        _assistant = _viewModel.Active?.Assistant;
+
+        if (_assistant is not null)
+        {
+            _assistant.Transcript.CollectionChanged += OnAssistantTranscriptChanged;
+
+            // Not CollectionChanged: an answer streams into a line that is already in the list, so
+            // the transcript grows without the collection changing at all.
+            _assistant.Advancing += OnAssistantAdvancing;
+            _assistant.Discarding += OnAssistantDiscarding;
+            _assistant.TurnFinished += OnAssistantTurnFinished;
+        }
+
+        Redraw();
+    }
+
+    private void OnAssistantTranscriptChanged(object? sender, NotifyCollectionChangedEventArgs e) => OnTranscriptChanged(e);
+
+    private void OnAssistantAdvancing(object? sender, EventArgs e) => RedrawStreamingLine();
+
+    private void OnAssistantDiscarding(object? sender, EventArgs e) => DiscardStreamingLine();
+
+    private void OnAssistantTurnFinished(object? sender, EventArgs e) => FinishStreamingLine();
+
+    /// <summary>
+    /// Rebuilds the whole transcript for the tab that just came forward.
+    ///
+    /// The last line goes through <see cref="Append"/>, which starts a streaming paragraph for it
+    /// when a turn is still running — so returning to a tab whose answer is mid-flight picks the
+    /// stream back up rather than freezing it half-drawn. The rest are laid out finished.
+    /// </summary>
+    private void Redraw()
+    {
+        AssistantTranscript.Document.Blocks.Clear();
+        StopStreaming();
+        _anchor = null;
+        _followTranscript = true;
+
+        if (_assistant is not { } assistant)
+        {
+            return;
+        }
+
+        for (int i = 0; i < assistant.Transcript.Count; i++)
+        {
+            var line = assistant.Transcript[i];
+            if (i == assistant.Transcript.Count - 1)
+            {
+                Append(line);
+            }
+            else
+            {
+                Add(Blocks(line), line);
+            }
+        }
+
+        ScrollAssistantToEnd();
     }
 
     /// <summary>
@@ -82,17 +166,11 @@ public partial class MainWindow : FluentWindow
             if (e.PropertyName == nameof(ViewModels.MainViewModel.Active))
             {
                 WatchActiveDebugger();
+                WatchActiveAssistant();
             }
         };
         WatchActiveDebugger();
-
-        _viewModel.Assistant.Transcript.CollectionChanged += (_, e) => OnTranscriptChanged(e);
-
-        // Not CollectionChanged: an answer streams into a line that is already in the list, so the
-        // transcript grows without the collection changing at all.
-        _viewModel.Assistant.Advancing += (_, _) => RedrawStreamingLine();
-        _viewModel.Assistant.Discarding += (_, _) => DiscardStreamingLine();
-        _viewModel.Assistant.TurnFinished += (_, _) => FinishStreamingLine();
+        WatchActiveAssistant();
 
         // A restored conversation is loaded while the Output tab is the one showing, so the
         // transcript has never been laid out and there is nothing to scroll. Without this it opens
@@ -225,7 +303,7 @@ public partial class MainWindow : FluentWindow
             return;
         }
 
-        if (DataContext is ViewModels.MainViewModel { Assistant: { } assistant } && assistant.AskCommand.CanExecute(null))
+        if (DataContext is ViewModels.MainViewModel { Active.Assistant: { } assistant } && assistant.AskCommand.CanExecute(null))
         {
             assistant.AskCommand.Execute(null);
         }
@@ -509,12 +587,12 @@ public partial class MainWindow : FluentWindow
     /// </summary>
     private void RedrawStreamingLine()
     {
-        if (_streamingParagraph is not { } paragraph || _viewModel.Assistant.Transcript.Count == 0)
+        if (_streamingParagraph is not { } paragraph || _assistant is not { } assistant || assistant.Transcript.Count == 0)
         {
             return;
         }
 
-        string text = _viewModel.Assistant.Transcript[^1].Text;
+        string text = assistant.Transcript[^1].Text;
 
         // Normally the line has only grown. If it has somehow shrunk, the paragraph is built again
         // rather than having the difference appended to text that is no longer underneath it. The
@@ -548,7 +626,7 @@ public partial class MainWindow : FluentWindow
         AssistantTranscript.Document.Blocks.Clear();
         StopStreaming();
 
-        foreach (var line in _viewModel.Assistant.Transcript)
+        foreach (var line in _assistant?.Transcript ?? [])
         {
             Add(Blocks(line), line);
         }
@@ -559,12 +637,12 @@ public partial class MainWindow : FluentWindow
     /// <summary>The turn ended: draw the answer properly, now that all of it is known.</summary>
     private void FinishStreamingLine()
     {
-        if (_streamingParagraph is not { } paragraph || _viewModel.Assistant.Transcript.Count == 0)
+        if (_streamingParagraph is not { } paragraph || _assistant is not { } assistant || assistant.Transcript.Count == 0)
         {
             return;
         }
 
-        var line = _viewModel.Assistant.Transcript[^1];
+        var line = assistant.Transcript[^1];
         AssistantTranscript.Document.Blocks.Remove(paragraph);
         StopStreaming();
         Append(line);
@@ -575,7 +653,7 @@ public partial class MainWindow : FluentWindow
     {
         // An answer still arriving is one paragraph of plain text, kept so the tokens that follow
         // can be added to it rather than replacing it.
-        if (line.Kind == "assistant" && _viewModel.Assistant.IsBusy)
+        if (line.Kind == "assistant" && _assistant?.IsBusy == true)
         {
             var paragraph = MarkdownFlow.PlainParagraph(line.Text);
             AssistantTranscript.Document.Blocks.Add(paragraph);

@@ -30,7 +30,9 @@ public partial class App : Application
         // DPAPI, so an assistant API key is encrypted to this Windows account rather than sitting in
         // a file anyone with the disk can read.
         sc.AddSingleton<ISecretStore>(_ => new DpapiSecretStore());
-        sc.AddSingleton<AssistantViewModel>();
+        // Which provider and model the assistant talks through is window-wide; the conversation is
+        // per file, built inside each FileViewModel.
+        sc.AddSingleton<AssistantProvider>();
         sc.AddSingleton<MainViewModel>();
         sc.AddSingleton<MainWindow>();
         _services = sc.BuildServiceProvider();

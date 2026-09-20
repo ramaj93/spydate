@@ -52,9 +52,10 @@ public interface IShell
 /// eleven things it cleared to get back to an empty window are exactly the things that belong to a
 /// file rather than to the window, and every one of them is here.
 ///
-/// The debugger is not among them yet. It is still one per window, passed in, because making it one
-/// per file is what lets two binaries be debugged at once and that is a change of behaviour rather
-/// than a change of shape — see docs/MULTI-FILE.md, phase 3.
+/// The debugger and the assistant are among them too: each file has its own, born here and dying in
+/// <c>Close</c>. The debugger being per file is what lets two binaries be debugged at once; the
+/// assistant being per file is what lets a conversation survive a tab switch and drive the process
+/// its own binary starts. Only which model to talk to stays window-wide — see docs/MULTI-FILE.md.
 /// </summary>
 public sealed partial class FileViewModel : ObservableObject
 {
@@ -68,6 +69,9 @@ public sealed partial class FileViewModel : ObservableObject
     private readonly DebuggerViewModel _debugger;
 
     public DebuggerViewModel Debugger => _debugger;
+
+    /// <summary>This file's assistant conversation. The panel binds to whichever tab is in front.</summary>
+    public AssistantViewModel Assistant { get; }
 
     /// <summary>A process of this file's is up, so its tab can say so.</summary>
     public bool IsDebugging => _debugger.IsDebugging;
@@ -97,7 +101,7 @@ public sealed partial class FileViewModel : ObservableObject
     /// <summary>Modules a symbol-server PDB fetch has already been started for, so it runs once each.</summary>
     private readonly HashSet<string> _symbolsWarmed = new(StringComparer.OrdinalIgnoreCase);
 
-    public FileViewModel(OpenedBinary binary, IFileDialogService dialogs, IShell shell)
+    public FileViewModel(OpenedBinary binary, IFileDialogService dialogs, IShell shell, AssistantProvider assistantProvider)
     {
         Binary = binary;
         _dialogs = dialogs;
@@ -107,6 +111,12 @@ public sealed partial class FileViewModel : ObservableObject
         // showed one file; now it is what lets two binaries be under a debugger at once, each with
         // its own breakpoints, its own stack and its own process.
         _debugger = new DebuggerViewModel(binary, dialogs);
+
+        // The assistant is per file for the same reason: two binaries disagree completely about what
+        // has been said about them, and a shared panel reloaded itself on every tab switch — losing
+        // the place, and mid-turn writing one tab's answer under another's name. It drives this
+        // file's debugger, and talks through the window-wide provider, which it hears change.
+        Assistant = new AssistantViewModel(binary, _debugger, assistantProvider);
         _debugger.BreakpointsChanged += (_, _) => ReloadDocuments();
         _debugger.StoppedAt += (_, va) => ShowWhereItStopped(va);
         _debugger.NavigateRequested += (_, va) => ShowWhereItStopped(va);
@@ -295,6 +305,7 @@ public sealed partial class FileViewModel : ObservableObject
     public void Close()
     {
         _debugger.Dispose();
+        Assistant.Dispose();
         _analysisCts?.Cancel();
         Documents.Clear();
         _modules.Clear();

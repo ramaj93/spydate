@@ -193,7 +193,7 @@
                     <MenuItem Header="_Preferences…" Command="{Binding EditPreferencesCommand}"
                               ToolTip="Settings that belong to you rather than to a binary" />
                     <Separator />
-                    <MenuItem Header="Assistant _provider…" Command="{Binding Assistant.ConfigureCommand}"
+                    <MenuItem Header="Assistant _provider…" Command="{Binding AssistantProvider.ConfigureCommand}"
                               ToolTip="Choose a provider and model for the Assistant panel, and add an API key" />
                 </MenuItem>
                 <MenuItem Header="_Help">
@@ -1053,7 +1053,7 @@
                                 </DataGrid>
                             </TabItem>
                             <TabItem Header="Assistant">
-                                <Grid DataContext="{Binding Assistant}">
+                                <Grid DataContext="{Binding Active.Assistant}">
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="*" />
@@ -1063,7 +1063,7 @@
                                     <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
                                         <DockPanel>
                                             <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Configure"
-                                                    Command="{Binding ConfigureCommand}"
+                                                    Command="{Binding DataContext.AssistantProvider.ConfigureCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                                     ToolTip="Choose a provider and add an API key"
                                                     AutomationProperties.Name="Configure assistant" />
                                             <Button DockPanel.Dock="Right" Style="{StaticResource ToolButton}" Content="Clear"

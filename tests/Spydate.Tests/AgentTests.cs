@@ -129,62 +129,184 @@ public class AgentTests
         Assert.Equal(ChatRole.System, agent.History[0].Role);
     }
 
+    /// <summary>An earlier conversation's tool call and its result, the way a restart hands them back.</summary>
+    private static RestoredHistory Earlier(bool fromEarlierRun = true, ProviderKind provider = ProviderKind.Anthropic) =>
+        new(
+            new List<ChatMessage>
+            {
+                new(ChatRole.User, "what is sub_140001000"),
+                new(ChatRole.Assistant, new List<AIContent>
+                {
+                    new FunctionCallContent("call-1", "read_function", new Dictionary<string, object?> { ["target"] = "sub_140001000" }),
+                }),
+                new(ChatRole.Tool, new List<AIContent> { new FunctionResultContent("call-1", "it builds a CRC table") }),
+                new(ChatRole.Assistant, "sub_140001000 builds a CRC table. Want me to name it?"),
+            },
+            provider,
+            fromEarlierRun);
+
     [Fact]
-    public async Task AnEarlierConversationIsTheFirstMessageAndNotPartOfTheInstructions()
+    public async Task ARestoredConversationIsReplayedAsHistoryWithItsToolCallsAndResults()
     {
-        var fake = new ScriptedChatClient(turn1: null, turn2: "hello");
+        var fake = new ScriptedChatClient(turn1: null, turn2: "done");
         using var agent = new AnalysisAgent(
             fake, new SessionStore(), McpOptions.Default,
             new ProviderSettings { Model = "test" },
-            earlier: "assistant: sub_140001000 looks like a CRC table build. Want me to name it?");
+            restored: Earlier());
 
         await agent.AskAsync("yes");
 
-        // The instructions stay the instructions: they are about the binary and never stop being
-        // true, and a record of one afternoon does not belong in them.
+        // The instructions stay first and are freshly built, not carried from the file.
         Assert.Equal(ChatRole.System, agent.History[0].Role);
-        Assert.DoesNotContain("CRC table build", agent.History[0].Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("CRC table", agent.History[0].Text, StringComparison.Ordinal);
 
-        Assert.Equal(ChatRole.User, agent.History[1].Role);
-        Assert.Contains("CRC table build", agent.History[1].Text, StringComparison.Ordinal);
+        // The earlier turn is really there — the call it made and the result it got, not a paraphrase
+        // of them — so the model builds on what it found rather than finding it again.
+        Assert.Contains(
+            agent.History.SelectMany(m => m.Contents).OfType<FunctionCallContent>(),
+            c => c.Name == "read_function");
+        Assert.Contains(
+            agent.History.SelectMany(m => m.Contents).OfType<FunctionResultContent>(),
+            r => r.Result?.ToString() == "it builds a CRC table");
 
-        // And it says what it is, so "yes" is answered against a record rather than a request.
-        Assert.Contains("they did not type it now", agent.History[1].Text, StringComparison.Ordinal);
-
-        // The question itself is still its own message, after it.
-        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "yes");
+        // One marker after the restored messages says the run they came from has ended, then the new
+        // question follows it.
+        int marker = IndexOf(agent.History, m => m.Text.Contains("earlier run of Spydate", StringComparison.Ordinal));
+        int asked = IndexOf(agent.History, m => m.Role == ChatRole.User && m.Text == "yes");
+        Assert.True(marker >= 0 && asked > marker, "the marker should sit between the restored history and the new question");
     }
 
     [Fact]
-    public async Task TheEarlierConversationIsTheFirstThingDroppedWhenTheWindowFills()
+    public async Task AWithinRunSwitchReplaysTheHistoryWithoutTheEarlierRunMarker()
     {
-        // The budget is measured off the real system prompt rather than guessed at, so that editing
-        // that prompt cannot quietly turn this into a test of nothing: too small and the record
-        // never survives the first question, too large and nothing is ever dropped at all.
+        var fake = new ScriptedChatClient(turn1: null, turn2: "done");
+        using var agent = new AnalysisAgent(
+            fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test" },
+            restored: Earlier(fromEarlierRun: false));
+
+        await agent.AskAsync("yes");
+
+        // Nothing has restarted, so the debugger-state warning would be a lie; the history is still
+        // all there.
+        Assert.DoesNotContain(agent.History, m => m.Text.Contains("earlier run of Spydate", StringComparison.Ordinal));
+        Assert.Contains(
+            agent.History.SelectMany(m => m.Contents).OfType<FunctionResultContent>(),
+            r => r.Result?.ToString() == "it builds a CRC table");
+    }
+
+    [Fact]
+    public async Task ARestoredConversationIsTrimmedOldestFirstBeforeTheFirstQuestion()
+    {
+        // Budget measured off the real system prompt plus one big restored message, so exactly the
+        // oldest exchange has to go once the new question pushes it over — and editing the prompt
+        // cannot quietly turn this into a test of nothing.
         using var probe = new AnalysisAgent(
             new ScriptedChatClient(turn1: null, turn2: "x"), new SessionStore(), McpOptions.Default,
             new ProviderSettings { Model = "test" });
 
-        string record = "assistant: shall I carry on with the hot list? " + new string('.', 4000);
-        int room = probe.History[0].Text.Length + record.Length + 1000;
+        var history = new List<ChatMessage>
+        {
+            new(ChatRole.User, "the old one " + new string('.', 4000)),
+            new(ChatRole.Assistant, "answered the old one"),
+            new(ChatRole.User, "the recent one"),
+            new(ChatRole.Assistant, "answered the recent one"),
+        };
 
-        var fake = new ScriptedChatClient(turn1: null, turn2: "hello");
+        // Room for the system prompt and everything but the 4000-character oldest message, so the
+        // new question pushes the total over and exactly that oldest exchange has to be shed.
+        int room = probe.History[0].Text.Length + 2000;
+
+        var fake = new ScriptedChatClient(turn1: null, turn2: "done");
         using var agent = new AnalysisAgent(
             fake, new SessionStore(), McpOptions.Default,
             new ProviderSettings { Model = "test", MaxContextTokens = room / 4 },
-            earlier: record);
+            restored: new RestoredHistory(history, ProviderKind.Anthropic, FromEarlierRun: false));
 
-        await agent.AskAsync("yes");
-        Assert.Contains(agent.History, m => m.Text.Contains("hot list", StringComparison.Ordinal));
+        var progress = new CollectingProgress();
+        await agent.AskAsync("carry on", progress);
 
-        // Enough to go over, and still smaller than the record, so exactly one thing has to go.
-        await agent.AskAsync("and the next one " + new string('.', 1000));
-
-        // Shed before any of the real conversation, which is the right order: by now the reference
-        // it existed to resolve has been resolved, and the exchange after it has not.
-        Assert.DoesNotContain(agent.History, m => m.Text.Contains("hot list", StringComparison.Ordinal));
+        // The oldest exchange is shed; the recent one and the new question stay.
+        Assert.DoesNotContain(agent.History, m => m.Text.StartsWith("the old one", StringComparison.Ordinal));
+        Assert.Contains(agent.History, m => m.Text == "the recent one");
+        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "carry on");
         Assert.Equal(ChatRole.System, agent.History[0].Role);
-        Assert.Contains(agent.History, m => m.Role == ChatRole.User && m.Text == "yes");
+
+        // And the reader is told memory was shed, not left to wonder.
+        Assert.Contains(progress.Notes, n => n.Contains("left the assistant's memory", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(ProviderKind.Anthropic, ProviderKind.Anthropic, true)]
+    [InlineData(ProviderKind.OpenAi, ProviderKind.Anthropic, false)]
+    [InlineData(ProviderKind.DeepSeek, ProviderKind.DeepSeek, false)]
+    public void AHistoryReplaysAsBlocksOnlyForTheSameProviderAndNeverDeepSeek(ProviderKind current, ProviderKind saved, bool expected)
+        => Assert.Equal(expected, AnalysisAgent.Replayable(current, saved));
+
+    [Fact]
+    public void AFlattenedHistoryHasNoToolBlocksAndItsRecordsAreUserMessages()
+    {
+        var flat = ChatLog.Flatten(Earlier().Messages);
+
+        Assert.DoesNotContain(flat.SelectMany(m => m.Contents), c => c is FunctionCallContent or FunctionResultContent);
+
+        // The tool result survives as readable text, in a user-role record — never an assistant
+        // message, which would teach the model to write tool calls as prose.
+        var record = Assert.Single(flat, m => m.Text.Contains("it builds a CRC table", StringComparison.Ordinal));
+        Assert.Equal(ChatRole.User, record.Role);
+        Assert.Contains("read_function", record.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARestoredHalfPairIsDroppedRatherThanSent()
+    {
+        // A file written by a crash between two saves can hold a call with no result. A provider
+        // rejects that outright, so it must not reach one.
+        var history = new List<ChatMessage>
+        {
+            new(ChatRole.Assistant, new List<AIContent>
+            {
+                new FunctionCallContent("orphan", "read_function", new Dictionary<string, object?> { ["target"] = "x" }),
+            }),
+        };
+
+        var fake = new ScriptedChatClient(turn1: null, turn2: "done");
+        using var agent = new AnalysisAgent(
+            fake, new SessionStore(), McpOptions.Default,
+            new ProviderSettings { Model = "test" },
+            restored: new RestoredHistory(history, ProviderKind.Anthropic, FromEarlierRun: false));
+
+        await agent.AskAsync("hello");
+
+        Assert.DoesNotContain(
+            agent.History.SelectMany(m => m.Contents).OfType<FunctionCallContent>(),
+            c => c.CallId == "orphan");
+    }
+
+    private static int IndexOf(IReadOnlyList<ChatMessage> history, Func<ChatMessage, bool> match)
+    {
+        for (int i = 0; i < history.Count; i++)
+        {
+            if (match(history[i]))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private sealed class CollectingProgress : IProgress<AgentStep>
+    {
+        public List<string> Notes { get; } = new();
+
+        public void Report(AgentStep value)
+        {
+            if (value.Kind == "note")
+            {
+                Notes.Add(value.Text);
+            }
+        }
     }
 
     /// <summary>

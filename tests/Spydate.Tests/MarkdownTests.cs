@@ -1,4 +1,6 @@
+using Microsoft.Extensions.AI;
 using Spydate.Agent;
+using Spydate.Agent.Providers;
 using Spydate.Agent.Text;
 
 namespace Spydate.Tests;
@@ -164,6 +166,123 @@ public sealed class MarkdownTests
 public sealed class ChatLogTests
 {
     [Fact]
+    public void AHistoryRoundTripsWithItsToolCallAndResult()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"spydate-chat-{Guid.NewGuid():N}");
+        try
+        {
+            string path = ChatLog.PathFor(@"C:\bin\game.exe", directory);
+            var history = new List<ChatMessage>
+            {
+                new(ChatRole.User, "what is sub_401000"),
+                new(ChatRole.Assistant, new List<AIContent>
+                {
+                    new FunctionCallContent("call-1", "read_function", new Dictionary<string, object?> { ["target"] = "sub_401000" }),
+                }),
+                new(ChatRole.Tool, new List<AIContent> { new FunctionResultContent("call-1", "it builds a CRC table") }),
+                new(ChatRole.Assistant, "sub_401000 builds a CRC table."),
+            };
+
+            ChatLog.SaveBook(path, new ChatBook
+            {
+                Sessions = [new ChatSession
+                {
+                    Entries = [new ChatEntry { Kind = "you", Text = "what is sub_401000" }],
+                    History = history,
+                    Provider = ProviderKind.OpenAi,
+                    Model = "gpt-5",
+                }],
+            });
+
+            var session = Assert.Single(ChatLog.LoadBook(path).Sessions);
+
+            Assert.Equal(ProviderKind.OpenAi, session.Provider);
+            Assert.Equal("gpt-5", session.Model);
+
+            // The call is back with its name and its argument.
+            var call = Assert.Single(session.History.SelectMany(m => m.Contents).OfType<FunctionCallContent>());
+            Assert.Equal("read_function", call.Name);
+            Assert.Equal("sub_401000", call.Arguments?["target"]?.ToString());
+
+            // The result is back as a string, not a JsonElement — so it re-sends unquoted and its
+            // length is measured right.
+            var result = Assert.Single(session.History.SelectMany(m => m.Contents).OfType<FunctionResultContent>());
+            Assert.IsType<string>(result.Result);
+            Assert.Equal("it builds a CRC table", result.Result);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ALegacyFileWithNoHistoryLoadsWithOneBuiltFromItsEntries()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"spydate-chat-{Guid.NewGuid():N}");
+        try
+        {
+            // A file from before histories were kept: a bare array of display entries.
+            string path = ChatLog.PathFor(@"C:\bin\old.exe", directory);
+            ChatLog.Save(path, new[]
+            {
+                new ChatEntry { Kind = "you", Text = "what runs first" },
+                new ChatEntry { Kind = "tool", Text = "read_function(target=start)" },
+                new ChatEntry { Kind = "assistant", Text = "the entry point" },
+            });
+
+            var session = Assert.Single(ChatLog.LoadBook(path).Sessions);
+
+            // A text-only history, tool line dropped, so the model still has something to carry on
+            // from even though the old format never stored its own messages.
+            Assert.Collection(
+                session.History,
+                m => { Assert.Equal(ChatRole.User, m.Role); Assert.Equal("what runs first", m.Text); },
+                m => { Assert.Equal(ChatRole.Assistant, m.Role); Assert.Equal("the entry point", m.Text); });
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void AnEmptyHistoryRoundTrips()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"spydate-chat-{Guid.NewGuid():N}");
+        try
+        {
+            string path = ChatLog.PathFor(@"C:\bin\blank.exe", directory);
+            ChatLog.SaveBook(path, new ChatBook
+            {
+                Sessions = [new ChatSession
+                {
+                    Entries = [new ChatEntry { Kind = "you", Text = "hi" }],
+                    History = [],
+                }],
+            });
+
+            var session = Assert.Single(ChatLog.LoadBook(path).Sessions);
+
+            // No history stored, so it is rebuilt from the one entry rather than coming back null.
+            Assert.Single(session.History);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void AConversationComesBackAsItWasWritten()
     {
         string directory = Path.Combine(Path.GetTempPath(), $"spydate-chat-{Guid.NewGuid():N}");
@@ -192,87 +311,34 @@ public sealed class ChatLogTests
         }
     }
 
-    /// <summary>
-    /// The scenario the recap exists for: the window is closed on a question, and reopened, and the
-    /// answer is one word. Without the end of the conversation "yes" means nothing, and a model
-    /// holding tools that write to the project must not be left guessing what it just agreed to.
-    /// </summary>
     [Fact]
-    public void TheQuestionAConversationEndedOnSurvivesIntoTheRecap()
+    public void HistoryFromKeepsProseAndDropsToolAndNoteLines()
     {
-        var entries = new List<ChatEntry>();
-        for (int i = 0; i < 40; i++)
-        {
-            entries.Add(new ChatEntry { Kind = "you", Text = $"question {i}" });
-            entries.Add(new ChatEntry { Kind = "assistant", Text = $"answer {i}" });
-        }
-
-        entries.Add(new ChatEntry { Kind = "tool", Text = "read_function(target=sub_140001000)" });
-        entries.Add(new ChatEntry { Kind = "assistant", Text = "sub_140001000 looks like a CRC table build. Want me to name it?" });
-
-        string recap = ChatLog.Recap(entries);
-
-        Assert.Contains("Want me to name it?", recap, StringComparison.Ordinal);
-        Assert.EndsWith("Want me to name it?", recap, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheRecapKeepsTheEndAndDropsTheBeginning()
-    {
-        var entries = new List<ChatEntry>();
-        for (int i = 0; i < 200; i++)
-        {
-            entries.Add(new ChatEntry { Kind = "assistant", Text = $"line {i} " + new string('x', 100) });
-        }
-
-        string recap = ChatLog.Recap(entries, maxChars: 1000);
-
-        Assert.True(recap.Length <= 1000, $"recap was {recap.Length} characters");
-        Assert.Contains("line 199", recap, StringComparison.Ordinal);
-        Assert.DoesNotContain("line 0 ", recap, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ToolLinesAreLeftOutOfTheRecap()
-    {
-        // A stored tool line is the call and never the result, so it would spend the budget on a
-        // question whose answer is missing.
+        // A legacy log holds only the display transcript. What can be replayed is what a person said
+        // and what the assistant said; a tool line is the call with never its result, and a note is
+        // the panel talking to itself — neither has a place in the model's history.
         var entries = new List<ChatEntry>
         {
-            new() { Kind = "tool", Text = "find_strings(pattern=licence)" },
+            new() { Kind = "you", Text = "what is at 0x401000" },
+            new() { Kind = "tool", Text = "read_function(target=sub_401000)" },
             new() { Kind = "note", Text = "— an aside from the panel —" },
-            new() { Kind = "assistant", Text = "nothing obvious there" },
+            new() { Kind = "assistant", Text = "a file opener" },
         };
 
-        string recap = ChatLog.Recap(entries);
+        var history = ChatLog.HistoryFrom(entries);
 
-        Assert.DoesNotContain("find_strings", recap, StringComparison.Ordinal);
-        Assert.DoesNotContain("an aside", recap, StringComparison.Ordinal);
-        Assert.Contains("nothing obvious there", recap, StringComparison.Ordinal);
+        Assert.Collection(
+            history,
+            m => { Assert.Equal(ChatRole.User, m.Role); Assert.Equal("what is at 0x401000", m.Text); },
+            m => { Assert.Equal(ChatRole.Assistant, m.Role); Assert.Equal("a file opener", m.Text); });
     }
 
     [Fact]
-    public void OneEnormousLastMessageIsKeptByItsEnd()
+    public void HistoryFromStripsLeakedToolCallMarkupAndDropsWhatIsOnlyMarkup()
     {
-        var entries = new List<ChatEntry>
-        {
-            new() { Kind = "assistant", Text = new string('y', 5000) + " so shall I go ahead?" },
-        };
-
-        string recap = ChatLog.Recap(entries, maxChars: 200);
-
-        Assert.True(recap.Length <= 200, $"recap was {recap.Length} characters");
-        Assert.EndsWith("so shall I go ahead?", recap, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// Taken from a real log. The model failed to make the call and printed its own template as
-    /// text, the panel stored what it displayed, and the recap would otherwise hand that back as an
-    /// example of how an assistant answers here.
-    /// </summary>
-    [Fact]
-    public void LeakedToolCallMarkupDoesNotGetFedBack()
-    {
+        // Taken from a real log: the model failed to make the call and printed its own template as
+        // text, and the panel stored what it displayed. A history built from that keeps the prose
+        // and drops the template — a message that was nothing but template drops out entirely.
         var entries = new List<ChatEntry>
         {
             new()
@@ -283,11 +349,13 @@ public sealed class ChatLogTests
                        + "<｜｜DSML｜｜invoke name=\"read_function\">\n"
                        + "</｜｜DSML｜｜tool_calls>",
             },
+            new() { Kind = "assistant", Text = "<invoke name=\"xrefs\"><parameter name=\"target\">x</parameter></invoke>" },
         };
 
-        string recap = ChatLog.Recap(entries);
+        var history = ChatLog.HistoryFrom(entries);
 
-        Assert.Equal("assistant: I want to verify the GString candidate.", recap);
+        var kept = Assert.Single(history);
+        Assert.Equal("I want to verify the GString candidate.", kept.Text);
     }
 
     [Theory]
@@ -299,22 +367,10 @@ public sealed class ChatLogTests
         => Assert.Equal(expected, ChatLog.WithoutMarkup(text));
 
     [Fact]
-    public void AMessageThatIsNothingButMarkupIsDroppedFromTheRecapEntirely()
+    public void HistoryFromKeepsNothingWorthlessAndNeverThrowsOnEmpty()
     {
-        var entries = new List<ChatEntry>
-        {
-            new() { Kind = "assistant", Text = "the real answer" },
-            new() { Kind = "assistant", Text = "<invoke name=\"xrefs\"><parameter name=\"target\">x</parameter></invoke>" },
-        };
-
-        Assert.Equal("assistant: the real answer", ChatLog.Recap(entries));
-    }
-
-    [Fact]
-    public void NothingWorthKeepingGivesAnEmptyRecap()
-    {
-        Assert.Equal(string.Empty, ChatLog.Recap([]));
-        Assert.Equal(string.Empty, ChatLog.Recap([new ChatEntry { Kind = "tool", Text = "xrefs(target=x)" }]));
+        Assert.Empty(ChatLog.HistoryFrom([]));
+        Assert.Empty(ChatLog.HistoryFrom([new ChatEntry { Kind = "tool", Text = "xrefs(target=x)" }]));
     }
 
     [Fact]

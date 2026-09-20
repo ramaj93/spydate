@@ -40,13 +40,12 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     /// </summary>
     private Preferences _preferences = PreferenceStore.Load();
 
-    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantViewModel assistant)
+    public MainViewModel(IFileDialogService dialogs, WorkspaceService workspace, AssistantProvider assistantProvider)
     {
         _dialogs = dialogs;
         workspace.ProjectChangedOnDisk += OnProjectChangedOnDisk;
         _workspace = workspace;
-        Assistant = assistant;
-        assistant.DebuggerFor = () => Active?.Debugger;
+        AssistantProvider = assistantProvider;
         Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
         Log("Spydate started. Open a PE file to begin (Ctrl+O).");
@@ -107,10 +106,11 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     // ------------------------------------------------------------------
 
     /// <summary>
-    /// The assistant panel. It works on the same analysis the documents do, so a name it gives
-    /// appears in them at once rather than after a reload.
+    /// Which provider, model and key the assistant talks through — shared by every tab. The
+    /// conversation itself belongs to the file in front, at <c>Active.Assistant</c>; this is only
+    /// the window-wide part, so Configure works with no file open.
     /// </summary>
-    public AssistantViewModel Assistant { get; }
+    public AssistantProvider AssistantProvider { get; }
 
     /// <summary>The open files, in the order their tabs appear.</summary>
     public ObservableCollection<FileViewModel> Files { get; } = new();
@@ -175,7 +175,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             return open;
         }
 
-        var tab = new FileViewModel(module, _dialogs, this);
+        var tab = new FileViewModel(module, _dialogs, this, AssistantProvider);
         Listen(tab);
         Files.Add(tab);
         Active = tab;
@@ -282,7 +282,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             var replacing = destination == OpenDestination.ReplaceCurrent ? Active : null;
             int at = replacing is null ? Files.Count : Files.IndexOf(replacing);
 
-            var file = new FileViewModel(opened, _dialogs, this);
+            var file = new FileViewModel(opened, _dialogs, this, AssistantProvider);
             Listen(file);
             Files.Insert(at, file);
 
