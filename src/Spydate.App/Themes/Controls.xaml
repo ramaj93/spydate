@@ -808,6 +808,23 @@
         </Setter>
     </Style>
 
+    <!-- A transcript line owns no selection of its own: the ChatTranscript draws one selection across
+         the whole conversation, so the container must not highlight, hover or take focus and steal
+         the click that starts a drag. It stretches so a line uses the panel's width and wraps. -->
+    <Style x:Key="ChatLineItem" TargetType="{x:Type ListBoxItem}">
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="MinHeight" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                    <ContentPresenter SnapsToDevicePixels="True" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- ================================================================ -->
     <!-- Tabs                                                              -->
     <!-- ================================================================ -->

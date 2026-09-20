@@ -12,10 +12,12 @@ using Spydate.Mcp.Session;
 namespace Spydate.App.ViewModels;
 
 /// <summary>
-/// One line in the transcript. Kind drives how it is coloured, nothing more.
+/// One line in the transcript. Kind drives how it is drawn, nothing more.
 ///
 /// The text is observable rather than fixed because an answer arrives in pieces: the line is added
 /// as soon as the first token lands and grows from there, instead of appearing whole at the end.
+/// While it is arriving it is drawn as the plain text it is so far; once it settles it is parsed as
+/// Markdown, which is why <see cref="IsStreaming"/> is observable too.
 /// </summary>
 public sealed partial class AssistantLine : ObservableObject
 {
@@ -31,13 +33,35 @@ public sealed partial class AssistantLine : ObservableObject
     public DateTimeOffset At { get; }
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FlatText))]
     private string _text;
+
+    /// <summary>An assistant line still being written: drawn as plain text, not yet parsed.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FlatText))]
+    private bool _isStreaming;
 
     public bool IsYou => Kind == "you";
 
     public bool IsTool => Kind == "tool";
 
     public bool IsProblem => Kind == "problem";
+
+    /// <summary>
+    /// The plain text this line reads as — what selecting and copying it gives, and what a search
+    /// looks through. For a settled answer that is its Markdown flattened by the same walk the view
+    /// draws from, so an offset into it is an offset into what is on screen; for everything else it
+    /// is the text itself. Cached, because a search reads it once per line per keystroke.
+    /// </summary>
+    public string FlatText => _flat ??= Kind == "assistant" && !IsStreaming
+        ? Spydate.Agent.Text.FlatText.Of(Text)
+        : Text;
+
+    private string? _flat;
+
+    partial void OnTextChanged(string value) => _flat = null;
+
+    partial void OnIsStreamingChanged(bool value) => _flat = null;
 
     public void Append(string more) => Text += more;
 }
@@ -313,7 +337,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
             // Progress marshals to the UI thread because it was created here; the steps it reports
             // arrive from wherever the loop happens to be running.
-            _answer = null;
+            Settle();
             var progress = new Progress<AgentStep>(step =>
             {
                 switch (step.Kind)
@@ -321,12 +345,12 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
                     case "tool":
                         // A tool call ends the paragraph: whatever it says next is about what the
                         // tool returned, so it belongs in a line of its own.
-                        _answer = null;
+                        Settle();
                         Add("tool", step.Text);
                         break;
 
                     case "note":
-                        _answer = null;
+                        Settle();
                         Add("note", step.Text);
                         break;
 
@@ -339,11 +363,11 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
                     case "delta" when _answer is not null:
                         _answer.Append(step.Text);
-                        Advanced();
                         break;
 
                     case "delta":
                         _answer = Add("assistant", step.Text);
+                        _answer.IsStreaming = true;
                         break;
                 }
             });
@@ -373,16 +397,19 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             Activity = Idle;
             _turn?.Dispose();
             _turn = null;
-            _answer = null;
+
+            // Settling the answer flips it from streamed plain text to parsed Markdown: the view is
+            // bound to the line, so this is what redraws the finished answer with its headings,
+            // tables and code.
+            Settle();
             AskCommand.NotifyCanExecuteChanged();
             NewSessionCommand.NotifyCanExecuteChanged();
             UpdateStatus();
 
-            // Before the turn is drawn and before it is written down, so neither shows a template.
-            // The recovery scrubs too, but only when it fires - and it cannot fire for a turn that
-            // was never streamed, or for one where the markup was not the last thing said.
+            // Before it is written down, so a leaked template is not saved. The recovery scrubs too,
+            // but only when it fires - and it cannot fire for a turn that was never streamed, or for
+            // one where the markup was not the last thing said.
             Scrub();
-            TurnFinished?.Invoke(this, EventArgs.Empty);
             Remember();
         }
     }
@@ -427,6 +454,20 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         _agent?.Dispose();
         _agent = null;
         _session = null;
+        Settle();
+    }
+
+    /// <summary>
+    /// The answer stops arriving: it is no longer the streaming line, so it is parsed as Markdown
+    /// the next time it is drawn or read. Safe when nothing is streaming.
+    /// </summary>
+    private void Settle()
+    {
+        if (_answer is { } line)
+        {
+            line.IsStreaming = false;
+        }
+
         _answer = null;
     }
 
@@ -644,24 +685,14 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
 
         if (changed)
         {
-            _answer = null;
-            Discarding?.Invoke(this, EventArgs.Empty);
+            Settle();
         }
     }
 
-    /// <summary>Raised whenever the line being written into grows, so the view can redraw it.</summary>
-    public event EventHandler? Advancing;
-
-    /// <summary>Raised when the line being written is thrown away, so the view can un-draw it.</summary>
-    public event EventHandler? Discarding;
-
-    /// <summary>Raised when a turn ends, so the view can render the finished answer properly.</summary>
-    public event EventHandler? TurnFinished;
-
     /// <summary>
-    /// A whole new line. This does not raise <see cref="Advancing"/>: that means "the last line got
-    /// longer", and the collection changing is signal enough on its own. Raising both had the view
-    /// draw every added line twice, once for each.
+    /// A whole new line. The transcript is a bound list now, so adding to it, a line's text growing
+    /// and a line's streaming flag flipping each raise their own change and the view follows them —
+    /// there are no separate redraw events to keep in step any more.
     /// </summary>
     private AssistantLine Add(string kind, string text)
     {
@@ -669,8 +700,6 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
         Transcript.Add(line);
         return line;
     }
-
-    private void Advanced() => Advancing?.Invoke(this, EventArgs.Empty);
 
     private void UpdateStatus()
     {

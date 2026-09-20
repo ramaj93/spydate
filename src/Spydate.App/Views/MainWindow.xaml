@@ -6,6 +6,8 @@
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:vm="clr-namespace:Spydate.App.ViewModels"
                  xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+                 xmlns:controls="clr-namespace:Spydate.App.Views.Controls"
+                 xmlns:chat="clr-namespace:Spydate.App.Views.Chat"
                  mc:Ignorable="d"
                  d:DataContext="{d:DesignInstance Type=vm:MainViewModel}"
                  Title="{Binding WindowTitle}"
@@ -1109,36 +1111,29 @@
                                         </DockPanel>
                                     </Border>
 
-                                    <!-- A read-only RichTextBox rather than a list of TextBlocks: an
-                                         answer needs headings, code and lists to be readable, and
-                                         needs to be selectable so it can be copied out. It also
-                                         scrolls by content rather than by item, which a transcript
-                                         of wrapped variable-height paragraphs never did reliably. -->
-                                    <RichTextBox Grid.Row="1" x:Name="AssistantTranscript"
-                                                 IsReadOnly="True" IsReadOnlyCaretVisible="False"
-                                                 IsDocumentEnabled="True"
-                                                 IsInactiveSelectionHighlightEnabled="True"
-                                                 BorderThickness="0" Background="Transparent"
-                                                 VerticalScrollBarVisibility="Auto"
-                                                 HorizontalScrollBarVisibility="Disabled"
-                                                 Foreground="{DynamicResource Text.Primary}"
-                                                 AutomationProperties.Name="Assistant transcript">
-                                        <!-- Zero, and the inset lives on the blocks instead - see
-                                             MarkdownFlow.Inset. A RichTextBox manages its own
-                                             document's padding, so a value set here is not reliably
-                                             what you get; the gap on the right went missing exactly
-                                             because it was asked for in this one place. A margin on
-                                             a Block is the author's and nothing overrides it. -->
-                                        <RichTextBox.Document>
-                                            <FlowDocument PagePadding="0" />
-                                        </RichTextBox.Document>
-                                    </RichTextBox>
+                                    <!-- A virtualized list, one item per line, rather than one document
+                                         for the whole conversation: a long chat then costs only what is
+                                         on screen, a tab switch is an ItemsSource change instead of a
+                                         rebuild, and a search reads the lines rather than walking a
+                                         FlowDocument. It carries its own selection across messages (in
+                                         the lines' flat text, so an unrealized line copies too) — see
+                                         ChatTranscript. -->
+                                    <controls:ChatTranscript Grid.Row="1" x:Name="AssistantTranscript"
+                                                             ItemsSource="{Binding Transcript}"
+                                                             ItemContainerStyle="{StaticResource ChatLineItem}"
+                                                             AutomationProperties.Name="Assistant transcript">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <chat:ChatMessage Line="{Binding}" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </controls:ChatTranscript>
 
                                     <!-- Find in the conversation. Overlaid on the transcript's top-right
                                          like the editor's search panel, and styled the same way, so the
                                          chat is searchable the way the code is. Ctrl+F shows it, Enter /
-                                         Shift+Enter cycle, Esc closes; the logic is in the code-behind
-                                         because the transcript is a FlowDocument drawn there, not bound. -->
+                                         Shift+Enter cycle, Esc closes; the search itself is the
+                                         transcript's, over the lines' flat text. -->
                                     <Border x:Name="AssistantFindBar" Grid.Row="1" Visibility="Collapsed"
                                             HorizontalAlignment="Right" VerticalAlignment="Top"
                                             Background="{DynamicResource Chrome.Background}"
