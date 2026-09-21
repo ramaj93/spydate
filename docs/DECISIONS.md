@@ -787,3 +787,13 @@ on the exact type, so the subclass received none of the theme's `ListBox` style 
 WPF's stock white box with a border and near-white text drawn onto it. It now asks for that style
 by key (`SetResourceReference(StyleProperty, typeof(ListBox))`). The lesson is the one AGENTS.md
 §5.1 already states: a screenshot is evidence only if somebody looks at it.
+
+The highlight repaints only when told to. Its first version repainted on `LayoutUpdated`, which
+fires for every layout pass anywhere in the window — so with a selection on screen, every streamed
+token and every opening menu re-walked every realized block's text through `GetCharacterRect`, and
+the whole application slowed to match (menus took visibly longer to drop; a drag during streaming
+felt dead). Now a line's `ChatMessage` bubbles a `Rendered` routed event when it rebuilds or grows,
+the list drops its cached rectangles and repaints on that, on scroll, on resize and on the selection
+moving, and on nothing else; a slice's rectangles are cached by block and range, so a drag recomputes
+only the line its moving end is on. Measured on a 600-line conversation with real mouse input: the
+File menu drops as fast with a selection as without.

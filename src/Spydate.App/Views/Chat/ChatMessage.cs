@@ -39,8 +39,17 @@ public sealed class ChatMessage : Decorator
     /// <summary>The flat-text slices this line drew, in order. Empty until it is rendered.</summary>
     internal IReadOnlyList<TextSlice> Slices => _slices;
 
-    /// <summary>Raised when the drawn content changed, so the transcript can refresh its highlight.</summary>
-    internal event EventHandler? Rendered;
+    /// <summary>
+    /// Bubbles up when the drawn content changed — a line rebuilt, or a streaming one grown — so the
+    /// transcript can drop the rectangles it cached for this line's blocks and repaint its highlight.
+    /// A routed event rather than a CLR one because the list never holds a reference to a message;
+    /// containers come and go with virtualization, and a bubbling event finds the list regardless.
+    /// </summary>
+    public static readonly RoutedEvent RenderedEvent = EventManager.RegisterRoutedEvent(
+        "Rendered",
+        RoutingStrategy.Bubble,
+        typeof(RoutedEventHandler),
+        typeof(ChatMessage));
 
     private static void OnLineChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -103,7 +112,7 @@ public sealed class ChatMessage : Decorator
             _ => Plain(_line.Text, mono: false, Res("Text.Primary")),
         };
 
-        Rendered?.Invoke(this, EventArgs.Empty);
+        RaiseEvent(new RoutedEventArgs(RenderedEvent, this));
     }
 
     private void Grow()
@@ -123,7 +132,7 @@ public sealed class ChatMessage : Decorator
         ChatText.Append(_stream, text[_drawn..]);
         _drawn = text.Length;
         _slices = [new TextSlice(_stream, 0, text.Length)];
-        Rendered?.Invoke(this, EventArgs.Empty);
+        RaiseEvent(new RoutedEventArgs(RenderedEvent, this));
     }
 
     private FrameworkElement Answer(string text)

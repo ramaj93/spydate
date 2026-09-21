@@ -70,6 +70,12 @@ public sealed class ChatTranscript : ListBox
         // The selection dims when the list loses focus, so it has to be repainted when that changes.
         IsKeyboardFocusWithinChanged += (_, _) => Redraw();
 
+        // A line re-rendering (rebuilt, or grown by a streamed token) moves the blocks the highlight
+        // sits on, and so does the list changing width; both drop the cached rectangles. Nothing else
+        // repaints the highlight uninvited.
+        AddHandler(ChatMessage.RenderedEvent, new RoutedEventHandler((_, _) => { ForgetRects(); Redraw(); }));
+        SizeChanged += (_, _) => { ForgetRects(); Redraw(); };
+
         // The scroll surface and its adorner layer are not there yet when the template is applied;
         // they are once the control is in a shown window, so wire them then too.
         Loaded += (_, _) =>
@@ -291,6 +297,7 @@ public sealed class ChatTranscript : ListBox
         if (PlaceAt(point) is { } place)
         {
             _caret = place;
+            _follow = false;   // dragging over the text is reading it, not watching the end
             Redraw();
         }
 
@@ -634,7 +641,7 @@ public sealed class ChatTranscript : ListBox
     /// </summary>
     private void RevealMatch()
     {
-        if (_scroll is null || _surface is null || MatchRects().FirstOrDefault() is not { IsEmpty: false } rect)
+        if (_scroll is null || _surface is null || FirstMatchRect() is not { } rect)
         {
             return;
         }
@@ -688,32 +695,58 @@ public sealed class ChatTranscript : ListBox
 
     // ---- what the adorner draws ---------------------------------------------
 
-    internal IEnumerable<Rect> HighlightRects()
+    /// <summary>
+    /// Paints the selection and the match over the realized lines. One pass: the realized set is
+    /// read once, and a slice's rectangles come from <see cref="_rects"/>, keyed on the block and the
+    /// range inside it, so a drag that moves one end of the selection recomputes the line that end
+    /// is on and reuses everything else. Scrolling changes only the transform, never the cached
+    /// rectangles; a line re-rendering or the list resizing empties the cache.
+    /// </summary>
+    internal void Paint(DrawingContext context, Brush selection, Brush match)
     {
-        var selection = HasSelection ? Ordered() : ((TextPlace, TextPlace)?)null;
-        foreach (var (message, index, _) in Realized())
+        if (!Drawing || _surface is null)
         {
-            foreach (var slice in message.Slices)
+            return;
+        }
+
+        var realized = Realized();
+
+        if (HasSelection)
+        {
+            var (start, end) = Ordered();
+            foreach (var (message, index, _) in realized)
             {
-                if (selection is { } sel)
+                if (index < start.Line || index > end.Line)
                 {
-                    foreach (var rect in RectsFor(slice, index, sel.Item1, sel.Item2))
+                    continue;
+                }
+
+                foreach (var slice in message.Slices)
+                {
+                    foreach (var rect in RectsFor(slice, index, start, end))
                     {
-                        yield return rect;
+                        context.DrawRectangle(selection, null, rect);
                     }
                 }
             }
         }
+
+        foreach (var rect in MatchRects(realized))
+        {
+            context.DrawRectangle(match, null, rect);
+        }
     }
 
-    internal IEnumerable<Rect> MatchRects()
+    private IEnumerable<Rect> MatchRects(List<(ChatMessage Message, int Index, Rect Bounds)> realized)
     {
         if (_match is not { } match)
         {
             yield break;
         }
 
-        foreach (var (message, index, _) in Realized())
+        var start = new TextPlace(match.Line, match.Start);
+        var end = new TextPlace(match.Line, match.End);
+        foreach (var (message, index, _) in realized)
         {
             if (index != match.Line)
             {
@@ -722,8 +755,7 @@ public sealed class ChatTranscript : ListBox
 
             foreach (var slice in message.Slices)
             {
-                foreach (var rect in RectsFor(slice, index,
-                    new TextPlace(match.Line, match.Start), new TextPlace(match.Line, match.End)))
+                foreach (var rect in RectsFor(slice, index, start, end))
                 {
                     yield return rect;
                 }
@@ -731,6 +763,20 @@ public sealed class ChatTranscript : ListBox
         }
     }
 
+    private Rect? FirstMatchRect()
+    {
+        foreach (var rect in MatchRects(Realized()))
+        {
+            return rect;
+        }
+
+        return null;
+    }
+
+    /// <summary>A slice's highlight rectangles in its block's own coordinates, by block and range.</summary>
+    private readonly Dictionary<(TextBlock Block, int From, int To), Rect[]> _rects = new();
+
+    private void ForgetRects() => _rects.Clear();
 
     private IEnumerable<Rect> RectsFor(TextSlice slice, int lineIndex, TextPlace start, TextPlace end)
     {
@@ -743,20 +789,27 @@ public sealed class ChatTranscript : ListBox
         int to = lineIndex == end.Line ? end.Offset : slice.End;
         from = Math.Max(from, slice.Base);
         to = Math.Min(to, slice.End);
-        if (to <= from)
+        if (to <= from || !slice.Block.IsDescendantOf(_surface))
         {
             yield break;
         }
 
-        if (!slice.Block.IsDescendantOf(_surface))
+        var key = (slice.Block, from - slice.Base, to - slice.Base);
+        if (!_rects.TryGetValue(key, out var local))
         {
-            yield break;
+            if (_rects.Count > 4096)
+            {
+                _rects.Clear();
+            }
+
+            local = ChatText.LineRects(slice.Block, key.Item2, key.Item3).ToArray();
+            _rects[key] = local;
         }
 
         // The adorner draws in its adorned element's coordinate space, which is the surface's, so the
         // block's rectangles go through the surface, of which the block is a descendant.
         var toSurface = slice.Block.TransformToAncestor(_surface);
-        foreach (var rect in ChatText.LineRects(slice.Block, from - slice.Base, to - slice.Base))
+        foreach (var rect in local)
         {
             yield return toSurface.TransformBounds(rect);
         }
