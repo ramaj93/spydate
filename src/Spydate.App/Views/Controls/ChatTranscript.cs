@@ -28,8 +28,6 @@ namespace Spydate.App.Views.Controls;
 public sealed class ChatTranscript : ListBox
 {
     private ScrollViewer? _scroll;
-    private ScrollContentPresenter? _surface;
-    private Panel? _panel;
     private SelectionAdorner? _adorner;
 
     private INotifyCollectionChanged? _watching;
@@ -69,6 +67,8 @@ public sealed class ChatTranscript : ListBox
 
         // The selection dims when the list loses focus, so it has to be repainted when that changes.
         IsKeyboardFocusWithinChanged += (_, _) => Redraw();
+        LostMouseCapture += (_, _) => StopSelecting();
+        Unloaded += (_, _) => DetachAdorner();
 
         // A line re-rendering (rebuilt, or grown by a streamed token) moves the blocks the highlight
         // sits on, and so does the list changing width; both drop the cached rectangles. Nothing else
@@ -80,7 +80,7 @@ public sealed class ChatTranscript : ListBox
         // they are once the control is in a shown window, so wire them then too.
         Loaded += (_, _) =>
         {
-            EnsureSurface();
+            EnsureScroll();
             EnsureAdorner();
         };
     }
@@ -96,7 +96,38 @@ public sealed class ChatTranscript : ListBox
     /// <summary>Whether the selection adorner was found and attached. For the panel probe to check.</summary>
     public bool HasAdorner => _adorner is not null;
 
+    /// <summary>
+    /// The boxes the selection would be painted as, in the surface's coordinates. For the panel
+    /// probe: a selection over a fenced listing must cover every one of its lines, and whether it
+    /// skips one is a question about numbers that a screenshot only invites guessing at.
+    /// </summary>
+    public IReadOnlyList<Rect> HighlightBoxes()
+    {
+        var boxes = new List<Rect>();
+        if (!HasSelection)
+        {
+            return boxes;
+        }
+
+        var (start, end) = Ordered();
+        foreach (var (message, index, _) in Realized())
+        {
+            if (index < start.Line || index > end.Line)
+            {
+                continue;
+            }
+
+            foreach (var slice in message.Slices)
+            {
+                boxes.AddRange(RectsFor(slice, index, start, end));
+            }
+        }
+
+        return boxes;
+    }
+
     private int Count => Items.Count;
+
 
     protected override void OnItemsSourceChanged(System.Collections.IEnumerable oldValue, System.Collections.IEnumerable newValue)
     {
@@ -124,35 +155,62 @@ public sealed class ChatTranscript : ListBox
     public override void OnApplyTemplate()
     {
         base.OnApplyTemplate();
-        EnsureSurface();
+        EnsureScroll();
         EnsureAdorner();
     }
 
-    /// <summary>Finds the scroller and its content surface once they exist, and wires the scroll handler.</summary>
-    private void EnsureSurface()
+    /// <summary>
+    /// Finds the scroller, its content surface and the items panel, and wires the scroll handler.
+    ///
+    /// Each is re-found whenever what is held is no longer part of this control. Switching the
+    /// bottom pane away from the Assistant and back rebuilds the tab's content, so the scroller,
+    /// the surface and the panel are all new objects — and holding the old ones was the bug that
+    /// made dragging a selection stop working "randomly": nothing realized was a descendant of the
+    /// dead surface any more, so the list believed no line was on screen and a press selected
+    /// nothing. The highlight and the follow-the-tail scrolling died with it, for the same reason.
+    /// </summary>
+    private void EnsureScroll()
     {
+        if (_scroll is not null && !_scroll.IsDescendantOf(this))
+        {
+            _scroll.ScrollChanged -= OnScrolled;
+            _scroll = null;
+            ForgetRects();
+        }
+
         if (_scroll is null && Descendant<ScrollViewer>(this) is { } scroll)
         {
             _scroll = scroll;
             _scroll.ScrollChanged += OnScrolled;
         }
+    }
 
-        _surface ??= _scroll is null ? null : Descendant<ScrollContentPresenter>(_scroll);
+    /// <summary>The height a reader sees, for the edge of a drag and for bringing a match into view.</summary>
+    private double Viewport => _scroll?.ViewportHeight ?? ActualHeight;
+
+    private void DetachAdorner()
+    {
+        if (_adorner is { } adorner)
+        {
+            AdornerLayer.GetAdornerLayer(adorner.AdornedElement)?.Remove(adorner);
+            _adorner = null;
+        }
     }
 
     /// <summary>
-    /// Attaches the selection adorner once there is a surface and a layer to hang it on. Not at apply
-    /// -template time: the adorner layer is only reachable once the control is in a shown window, so
-    /// attaching then left the highlight with nowhere to paint.
+    /// Attaches the selection adorner. It adorns the list itself rather than the scroller's content
+    /// presenter, because the control is the one element here that cannot be replaced underneath it
+    /// — so the coordinates the highlight is drawn in stay meaningful for as long as it exists. Not
+    /// at apply-template time: the adorner layer is only reachable once the control is in a window.
     /// </summary>
     private void EnsureAdorner()
     {
-        if (_adorner is not null || _surface is null || AdornerLayer.GetAdornerLayer(_surface) is not { } layer)
+        if (_adorner is not null || AdornerLayer.GetAdornerLayer(this) is not { } layer)
         {
             return;
         }
 
-        _adorner = new SelectionAdorner(_surface, this);
+        _adorner = new SelectionAdorner(this, this);
         layer.Add(_adorner);
     }
 
@@ -250,15 +308,19 @@ public sealed class ChatTranscript : ListBox
 
     protected override void OnPreviewMouseLeftButtonDown(MouseButtonEventArgs e)
     {
+        // Before anything is compared against the surface, not after: the test below is what decides
+        // whether this press is ours, so a surface left over from a rebuilt tab would fail it and
+        // return here — never reaching the code that notices it is stale and finds the new one.
+        EnsureScroll();
+
         // Only a press on the scrolled content starts a selection. The scrollbar sits beside that
         // surface, not on it, and a press there must stay the scrollbar's — otherwise every attempt
         // to drag the thumb began a selection instead and the thumb never moved. A button or a link
         // inside the content owns its own click too.
-        if (_surface is null
-            || !OnSurface(e.OriginalSource)
+        if (!OnSurface(e.OriginalSource)
             || Over<ButtonBase>(e.OriginalSource)
             || Over<Hyperlink>(e.OriginalSource)
-            || PlaceAt(e.GetPosition(_surface)) is not { } place)
+            || PlaceAt(e.GetPosition(this)) is not { } place)
         {
             base.OnPreviewMouseLeftButtonDown(e);
             return;
@@ -288,12 +350,12 @@ public sealed class ChatTranscript : ListBox
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (!_selecting || _surface is null)
+        if (!_selecting)
         {
             return;
         }
 
-        var point = e.GetPosition(_surface);
+        var point = e.GetPosition(this);
         if (PlaceAt(point) is { } place)
         {
             _caret = place;
@@ -309,22 +371,33 @@ public sealed class ChatTranscript : ListBox
         base.OnPreviewMouseLeftButtonUp(e);
         if (_selecting)
         {
-            _selecting = false;
             ReleaseMouseCapture();
-            StopEdgeScroll();
+            StopSelecting();
         }
     }
 
-    private void EdgeScroll(Point onSurface)
+    /// <summary>
+    /// The drag is over, however it ended. Also reached through <see cref="UIElement.LostMouseCapture"/>,
+    /// because a capture can be taken away — a menu opening, another window coming forward — without
+    /// this control ever seeing the button come up, and a drag left running then kept the
+    /// edge-scroll timer alive and moved the selection on every later mouse move.
+    /// </summary>
+    private void StopSelecting()
     {
-        if (_scroll is null || _surface is null)
+        _selecting = false;
+        StopEdgeScroll();
+    }
+
+    private void EdgeScroll(Point at)
+    {
+        if (_scroll is null)
         {
             return;
         }
 
         double margin = 24;
-        bool near = onSurface.Y < margin || onSurface.Y > _surface.ActualHeight - margin;
-        _edgePoint = onSurface;
+        bool near = at.Y < margin || at.Y > Viewport - margin;
+        _edgePoint = at;
         if (!near)
         {
             StopEdgeScroll();
@@ -340,13 +413,13 @@ public sealed class ChatTranscript : ListBox
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
         timer.Tick += (_, _) =>
         {
-            if (!_selecting || _scroll is null || _surface is null)
+            if (!_selecting || _scroll is null)
             {
                 StopEdgeScroll();
                 return;
             }
 
-            double step = _edgePoint.Y < 24 ? -18 : _edgePoint.Y > _surface.ActualHeight - 24 ? 18 : 0;
+            double step = _edgePoint.Y < 24 ? -18 : _edgePoint.Y > Viewport - 24 ? 18 : 0;
             if (step == 0)
             {
                 return;
@@ -445,55 +518,49 @@ public sealed class ChatTranscript : ListBox
         return best.Base + ChatText.CharForPointer(best.Block, pointer);
     }
 
-    private bool TryLocal(TextBlock block, Point onSurface, out Point local, out Rect bounds)
+    private bool TryLocal(TextBlock block, Point at, out Point local, out Rect bounds)
     {
         local = default;
         bounds = default;
-        if (_surface is null || !block.IsDescendantOf(_surface))
+        if (!block.IsDescendantOf(this))
         {
             return false;
         }
 
-        var toSurface = block.TransformToAncestor(_surface);
-        bounds = toSurface.TransformBounds(new Rect(block.RenderSize));
-        local = new Point(onSurface.X - bounds.Left, onSurface.Y - bounds.Top);
+        var toHere = block.TransformToAncestor(this);
+        bounds = toHere.TransformBounds(new Rect(block.RenderSize));
+        local = new Point(at.X - bounds.Left, at.Y - bounds.Top);
         return true;
     }
 
     /// <summary>
-    /// The lines that are on screen, each with its index and where it sits on the surface. Read from
-    /// the items panel's children — those are exactly the realized containers — with the index from
-    /// the generator, rather than walking the whole visual subtree and searching the items for each
-    /// line; this runs on every mouse move of a drag and every repaint of the highlight.
+    /// The lines that are on screen, each with its index and where it sits in this control.
+    ///
+    /// Found by walking for the messages that exist — only realized ones do — and asking the
+    /// generator which item each belongs to. It used to read a remembered items panel and measure
+    /// against a remembered scroll surface, and when either of those was replaced (a rebuilt tab, a
+    /// re-applied template) every line looked absent: a press then selected nothing at all, which
+    /// is the "drag stopped working" that had no reliable way to be reproduced. Nothing is
+    /// remembered here now, and ~20 realized containers cost nothing to walk.
     /// </summary>
     private List<(ChatMessage Message, int Index, Rect Bounds)> Realized()
     {
         var list = new List<(ChatMessage, int, Rect)>();
-        if (_surface is null)
-        {
-            return list;
-        }
 
-        _panel ??= Descendant<Panel>(_surface);
-        if (_panel is null)
+        foreach (var message in Descendants<ChatMessage>(this))
         {
-            return list;
-        }
-
-        foreach (UIElement child in _panel.Children)
-        {
-            if (child is not ListBoxItem container || Descendant<ChatMessage>(container) is not { Line: not null } message)
+            if (message.Line is null || ContainerFromElement(message) is not ListBoxItem container)
             {
                 continue;
             }
 
             int index = ItemContainerGenerator.IndexFromContainer(container);
-            if (index < 0 || !message.IsDescendantOf(_surface))
+            if (index < 0)
             {
                 continue;
             }
 
-            var bounds = message.TransformToAncestor(_surface).TransformBounds(new Rect(message.RenderSize));
+            var bounds = message.TransformToAncestor(this).TransformBounds(new Rect(message.RenderSize));
             list.Add((message, index, bounds));
         }
 
@@ -501,10 +568,17 @@ public sealed class ChatTranscript : ListBox
         return list;
     }
 
-    /// <summary>Whether a press landed on the scrolled content rather than on the scrollbar beside it.</summary>
-    private bool OnSurface(object source) =>
-        source is DependencyObject start && _surface is not null
-        && (ReferenceEquals(start, _surface) || Ancestor<ScrollContentPresenter>(start) == _surface);
+    /// <summary>
+    /// Whether a press belongs to the text rather than to the scrollbars beside it.
+    ///
+    /// Anywhere over the conversation counts, including the gaps between messages, the margins
+    /// around them and the strip above a code block — a press there starts a selection at the
+    /// nearest line, the way it does in any document. Requiring the press to land on a descendant
+    /// of the content presenter instead was wrong: those gaps hit the scroller's own panel, so a
+    /// drag begun a few pixels off a line did nothing at all.
+    /// </summary>
+    private static bool OnSurface(object source) =>
+        source is DependencyObject start && Ancestor<ScrollBar>(start) is null;
 
     private void SelectWord(TextPlace place)
     {
@@ -641,12 +715,12 @@ public sealed class ChatTranscript : ListBox
     /// </summary>
     private void RevealMatch()
     {
-        if (_scroll is null || _surface is null || FirstMatchRect() is not { } rect)
+        if (_scroll is null || FirstMatchRect() is not { } rect)
         {
             return;
         }
 
-        double viewport = _surface.ActualHeight;
+        double viewport = Viewport;
         if (rect.Top < 0 || rect.Bottom > viewport)
         {
             _scroll.ScrollToVerticalOffset(Math.Max(0, _scroll.VerticalOffset + rect.Top - viewport / 3));
@@ -704,7 +778,7 @@ public sealed class ChatTranscript : ListBox
     /// </summary>
     internal void Paint(DrawingContext context, Brush selection, Brush match)
     {
-        if (!Drawing || _surface is null)
+        if (!Drawing)
         {
             return;
         }
@@ -773,14 +847,14 @@ public sealed class ChatTranscript : ListBox
         return null;
     }
 
-    /// <summary>A slice's highlight rectangles in its block's own coordinates, by block and range.</summary>
-    private readonly Dictionary<(TextBlock Block, int From, int To), Rect[]> _rects = new();
+    /// <summary>Where each realized block draws its characters, so highlighting a range is arithmetic.</summary>
+    private readonly Dictionary<TextBlock, LineMap> _maps = new();
 
-    private void ForgetRects() => _rects.Clear();
+    private void ForgetRects() => _maps.Clear();
 
     private IEnumerable<Rect> RectsFor(TextSlice slice, int lineIndex, TextPlace start, TextPlace end)
     {
-        if (lineIndex < start.Line || lineIndex > end.Line || _surface is null)
+        if (lineIndex < start.Line || lineIndex > end.Line)
         {
             yield break;
         }
@@ -789,27 +863,25 @@ public sealed class ChatTranscript : ListBox
         int to = lineIndex == end.Line ? end.Offset : slice.End;
         from = Math.Max(from, slice.Base);
         to = Math.Min(to, slice.End);
-        if (to <= from || !slice.Block.IsDescendantOf(_surface))
+        if (to <= from || !slice.Block.IsDescendantOf(this))
         {
             yield break;
         }
 
-        var key = (slice.Block, from - slice.Base, to - slice.Base);
-        if (!_rects.TryGetValue(key, out var local))
+        if (!_maps.TryGetValue(slice.Block, out var map))
         {
-            if (_rects.Count > 4096)
+            if (_maps.Count > 512)
             {
-                _rects.Clear();
+                _maps.Clear();
             }
 
-            local = ChatText.LineRects(slice.Block, key.Item2, key.Item3).ToArray();
-            _rects[key] = local;
+            map = LineMap.Of(slice.Block);
+            _maps[slice.Block] = map;
         }
 
-        // The adorner draws in its adorned element's coordinate space, which is the surface's, so the
-        // block's rectangles go through the surface, of which the block is a descendant.
-        var toSurface = slice.Block.TransformToAncestor(_surface);
-        foreach (var rect in local)
+        // The adorner draws in its adorned element's coordinate space, which is this control's.
+        var toSurface = slice.Block.TransformToAncestor(this);
+        foreach (var rect in map.Rects(from - slice.Base, to - slice.Base))
         {
             yield return toSurface.TransformBounds(rect);
         }
@@ -829,7 +901,7 @@ public sealed class ChatTranscript : ListBox
 
     private void Redraw()
     {
-        EnsureSurface();
+        EnsureScroll();
         EnsureAdorner();
         _adorner?.InvalidateVisual();
     }

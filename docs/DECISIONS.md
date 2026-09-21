@@ -797,3 +797,17 @@ the list drops its cached rectangles and repaints on that, on scroll, on resize 
 moving, and on nothing else; a slice's rectangles are cached by block and range, so a drag recomputes
 only the line its moving end is on. Measured on a 600-line conversation with real mouse input: the
 File menu drops as fast with a selection as without.
+
+Two things the selection must not depend on, both learned by getting them wrong. It does not step
+visual lines with `TextPointer.GetLineStartPosition`: the pointers it walks sit on `LineBreak`
+element boundaries rather than insertion positions, and it skipped lines in the one block that has
+many of them, a fenced listing. A `LineMap` — each block's visual lines and the left edge of each
+character, built once per block and kept until it is redrawn — replaced it, which also made
+highlighting a range arithmetic rather than pointer work. And it holds no cached handle on the
+scroll surface or the items panel. Measuring against remembered ones meant that when either was
+replaced — a rebuilt bottom-pane tab, a re-applied template — every realized line looked absent and
+a press selected nothing at all: the "drag sometimes stops working entirely" that had no reliable
+repro. Everything is now measured against the control itself, which cannot be swapped underneath
+the selection, and the realized lines come from the item generator each time. A press anywhere over
+the conversation starts a selection too, including the gaps between messages and the margins around
+them; only the scrollbars keep their own presses.
