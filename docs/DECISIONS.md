@@ -781,4 +781,9 @@ renders as a real `Grid`, a word only in a question bubble and one only in a tab
 found, copying a match returns exactly that word, and a select-all copies the lines' flat text. That
 run earned its keep — it caught a selection adorner that never attached (the adorner layer is not
 reachable at apply-template time) and a highlight transformed to the wrong ancestor, two bugs a
-green build showed nothing of.
+green build showed nothing of. A third got through the first pass because the screenshot was
+described rather than read: `ChatTranscript` subclasses `ListBox`, and an implicit style is keyed
+on the exact type, so the subclass received none of the theme's `ListBox` style — it came up as
+WPF's stock white box with a border and near-white text drawn onto it. It now asks for that style
+by key (`SetResourceReference(StyleProperty, typeof(ListBox))`). The lesson is the one AGENTS.md
+§5.1 already states: a screenshot is evidence only if somebody looks at it.

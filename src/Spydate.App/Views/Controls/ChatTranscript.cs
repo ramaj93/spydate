@@ -29,6 +29,7 @@ public sealed class ChatTranscript : ListBox
 {
     private ScrollViewer? _scroll;
     private ScrollContentPresenter? _surface;
+    private Panel? _panel;
     private SelectionAdorner? _adorner;
 
     private INotifyCollectionChanged? _watching;
@@ -44,15 +45,30 @@ public sealed class ChatTranscript : ListBox
 
     public ChatTranscript()
     {
+        // An implicit style is keyed on the exact type, so a subclass of ListBox does not receive the
+        // theme's ListBox style on its own: without this the transcript came up as WPF's stock white
+        // box with a border, and near-white text drawn onto it. Ask for that style by its key, then
+        // pin the few things this control wants differently from a plain list.
+        SetResourceReference(StyleProperty, typeof(ListBox));
+        SetResourceReference(FontFamilyProperty, "App.FontFamily");   // the theme's list font is mono
+        SetResourceReference(FontSizeProperty, "App.FontSize");
+        Background = Brushes.Transparent;
+        BorderThickness = new Thickness(0);
+
         Focusable = true;
         SelectionMode = SelectionMode.Single;
-        ScrollViewer.SetHorizontalScrollBarVisibility(this, ScrollBarVisibility.Disabled);
+        ScrollViewer.SetHorizontalScrollBarVisibility(this, ScrollBarVisibility.Disabled);   // lines wrap
+        VirtualizingPanel.SetIsVirtualizing(this, true);
+        VirtualizingPanel.SetVirtualizationMode(this, VirtualizationMode.Recycling);
         VirtualizingPanel.SetScrollUnit(this, ScrollUnit.Pixel);
 
         CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy, (_, _) => CopySelection(), (_, e) => e.CanExecute = HasSelection));
-        CommandBindings.Add(new CommandBinding(ApplicationCommands.SelectAll, (_, _) => SelectAll(), (_, e) => e.CanExecute = Count > 0));
+        CommandBindings.Add(new CommandBinding(ApplicationCommands.SelectAll, (_, _) => SelectEverything(), (_, e) => e.CanExecute = Count > 0));
 
         ContextMenu = BuildMenu();
+
+        // The selection dims when the list loses focus, so it has to be repainted when that changes.
+        IsKeyboardFocusWithinChanged += (_, _) => Redraw();
 
         // The scroll surface and its adorner layer are not there yet when the template is applied;
         // they are once the control is in a shown window, so wire them then too.
@@ -169,10 +185,20 @@ public sealed class ChatTranscript : ListBox
 
     private void OnScrolled(object sender, ScrollChangedEventArgs e)
     {
-        // A pixel-scrolled list moves only when the reader moves it or the tail is followed; a change
-        // in offset with no change in extent is the reader, so following holds only at the bottom.
-        if (e.VerticalChange != 0 && e.ExtentHeightChange == 0)
+        if (e.ExtentHeightChange != 0)
         {
+            // The content grew or shrank under the viewport — an answer streaming into its line, a
+            // line settling from plain text into Markdown, a line realizing at its real height. That
+            // is not the reader moving; if the tail was being followed, keep following it.
+            if (_follow)
+            {
+                _scroll?.ScrollToEnd();
+            }
+        }
+        else if (e.VerticalChange != 0)
+        {
+            // A pixel-scrolled list otherwise moves only when the reader moves it, so following holds
+            // only while they are at the bottom.
             _follow = AtBottom();
         }
 
@@ -182,18 +208,51 @@ public sealed class ChatTranscript : ListBox
     private bool AtBottom() =>
         _scroll is null || _scroll.VerticalOffset >= _scroll.ScrollableHeight - 4;
 
+    /// <summary>
+    /// The keys a reader scrolls a transcript with. The items take no focus, so the list's own key
+    /// handling — which moves a selection between items — has nothing to do; scroll the viewer
+    /// instead, the way the document did.
+    /// </summary>
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (_scroll is not null)
+        {
+            bool handled = true;
+            switch (e.Key)
+            {
+                case Key.PageUp: _scroll.PageUp(); break;
+                case Key.PageDown: _scroll.PageDown(); break;
+                case Key.Up: _scroll.LineUp(); break;
+                case Key.Down: _scroll.LineDown(); break;
+                case Key.Home when Keyboard.Modifiers == ModifierKeys.Control: _scroll.ScrollToTop(); break;
+                case Key.End when Keyboard.Modifiers == ModifierKeys.Control: _scroll.ScrollToEnd(); break;
+                case Key.Escape: _anchor = _caret = null; Redraw(); break;
+                default: handled = false; break;
+            }
+
+            if (handled)
+            {
+                e.Handled = true;
+                return;
+            }
+        }
+
+        base.OnKeyDown(e);
+    }
+
     // ---- selection by mouse -------------------------------------------------
 
     protected override void OnPreviewMouseLeftButtonDown(MouseButtonEventArgs e)
     {
-        // A button or a link owns its own click; only empty space and text start a selection.
-        if (Over<ButtonBase>(e.OriginalSource) || Over<Hyperlink>(e.OriginalSource))
-        {
-            base.OnPreviewMouseLeftButtonDown(e);
-            return;
-        }
-
-        if (_surface is null || PlaceAt(e.GetPosition(_surface)) is not { } place)
+        // Only a press on the scrolled content starts a selection. The scrollbar sits beside that
+        // surface, not on it, and a press there must stay the scrollbar's — otherwise every attempt
+        // to drag the thumb began a selection instead and the thumb never moved. A button or a link
+        // inside the content owns its own click too.
+        if (_surface is null
+            || !OnSurface(e.OriginalSource)
+            || Over<ButtonBase>(e.OriginalSource)
+            || Over<Hyperlink>(e.OriginalSource)
+            || PlaceAt(e.GetPosition(_surface)) is not { } place)
         {
             base.OnPreviewMouseLeftButtonDown(e);
             return;
@@ -394,6 +453,12 @@ public sealed class ChatTranscript : ListBox
         return true;
     }
 
+    /// <summary>
+    /// The lines that are on screen, each with its index and where it sits on the surface. Read from
+    /// the items panel's children — those are exactly the realized containers — with the index from
+    /// the generator, rather than walking the whole visual subtree and searching the items for each
+    /// line; this runs on every mouse move of a drag and every repaint of the highlight.
+    /// </summary>
     private List<(ChatMessage Message, int Index, Rect Bounds)> Realized()
     {
         var list = new List<(ChatMessage, int, Rect)>();
@@ -402,15 +467,21 @@ public sealed class ChatTranscript : ListBox
             return list;
         }
 
-        foreach (var message in Descendants<ChatMessage>(_surface))
+        _panel ??= Descendant<Panel>(_surface);
+        if (_panel is null)
         {
-            if (message.Line is not { } line)
+            return list;
+        }
+
+        foreach (UIElement child in _panel.Children)
+        {
+            if (child is not ListBoxItem container || Descendant<ChatMessage>(container) is not { Line: not null } message)
             {
                 continue;
             }
 
-            int index = Items.IndexOf(line);
-            if (index < 0)
+            int index = ItemContainerGenerator.IndexFromContainer(container);
+            if (index < 0 || !message.IsDescendantOf(_surface))
             {
                 continue;
             }
@@ -422,6 +493,11 @@ public sealed class ChatTranscript : ListBox
         list.Sort((a, b) => a.Item2.CompareTo(b.Item2));
         return list;
     }
+
+    /// <summary>Whether a press landed on the scrolled content rather than on the scrollbar beside it.</summary>
+    private bool OnSurface(object source) =>
+        source is DependencyObject start && _surface is not null
+        && (ReferenceEquals(start, _surface) || Ancestor<ScrollContentPresenter>(start) == _surface);
 
     private void SelectWord(TextPlace place)
     {
@@ -491,7 +567,7 @@ public sealed class ChatTranscript : ListBox
 
     private static int Clamp(int offset, string text) => Math.Clamp(offset, 0, text.Length);
 
-    private void SelectAll()
+    private void SelectEverything()
     {
         if (Count == 0)
         {
@@ -547,8 +623,27 @@ public sealed class ChatTranscript : ListBox
 
         _follow = false;
         ScrollLineIntoView(hitLine);
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, RevealMatch);
         Redraw();
         return (pick + 1, matches.Count);
+    }
+
+    /// <summary>
+    /// After the line is realized, scrolls so the match itself is in view. ScrollIntoView brings the
+    /// line in, which is not the same thing for a long answer whose hit is far down inside it.
+    /// </summary>
+    private void RevealMatch()
+    {
+        if (_scroll is null || _surface is null || MatchRects().FirstOrDefault() is not { IsEmpty: false } rect)
+        {
+            return;
+        }
+
+        double viewport = _surface.ActualHeight;
+        if (rect.Top < 0 || rect.Bottom > viewport)
+        {
+            _scroll.ScrollToVerticalOffset(Math.Max(0, _scroll.VerticalOffset + rect.Top - viewport / 3));
+        }
     }
 
     public void ClearMatch()
@@ -593,7 +688,7 @@ public sealed class ChatTranscript : ListBox
 
     // ---- what the adorner draws ---------------------------------------------
 
-    internal IEnumerable<Rect> HighlightRects(SelectionAdorner adorner)
+    internal IEnumerable<Rect> HighlightRects()
     {
         var selection = HasSelection ? Ordered() : ((TextPlace, TextPlace)?)null;
         foreach (var (message, index, _) in Realized())
@@ -602,7 +697,7 @@ public sealed class ChatTranscript : ListBox
             {
                 if (selection is { } sel)
                 {
-                    foreach (var rect in RectsFor(adorner, slice, index, sel.Item1, sel.Item2, SelectionKind.Selection))
+                    foreach (var rect in RectsFor(slice, index, sel.Item1, sel.Item2))
                     {
                         yield return rect;
                     }
@@ -611,7 +706,7 @@ public sealed class ChatTranscript : ListBox
         }
     }
 
-    internal IEnumerable<Rect> MatchRects(SelectionAdorner adorner)
+    internal IEnumerable<Rect> MatchRects()
     {
         if (_match is not { } match)
         {
@@ -627,8 +722,8 @@ public sealed class ChatTranscript : ListBox
 
             foreach (var slice in message.Slices)
             {
-                foreach (var rect in RectsFor(adorner, slice, index,
-                    new TextPlace(match.Line, match.Start), new TextPlace(match.Line, match.End), SelectionKind.Match))
+                foreach (var rect in RectsFor(slice, index,
+                    new TextPlace(match.Line, match.Start), new TextPlace(match.Line, match.End)))
                 {
                     yield return rect;
                 }
@@ -636,13 +731,8 @@ public sealed class ChatTranscript : ListBox
         }
     }
 
-    private enum SelectionKind
-    {
-        Selection,
-        Match,
-    }
 
-    private IEnumerable<Rect> RectsFor(SelectionAdorner adorner, TextSlice slice, int lineIndex, TextPlace start, TextPlace end, SelectionKind kind)
+    private IEnumerable<Rect> RectsFor(TextSlice slice, int lineIndex, TextPlace start, TextPlace end)
     {
         if (lineIndex < start.Line || lineIndex > end.Line || _surface is null)
         {
@@ -715,7 +805,7 @@ public sealed class ChatTranscript : ListBox
 
     private static T? Ancestor<T>(DependencyObject start) where T : DependencyObject
     {
-        for (var at = start; at is not null; at = VisualParent(at))
+        for (var at = start; at is not null; at = ParentOf(at))
         {
             if (at is T hit)
             {
@@ -726,7 +816,7 @@ public sealed class ChatTranscript : ListBox
         return null;
     }
 
-    private static DependencyObject? VisualParent(DependencyObject at) =>
+    private static DependencyObject? ParentOf(DependencyObject at) =>
         at is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(at) : LogicalTreeHelper.GetParent(at);
 
     private static T? Descendant<T>(DependencyObject root) where T : DependencyObject =>

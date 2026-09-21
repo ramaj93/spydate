@@ -44,12 +44,12 @@ internal sealed class SelectionAdorner : Adorner
         drawingContext.PushClip(new RectangleGeometry(new Rect(RenderSize)));
 
         var selection = _transcript.IsKeyboardFocusWithin ? Active : Inactive;
-        foreach (var rect in _transcript.HighlightRects(this))
+        foreach (var rect in _transcript.HighlightRects())
         {
             drawingContext.DrawRectangle(selection, null, rect);
         }
 
-        foreach (var rect in _transcript.MatchRects(this))
+        foreach (var rect in _transcript.MatchRects())
         {
             drawingContext.DrawRectangle(Match, null, rect);
         }
