@@ -1,3 +1,4 @@
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -27,6 +28,9 @@ internal sealed class MarkdownView : IMarkdownSink
     private readonly Stack<TableFrame> _tables = new();
 
     private TextBlock? _inline;
+
+    /// <summary>The code block being filled, for its copy button. A TextBlock built from inlines has an empty Text property, so the button cannot read it back from there.</summary>
+    private StringBuilder? _code;
     private int _inlineBase;
     private int _offset;
 
@@ -134,6 +138,7 @@ internal sealed class MarkdownView : IMarkdownSink
             return;
         }
 
+        _code?.Append(text);
         if (style.Is(SpanStyle.Link))
         {
             _offset += AppendLink(_inline, text, style);
@@ -180,6 +185,7 @@ internal sealed class MarkdownView : IMarkdownSink
         }
 
         _inline = null;
+        _code = null;
     }
 
     private void OpenQuote()
@@ -238,7 +244,9 @@ internal sealed class MarkdownView : IMarkdownSink
         };
 
         var stack = new StackPanel();
-        stack.Children.Add(Strip(language, listing));
+        var code = new StringBuilder();
+        _code = code;
+        stack.Children.Add(Strip(language, code));
         stack.Children.Add(listing);
 
         Host.Children.Add(new Border
@@ -371,7 +379,7 @@ internal sealed class MarkdownView : IMarkdownSink
         }
     }
 
-    private static DockPanel Strip(string? language, TextBlock listing)
+    private static DockPanel Strip(string? language, StringBuilder code)
     {
         var name = new TextBlock
         {
@@ -395,7 +403,7 @@ internal sealed class MarkdownView : IMarkdownSink
         };
 
         System.Windows.Automation.AutomationProperties.SetName(copy, "Copy code");
-        copy.Click += (_, _) => Copy(listing.Text, copy);
+        copy.Click += (_, _) => Copy(code.ToString(), copy);
 
         var strip = new DockPanel { LastChildFill = false };
         DockPanel.SetDock(copy, Dock.Right);
