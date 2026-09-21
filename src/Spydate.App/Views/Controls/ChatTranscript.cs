@@ -28,6 +28,7 @@ namespace Spydate.App.Views.Controls;
 public sealed class ChatTranscript : ListBox
 {
     private ScrollViewer? _scroll;
+    private Panel? _panel;
     private SelectionAdorner? _adorner;
 
     private INotifyCollectionChanged? _watching;
@@ -73,7 +74,7 @@ public sealed class ChatTranscript : ListBox
         // A line re-rendering (rebuilt, or grown by a streamed token) moves the blocks the highlight
         // sits on, and so does the list changing width; both drop the cached rectangles. Nothing else
         // repaints the highlight uninvited.
-        AddHandler(ChatMessage.RenderedEvent, new RoutedEventHandler((_, _) => { ForgetRects(); Redraw(); }));
+        AddHandler(ChatMessage.RenderedEvent, new RoutedEventHandler(OnMessageRendered));
         SizeChanged += (_, _) => { ForgetRects(); Redraw(); };
 
         // The scroll surface and its adorner layer are not there yet when the template is applied;
@@ -187,6 +188,21 @@ public sealed class ChatTranscript : ListBox
 
     /// <summary>The height a reader sees, for the edge of a drag and for bringing a match into view.</summary>
     private double Viewport => _scroll?.ViewportHeight ?? ActualHeight;
+
+    /// <summary>
+    /// A line redrew itself, so what was measured of it is stale. Only that line's blocks are
+    /// dropped: forgetting every block whenever any of them changed meant that scrolling, which
+    /// re-renders a recycled line each step, remeasured the whole screen each step too.
+    /// </summary>
+    private void OnMessageRendered(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is ChatMessage message)
+        {
+            Forget(message);
+        }
+
+        Redraw();
+    }
 
     private void DetachAdorner()
     {
@@ -482,7 +498,6 @@ public sealed class ChatTranscript : ListBox
         TextSlice best = slices[0];
         double bestGap = double.MaxValue;
         Point bestLocal = default;
-        bool inside = false;
 
         foreach (var slice in slices)
         {
@@ -495,7 +510,6 @@ public sealed class ChatTranscript : ListBox
             {
                 best = slice;
                 bestLocal = local;
-                inside = true;
                 break;
             }
 
@@ -508,14 +522,7 @@ public sealed class ChatTranscript : ListBox
             }
         }
 
-        var pointer = best.Block.GetPositionFromPoint(bestLocal, snapToText: true);
-        if (pointer is null)
-        {
-            // Above the block's first line means its start; below its last means its end.
-            return inside || onSurface.Y < 0 ? best.Base : best.End;
-        }
-
-        return best.Base + ChatText.CharForPointer(best.Block, pointer);
+        return best.Base + MapFor(best.Block).IndexAt(bestLocal);
     }
 
     private bool TryLocal(TextBlock block, Point at, out Point local, out Rect bounds)
@@ -546,10 +553,14 @@ public sealed class ChatTranscript : ListBox
     private List<(ChatMessage Message, int Index, Rect Bounds)> Realized()
     {
         var list = new List<(ChatMessage, int, Rect)>();
-
-        foreach (var message in Descendants<ChatMessage>(this))
+        if (ContainerHost() is not { } panel)
         {
-            if (message.Line is null || ContainerFromElement(message) is not ListBoxItem container)
+            return list;
+        }
+
+        foreach (UIElement child in panel.Children)
+        {
+            if (child is not ListBoxItem container || Near<ChatMessage>(container) is not { Line: not null } message)
             {
                 continue;
             }
@@ -847,10 +858,33 @@ public sealed class ChatTranscript : ListBox
         return null;
     }
 
-    /// <summary>Where each realized block draws its characters, so highlighting a range is arithmetic.</summary>
-    private readonly Dictionary<TextBlock, LineMap> _maps = new();
+    /// <summary>
+    /// Where each realized block draws its characters, so highlighting a range and hit-testing one
+    /// are both arithmetic. Weak, so a block that has been drawn over falls out on its own; blocks
+    /// that are redrawn in place — a streaming answer growing — are dropped by name when they say so.
+    /// </summary>
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<TextBlock, LineMap> _maps = new();
+
+    private LineMap MapFor(TextBlock block)
+    {
+        if (!_maps.TryGetValue(block, out var map))
+        {
+            map = LineMap.Of(block);
+            _maps.Add(block, map);
+        }
+
+        return map;
+    }
 
     private void ForgetRects() => _maps.Clear();
+
+    private void Forget(ChatMessage message)
+    {
+        foreach (var slice in message.Slices)
+        {
+            _maps.Remove(slice.Block);
+        }
+    }
 
     private IEnumerable<Rect> RectsFor(TextSlice slice, int lineIndex, TextPlace start, TextPlace end)
     {
@@ -868,16 +902,7 @@ public sealed class ChatTranscript : ListBox
             yield break;
         }
 
-        if (!_maps.TryGetValue(slice.Block, out var map))
-        {
-            if (_maps.Count > 512)
-            {
-                _maps.Clear();
-            }
-
-            map = LineMap.Of(slice.Block);
-            _maps[slice.Block] = map;
-        }
+        var map = MapFor(slice.Block);
 
         // The adorner draws in its adorned element's coordinate space, which is this control's.
         var toSurface = slice.Block.TransformToAncestor(this);
@@ -943,6 +968,47 @@ public sealed class ChatTranscript : ListBox
 
     private static DependencyObject? ParentOf(DependencyObject at) =>
         at is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(at) : LogicalTreeHelper.GetParent(at);
+
+    /// <summary>
+    /// The panel the containers live in. Held, but checked against this control before it is used —
+    /// holding one without checking is what made a rebuilt tab look like an empty conversation, and
+    /// finding it afresh every time meant walking the whole rendering on every mouse move.
+    /// </summary>
+    private Panel? ContainerHost()
+    {
+        if (_panel is { IsItemsHost: true } held && held.IsDescendantOf(this))
+        {
+            return _panel;
+        }
+
+        _panel = Descendants<Panel>(this).FirstOrDefault(p => p.IsItemsHost);
+        return _panel;
+    }
+
+    /// <summary>The nearest descendant of a container's own template, without descending into its content.</summary>
+    private static T? Near<T>(DependencyObject root, int depth = 4) where T : DependencyObject
+    {
+        if (root is T hit)
+        {
+            return hit;
+        }
+
+        if (depth <= 0)
+        {
+            return null;
+        }
+
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            if (Near<T>(VisualTreeHelper.GetChild(root, i), depth - 1) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
 
     private static T? Descendant<T>(DependencyObject root) where T : DependencyObject =>
         Descendants<T>(root).FirstOrDefault();

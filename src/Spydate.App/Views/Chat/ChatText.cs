@@ -24,12 +24,15 @@ internal readonly record struct TextSlice(TextBlock Block, int Base, int Length)
 /// Where every character of a <see cref="TextBlock"/> is drawn: the visual lines it wraps into, and
 /// the left edge of each character.
 ///
-/// Built in one pass and kept until the block is redrawn or the panel resized. Highlighting a range
-/// is then arithmetic over this — no pointer walking per repaint, which is what makes dragging a
-/// selection cheap. It replaced a walk that stepped visual lines with
-/// <see cref="TextPointer.GetLineStartPosition"/>: that took pointers which, at a
-/// <see cref="LineBreak"/>, are element boundaries rather than insertion positions, and it silently
-/// skipped lines in exactly the place a block has many of them — a fenced code listing.
+/// Built in one pass and kept until the block is redrawn or the list resized. Both halves of the
+/// selection then read from it — highlighting a range is arithmetic over the lines, and finding what
+/// the mouse is over is a binary search along one of them — so the two can never disagree, and
+/// neither walks the text on every mouse move.
+///
+/// It replaced a walk that stepped visual lines with <see cref="TextPointer.GetLineStartPosition"/>:
+/// that took pointers which, at a <see cref="LineBreak"/>, are element boundaries rather than
+/// insertion positions, and it silently skipped lines in exactly the place a block has many of them
+/// — a fenced code listing.
 /// </summary>
 internal sealed class LineMap
 {
@@ -117,13 +120,61 @@ internal sealed class LineMap
             yield return new Rect(x1, line.Top, Math.Max(0, x2 - x1), Math.Max(0, line.Bottom - line.Top));
         }
     }
+
+    /// <summary>
+    /// The character a point is nearest, as an offset to select to: the line it falls on, then the
+    /// character boundary nearest it along that line. A binary search, because this runs on every
+    /// mouse move of a drag — it used to ask the block for a <see cref="TextPointer"/> and then walk
+    /// the text counting characters to turn that back into an offset.
+    /// </summary>
+    public int IndexAt(Point at)
+    {
+        if (Lines.Count == 0)
+        {
+            return 0;
+        }
+
+        if (at.Y < Lines[0].Top)
+        {
+            return Lines[0].Start;
+        }
+
+        var line = Lines[^1];
+        foreach (var candidate in Lines)
+        {
+            if (at.Y < candidate.Bottom)
+            {
+                line = candidate;
+                break;
+            }
+        }
+
+        // The first character whose middle is past the point: the boundary a reader means.
+        int lo = line.Start;
+        int hi = line.End;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) / 2;
+            double edge = Edge(mid);
+            double next = mid + 1 < line.End ? Edge(mid + 1) : line.Right;
+            if (at.X < (edge + next) / 2)
+            {
+                hi = mid;
+            }
+            else
+            {
+                lo = mid + 1;
+            }
+        }
+
+        return Math.Clamp(lo, line.Start, line.End);
+    }
 }
 
 /// <summary>
-/// Turning flat-text offsets into places in a <see cref="TextBlock"/> and back. A block is built so
-/// its plain text equals its flat-text slice exactly — every character a <see cref="Run"/>, every
-/// newline a <see cref="LineBreak"/> — so an offset counts the same on both sides. One walk,
-/// <see cref="Positions"/>, defines that counting, and everything here shares it.
+/// Building the text of a <see cref="TextBlock"/> so that its characters and a flat-text slice are
+/// the same thing, and walking them back out again. <see cref="Positions"/> is the one definition of
+/// what an offset counts, and <see cref="LineMap"/> is built from it.
 /// </summary>
 internal static class ChatText
 {
@@ -150,9 +201,14 @@ internal static class ChatText
     }
 
     /// <summary>
-    /// Every character of the block, in order: its offset and a pointer standing before it. This is
-    /// the one definition of what an offset counts — run text one per character, a line break one —
-    /// so the map, the hit test and the two lookups below can never disagree about it.
+    /// Every character of the block, in order: its offset and a pointer standing before it. Run text
+    /// counts one per character and a line break counts one, which is what makes a block's characters
+    /// the same as its slice of the flat text.
+    ///
+    /// The pointer is stepped one position at a time rather than asked for an offset from the start
+    /// of each run. Asking cost the distance each time, so walking a run of n characters cost n², and
+    /// a long answer took seconds to measure. A run that reports no text is stepped over instead of
+    /// being read again from the same place, which otherwise never advanced and hung the window.
     /// </summary>
     internal static IEnumerable<(int Index, TextPointer At)> Positions(TextBlock block)
     {
@@ -164,16 +220,20 @@ internal static class ChatText
             {
                 case TextPointerContext.Text:
                     string run = at.GetTextInRun(LogicalDirection.Forward);
-                    for (int i = 0; i < run.Length; i++)
+                    if (run.Length == 0)
                     {
-                        if (at.GetPositionAtOffset(i, LogicalDirection.Forward) is { } inside)
-                        {
-                            yield return (seen + i, inside);
-                        }
+                        break;
+                    }
+
+                    var step = at;
+                    for (int i = 0; i < run.Length && step is not null; i++)
+                    {
+                        yield return (seen + i, step);
+                        step = step.GetPositionAtOffset(1, LogicalDirection.Forward);
                     }
 
                     seen += run.Length;
-                    at = at.GetPositionAtOffset(run.Length, LogicalDirection.Forward);
+                    at = step;
                     continue;
 
                 case TextPointerContext.ElementStart when at.GetAdjacentElement(LogicalDirection.Forward) is LineBreak:
@@ -184,43 +244,5 @@ internal static class ChatText
 
             at = at.GetNextContextPosition(LogicalDirection.Forward);
         }
-    }
-
-    /// <summary>The pointer at a character offset into the block, counting a newline as one character.</summary>
-    public static TextPointer PointerForChar(TextBlock block, int target)
-    {
-        foreach (var (index, at) in Positions(block))
-        {
-            if (index >= target)
-            {
-                return at;
-            }
-        }
-
-        return block.ContentEnd;
-    }
-
-    /// <summary>The character offset of a pointer into the block — the inverse of <see cref="PointerForChar"/>.</summary>
-    public static int CharForPointer(TextBlock block, TextPointer pointer)
-    {
-        int last = 0;
-        foreach (var (index, at) in Positions(block))
-        {
-            int order = at.CompareTo(pointer);
-            if (order == 0)
-            {
-                return index;
-            }
-
-            if (order > 0)
-            {
-                return index;
-            }
-
-            // Inside this character's own run: the pointer sits between two positions we yield.
-            last = index + 1;
-        }
-
-        return last;
     }
 }

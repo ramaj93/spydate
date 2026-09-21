@@ -811,3 +811,16 @@ repro. Everything is now measured against the control itself, which cannot be sw
 the selection, and the realized lines come from the item generator each time. A press anywhere over
 the conversation starts a selection too, including the gaps between messages and the margins around
 them; only the scrollbars keep their own presses.
+
+Measuring a block has to be linear and has to be kept. The first `LineMap` asked each character for
+its position by its offset from the start of the run, which costs that distance every time — so a
+block of n characters took n² steps to measure, and a single long answer took seconds. It also read
+a run again from the same place when that run reported no text, which never advanced and hung the
+window outright. The pointer is stepped once per character now, and a run with nothing in it is
+stepped over. The maps are held per block in a weak table and dropped one block at a time, when the
+line holding it says it redrew: dropping all of them whenever any line changed meant that scrolling,
+which re-renders a recycled line at every step, remeasured the whole screen at every step too. With
+all three, scrolling a 7,000-character answer while holding a select-all went from never finishing
+(killed at 150 seconds) to costing 4 ms a step more than scrolling with nothing selected, and a
+repaint during a drag from remeasuring everything to 0.1 ms. What remains is WPF laying the text
+out, which any list showing that much text would pay.
