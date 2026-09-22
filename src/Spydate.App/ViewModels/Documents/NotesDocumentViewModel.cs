@@ -67,18 +67,18 @@ public sealed partial class NotesDocumentViewModel : DocumentViewModel
     private void ToggleView() => ShowAsDocument = !ShowAsDocument;
 
     /// <summary>
-    /// Every section as one Markdown document, each under its key as a heading, in the order the list
-    /// shows them (alphabetical by key — the store keeps no other order). This is what the document
-    /// view renders; it is rebuilt whenever the sections change.
+    /// Every section as one Markdown document, in document order, the section keys left off so it reads
+    /// as continuous prose the writer has arranged rather than a labelled list. A section that wants a
+    /// heading carries its own in the text. Rebuilt whenever the sections change or move.
     /// </summary>
     public string CombinedMarkdown
     {
         get
         {
             var sb = new System.Text.StringBuilder();
-            foreach (var (key, note) in _notes.Snapshot())
+            foreach (var (_, note) in _notes.Snapshot())
             {
-                sb.Append("## ").Append(key).Append("\n\n").Append(note.Text).Append("\n\n");
+                sb.Append(note.Text).Append("\n\n");
             }
 
             return sb.ToString().TrimEnd();
@@ -194,6 +194,46 @@ public sealed partial class NotesDocumentViewModel : DocumentViewModel
         {
             SelectedRow = Rows.FirstOrDefault(r => r.Key == stored);
         }
+    }
+
+    /// <summary>Moves the selected section one place earlier in the document.</summary>
+    [RelayCommand]
+    private void MoveUp() => Move(-1);
+
+    /// <summary>Moves the selected section one place later in the document.</summary>
+    [RelayCommand]
+    private void MoveDown() => Move(1);
+
+    /// <summary>
+    /// Reorders by rewriting every section's position from its place in the list, so the move works even
+    /// on notes written before order existed (where every position reads as zero). Only the sections that
+    /// actually move are marked changed, and a move keeps each section's author and time.
+    /// </summary>
+    private void Move(int delta)
+    {
+        if (SelectedRow is null)
+        {
+            return;
+        }
+
+        int from = Rows.IndexOf(SelectedRow);
+        int to = from + delta;
+        if (from < 0 || to < 0 || to >= Rows.Count)
+        {
+            return;
+        }
+
+        string moved = SelectedRow.Key;
+        var keys = Rows.Select(r => r.Key).ToList();
+        (keys[from], keys[to]) = (keys[to], keys[from]);
+        for (int i = 0; i < keys.Count; i++)
+        {
+            _notes.SetOrder(keys[i], i);
+        }
+
+        Persist("Reordered.");
+        Refresh();
+        SelectedRow = Rows.FirstOrDefault(r => r.Key == moved);
     }
 
     /// <summary>Removes the selected section and saves.</summary>

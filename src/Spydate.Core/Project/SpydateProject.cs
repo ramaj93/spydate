@@ -341,6 +341,7 @@ public static class SpydateProject
                 {
                     Key = key,
                     Text = note.Text,
+                    Order = note.Order == 0 ? null : note.Order,
                     Source = note.Source,
                     Modified = note.Modified,
                 };
@@ -626,6 +627,7 @@ public static class SpydateProject
                 notes.Restore(key, new Note
                 {
                     Text = text,
+                    Order = entry.Order ?? 0,
                     Source = entry.Source ?? AnnotationSource.User,
                     Modified = entry.Modified,
                 });
@@ -805,6 +807,9 @@ public static class SpydateProject
 
         /// <summary>The section text, Markdown with LF newlines. Multi-line, unlike a comment.</summary>
         [JsonPropertyName("text")] public string? Text { get; set; }
+
+        /// <summary>Where it sits in the document, lower first. Absent means zero, so an old file needs no change.</summary>
+        [JsonPropertyName("order")] public int? Order { get; set; }
 
         [JsonPropertyName("source")] public AnnotationSource? Source { get; set; }
         [JsonPropertyName("modified")] public DateTimeOffset? Modified { get; set; }

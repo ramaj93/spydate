@@ -17,6 +17,13 @@ public sealed record Note
 
     /// <summary>When it was last set, UTC. Null for entries written before this was recorded.</summary>
     public DateTimeOffset? Modified { get; init; }
+
+    /// <summary>
+    /// Where the section sits when the notes are read as one document — lower first, ties broken by key.
+    /// Alphabetical order rarely reads coherently (an "overview" belongs first, not wherever its letter
+    /// falls), so the writer sets this to arrange the document. Zero for entries written before it existed.
+    /// </summary>
+    public int Order { get; init; }
 }
 
 /// <summary>What changed about one section, so a view refreshes only the row that moved.</summary>
@@ -99,12 +106,15 @@ public sealed class NoteStore
         }
     }
 
-    /// <summary>Every section, in key order.</summary>
+    /// <summary>Every section, in document order — by <see cref="Note.Order"/>, ties broken by key.</summary>
     public IReadOnlyList<KeyValuePair<string, Note>> Snapshot()
     {
         lock (_lock)
         {
-            return _byKey.ToList();
+            return _byKey
+                .OrderBy(e => e.Value.Order)
+                .ThenBy(e => e.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
     }
 
@@ -114,7 +124,7 @@ public sealed class NoteStore
     /// <see cref="ArgumentException"/> when the text is longer than <see cref="MaxTextLength"/>, so the
     /// caller can report the overage rather than lose the tail of it.
     /// </summary>
-    public Note? Set(string key, string? text)
+    public Note? Set(string key, string? text, int? order = null)
     {
         string? cleanKey = CleanKey(key);
         if (cleanKey is null)
@@ -130,9 +140,59 @@ public sealed class NoteStore
                 + "split it into two sections", nameof(text));
         }
 
-        return Update(cleanKey, cleanText is null
-            ? null
-            : new Note { Text = cleanText, Source = Source, Modified = DateTimeOffset.UtcNow });
+        if (cleanText is null)
+        {
+            return Update(cleanKey, null);
+        }
+
+        // Keep a section's place when its text is rewritten; a new one goes to the end unless placed.
+        int assigned = order ?? Get(cleanKey)?.Order ?? NextOrder();
+        return Update(cleanKey, new Note { Text = cleanText, Source = Source, Modified = DateTimeOffset.UtcNow, Order = assigned });
+    }
+
+    /// <summary>
+    /// Moves a section to a new position in the document without touching its text or who wrote it —
+    /// arranging the notes is not authoring them. Returns the moved section, or null if there is none.
+    /// </summary>
+    public Note? SetOrder(string key, int order)
+    {
+        string? clean = CleanKey(key);
+        if (clean is null)
+        {
+            return null;
+        }
+
+        Note? before;
+        Note? after;
+        lock (_lock)
+        {
+            if (!_byKey.TryGetValue(clean, out var existing))
+            {
+                return null;
+            }
+
+            if (existing.Order == order)
+            {
+                return existing;
+            }
+
+            before = existing;
+            after = existing with { Order = order };   // Source and Modified kept: a move is not an edit
+            _byKey[clean] = after;
+            _changed.Add(clean);
+            IsDirty = true;
+        }
+
+        Changed?.Invoke(this, new NoteChange(clean, before, after));
+        return after;
+    }
+
+    private int NextOrder()
+    {
+        lock (_lock)
+        {
+            return _byKey.Count == 0 ? 0 : _byKey.Values.Max(v => v.Order) + 1;
+        }
     }
 
     /// <summary>
@@ -227,8 +287,9 @@ public sealed class NoteStore
         }
 
         // Source counts, the way it does for annotations: a section a person retypes over an agent's is
-        // the same text but no longer the agent's, and that difference is worth a save.
-        return a is not null && b is not null && a.Text == b.Text && a.Source == b.Source;
+        // the same text but no longer the agent's, and that difference is worth a save. Order counts too,
+        // because a reorder is a change that has to reach the file and the other writer.
+        return a is not null && b is not null && a.Text == b.Text && a.Source == b.Source && a.Order == b.Order;
     }
 
     /// <summary>

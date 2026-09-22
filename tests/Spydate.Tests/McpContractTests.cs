@@ -61,8 +61,13 @@ public class McpContractTests
     /// thing" that answers it whole, and no sentence shaved off another tool would have bought any of
     /// the three. The descriptions were tightened to what they mean before the number was moved, so this
     /// is the honest cost, paid once and on purpose.
+    ///
+    /// Nudged to 9,000 when note learned an index — sections read as one document, and alphabetical
+    /// order rarely reads coherently, so the writer places them. That is one parameter, not a tool, but
+    /// shaving a real description to keep the round number is exactly the trade this comment argues
+    /// against; the honest move is to let the figure follow the surface.
     /// </summary>
-    private const int MaxManifestChars = 8_900;
+    private const int MaxManifestChars = 9_000;
 
     private const int MaxDescriptionChars = 400;
 

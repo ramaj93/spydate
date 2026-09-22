@@ -249,6 +249,63 @@ public sealed class NotesTests : IDisposable
     }
 
     [Fact]
+    public void NewSectionsKeepInsertionOrderNotAlphabetical()
+    {
+        var store = new NoteStore();
+        store.Set("overview", "first written");
+        store.Set("allocator", "second written");
+        store.Set("dead-ends", "third written");
+
+        Assert.Equal(new[] { "overview", "allocator", "dead-ends" }, store.Snapshot().Select(e => e.Key));
+    }
+
+    [Fact]
+    public void AnExplicitOrderPlacesASection()
+    {
+        var store = new NoteStore();
+        store.Set("details", "written first");
+        store.Set("overview", "written second, but belongs first", order: -1);
+
+        Assert.Equal(new[] { "overview", "details" }, store.Snapshot().Select(e => e.Key));
+    }
+
+    [Fact]
+    public void RewritingASectionKeepsItsPlace()
+    {
+        var store = new NoteStore();
+        store.Set("a", "one");
+        store.Set("b", "two");
+        store.Set("a", "one, rewritten");
+
+        Assert.Equal(new[] { "a", "b" }, store.Snapshot().Select(e => e.Key));
+    }
+
+    [Fact]
+    public void SetOrderMovesASectionWithoutChangingItsAuthor()
+    {
+        var store = new NoteStore { Source = AnnotationSource.Agent };
+        store.Set("first", "by agent");
+        store.Set("second", "by agent");
+
+        var moved = store.SetOrder("second", -1);
+        Assert.NotNull(moved);
+        Assert.Equal(AnnotationSource.Agent, moved!.Source);   // a move is not an edit
+        Assert.Equal(new[] { "second", "first" }, store.Snapshot().Select(e => e.Key));
+    }
+
+    [Fact]
+    public void OrderSurvivesTheFile()
+    {
+        var store = new NoteStore();
+        store.Set("z-last-alphabetically", "but written first, so first");
+        store.Set("a-first-alphabetically", "written second");
+        SpydateProject.SaveTo(_path, _image, new AnnotationStore(), notes: store);
+
+        var back = Reload();
+        Assert.Equal(new[] { "z-last-alphabetically", "a-first-alphabetically" }, back.Snapshot().Select(e => e.Key));
+    }
+
+    [Fact]
     public void NotesAndAnnotationsShareTheFileWithoutDisturbingEachOther()
     {
         var annotations = new AnnotationStore();

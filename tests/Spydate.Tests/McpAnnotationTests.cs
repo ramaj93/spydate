@@ -268,6 +268,27 @@ public sealed class McpAnnotationTests : IDisposable
     }
 
     [Fact]
+    public void NoteIndexOrdersTheSections()
+    {
+        Tools().Note("details", "written first");
+        Tools().Note("overview", "belongs first", index: -1);
+
+        string index = Tools().ReadNotes();
+        Assert.True(index.IndexOf("overview", StringComparison.Ordinal) < index.IndexOf("details", StringComparison.Ordinal),
+            "overview should be listed before details");
+    }
+
+    [Fact]
+    public void NoteWithAnIndexAndNoTextReordersWithoutClearing()
+    {
+        Tools().Note("overview", "the text stays");
+        string result = Tools().Note("overview", index: 5);
+
+        Assert.Contains("moved", result);
+        Assert.Equal("the text stays", _notes.Get("overview")!.Text);
+    }
+
+    [Fact]
     public void ReadNotesWithAKeyReturnsThatSectionWhole()
     {
         string body = "line one\nline two\nline three";

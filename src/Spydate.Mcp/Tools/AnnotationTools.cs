@@ -253,7 +253,8 @@ public sealed class AnnotationTools
     [Description("Record what you learn about the binary as a whole, which has no single address: how strings are encoded, what a subsystem does, a dead end. You choose the section key (e.g. string-xor, dead-ends). Markdown, up to 4000 chars a section, as many sections as you need. Saved at once; pass \"\" to remove one.")]
     public string Note(
         [Description("Short section key, e.g. \"overview\" or \"string-xor\".")] string key,
-        [Description("The section text. Markdown, multi-line. \"\" removes the section.")] string? text = null)
+        [Description("The section text. Markdown, multi-line. \"\" removes the section.")] string? text = null,
+        [Description("Optional position in the read-together document, lower first. Omit text to only reorder.")] int? index = null)
     {
         if (_options.ReadOnly)
         {
@@ -265,17 +266,35 @@ public sealed class AnnotationTools
             return SessionTools.NothingOpen;
         }
 
+        string canonical = NoteStore.CleanKey(key) ?? key;
+
+        // Reorder only: an index with no text moves the section without rewriting it. Omitting both is
+        // nothing to do, and would otherwise fall through to clearing the section, which is a surprise.
+        if (text is null)
+        {
+            if (index is null)
+            {
+                return "give text to write, \"\" to remove, or an index to reorder";
+            }
+
+            if (session.Notes.SetOrder(key, index.Value) is null)
+            {
+                return $"no section {canonical} to reorder";
+            }
+
+            return $"section {canonical} moved to {index.Value}\n\n" + NoteIndex(session) + PersistNotes(session);
+        }
+
         Note? stored;
         try
         {
-            stored = session.Notes.Set(key, text);
+            stored = session.Notes.Set(key, text, index);
         }
         catch (ArgumentException ex)
         {
             return ex.Message;
         }
 
-        string canonical = NoteStore.CleanKey(key) ?? key;
         string head = stored is null
             ? $"section {canonical} removed"
             : $"section {canonical} saved ({stored.Text.Length} chars)";

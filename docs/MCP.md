@@ -185,7 +185,10 @@ what it already knows without the re-read.
 to no address — how the strings are encoded, what a subsystem is for, a dead end not worth chasing
 again. Sections are keyed by a short name the writer chooses (`string-xor`, `dead-ends`), Markdown, up
 to 4,000 characters each and as many as needed; a longer one is refused with the overage rather than
-truncated, because a note is knowledge and half of it is worse than none. `read_notes` with no key
+truncated, because a note is knowledge and half of it is worse than none. `note(key, index=…)` places a
+section in the read-together document — lower first — because alphabetical order rarely reads
+coherently (an overview belongs first, not wherever its letter falls); an index with no text only moves
+the section, without rewriting it. `read_notes` with no key
 returns the section index — always whole — then the sections themselves as far as the budget allows;
 with a key, that one section. The notes also ride on `open_binary`/`get_overview`, so they are in
 front of an agent from the start.

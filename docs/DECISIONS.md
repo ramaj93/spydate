@@ -871,3 +871,11 @@ the number was moved.
 The file format does not change. Notes are a `notes` member alongside `annotations`, `patches` and
 `breakpoints`, and a reader that predates them skips a member it does not know — the same forward
 compatibility those two already rely on, and the reason the format stays 1.
+
+Sections carry an order, and the read-together document leaves the keys off. Alphabetical order —
+what a key-sorted store gives for free — rarely reads as coherent prose: an overview belongs first,
+not wherever its letter falls. So a section has an `order`, set by `note(index=…)` or by moving it in
+the window, and the document and the note index follow it; a new section appends rather than sorting
+in. The document view drops the `## key` headings and joins the bodies, because the keys are
+organisational labels, not part of the writing — a section that wants a heading carries its own in its
+text. A move keeps the section's author and time: arranging notes is not authoring them.
