@@ -824,3 +824,50 @@ all three, scrolling a 7,000-character answer while holding a select-all went fr
 (killed at 150 seconds) to costing 4 ms a step more than scrolling with nothing selected, and a
 repaint during a drag from remeasuring everything to 0.1 ms. What remains is WPF laying the text
 out, which any list showing that much text would pay.
+
+## Notes are keyed sections in the project file, and the agent reads its own record whole
+
+An annotation belongs to an address. A great deal of what an analyst learns does not: how a binary
+encodes its strings, what a subsystem is for, which function is a custom allocator not worth stepping
+into, a path already tried that led nowhere. Until now that had nowhere to live but the chat, which
+is compacted away and, on restore, flattened. So agents did the expensive thing instead — re-reading
+functions they had already understood — because the cheap thing, trusting the record, was not
+actually available to them.
+
+Three moves fix it, and each is a decision.
+
+**Notes are sections, not one document.** The project file is written by two processes at once — the
+window and an agent, or two agents — and the save is a merge: each re-reads the file, keeps what it
+did not touch, overlays only what it changed. A single blob of notes would make every save of it
+delete whatever the other writer had added since; keys make the merge per-section, so two writers
+collide only when they edit the same section, which is rare. The keys are the writer's own headings,
+folded to one canonical form (`Dead Ends`, `dead_ends`, `dead-ends` are one section) so the index
+does not fill with near-duplicates.
+
+**A section too long is refused, not truncated.** A name is capped and clipped, because a
+300-character name is a paste accident and nothing is lost. A note is knowledge, and half of it is
+worse than none — the reader cannot tell the tail was dropped. So `note` refuses an over-length
+section with the overage and the writer splits it, rather than the store silently keeping the first
+4,000 characters.
+
+**The notes stand in context, not behind a tool call.** For the MCP agent they ride on
+`open_binary`/`get_overview`; for the window agent the system message is rebuilt every turn to carry
+the section index and as much of the bodies as a turn can afford. The index is never cut — only the
+bodies are, and `read_notes` reads the rest. This is the CLAUDE.md property: the standing knowledge is
+in front of the model without it having to remember to fetch it.
+
+**`read_annotation` is a tool, not a flag on the list.** The record an agent already has was hard to
+see: `list_annotations` elides long comments to fit a table, and `read_function` shows the comments
+recorded mid-function only in the asm view, not the pseudo-C it usually reads. `read_annotation`
+returns one address's record whole — name, full comment, locals, the comments inside its function,
+and the note sections that name it. The agent needs a verb that means "what do I already know about
+this one thing" and returns it untruncated; that is what stops the re-read.
+
+The cost is a larger tool manifest — three tools where there were none, the biggest single raise the
+manifest budget has taken (see McpContractTests). It is paid on purpose: a new kind of thing the
+project holds, the first since patches, and the descriptions were tightened to what they mean before
+the number was moved.
+
+The file format does not change. Notes are a `notes` member alongside `annotations`, `patches` and
+`breakpoints`, and a reader that predates them skips a member it does not know — the same forward
+compatibility those two already rely on, and the reason the format stays 1.

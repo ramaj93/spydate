@@ -26,6 +26,7 @@ public sealed class McpAnnotationTests : IDisposable
     private readonly PeImage _image;
     private readonly BinaryAnalysis _analysis;
     private readonly SessionStore _store;
+    private readonly NoteStore _notes;
     private readonly string _projectPath;
 
     public McpAnnotationTests()
@@ -47,6 +48,7 @@ public sealed class McpAnnotationTests : IDisposable
         Directory.CreateDirectory(_directory);
         _projectPath = Path.Combine(_directory, "sample.spydate");
 
+        _notes = new NoteStore { Source = AnnotationSource.Agent };
         _store = new SessionStore();
         _store.Set(new BinarySession(
             "sample.exe",
@@ -56,9 +58,10 @@ public sealed class McpAnnotationTests : IDisposable
             new DiscoveryState(_analysis.FunctionCount, true, TimeSpan.Zero),
             save: (image, annotations) =>
             {
-                SpydateProject.SaveTo(_projectPath, image, annotations);
+                SpydateProject.SaveTo(_projectPath, image, annotations, notes: _notes);
                 return _projectPath;
-            }));
+            },
+            notes: _notes));
     }
 
     public void Dispose()
@@ -218,5 +221,122 @@ public sealed class McpAnnotationTests : IDisposable
 
         Assert.Equal("TypedInTheWindow", fresh.NameFor(Entry));
         Assert.Equal("AddedByAgent", fresh.NameFor(Callee));
+    }
+
+    // --- notes --------------------------------------------------------
+
+    [Fact]
+    public void ANoteIsSavedAndEchoesTheCleanedKey()
+    {
+        string result = Tools().Note("String XOR", "strings are xor'd with 0x5A");
+
+        Assert.Contains("string-xor", result);
+        Assert.Contains("saved", result);
+
+        var fresh = new NoteStore();
+        SpydateProject.Load(_projectPath, _image, new AnnotationStore(), notes: fresh);
+        Assert.Equal("strings are xor'd with 0x5A", fresh.Get("string-xor")!.Text);
+    }
+
+    [Fact]
+    public void AnOverLongNoteIsRefusedWithTheOverageAndNothingIsWritten()
+    {
+        string tooLong = new('x', NoteStore.MaxTextLength + 12);
+        string result = Tools().Note("overview", tooLong);
+
+        Assert.Contains("12", result);
+        Assert.Equal(0, _notes.Count);
+    }
+
+    [Fact]
+    public void ReadNotesListsEveryKeyEvenWhenBodiesAreClipped()
+    {
+        // Sections whose bodies together far exceed the budget, so the index must still name them all.
+        string big = new('a', 3_500);
+        for (int i = 0; i < 8; i++)
+        {
+            Tools().Note($"section-{i}", big);
+        }
+
+        string index = Tools().ReadNotes();
+        for (int i = 0; i < 8; i++)
+        {
+            Assert.Contains($"section-{i}", index);
+        }
+
+        Assert.Contains("read_notes(offset=", index);
+    }
+
+    [Fact]
+    public void ReadNotesWithAKeyReturnsThatSectionWhole()
+    {
+        string body = "line one\nline two\nline three";
+        Tools().Note("overview", body);
+
+        string one = Tools().ReadNotes("overview");
+        Assert.Contains(body, one);
+    }
+
+    [Fact]
+    public void ReadNotesOffsetPagesThroughTheRest()
+    {
+        string big = new('b', 3_500);
+        for (int i = 0; i < 6; i++)
+        {
+            Tools().Note($"s{i}", big);
+        }
+
+        string page = Tools().ReadNotes(offset: 4);
+        Assert.Contains("## s4", page);
+    }
+
+    [Fact]
+    public void ReadAnnotationShowsTheWholeRecordAndMentioningNotes()
+    {
+        Tools().Annotate($"0x{Callee:X}", name: "ClearString", comment: "clears the decoded buffer");
+        Tools().AnnotateLocal($"0x{Callee:X}", "arg_0", "buffer");
+        Tools().Note("string-xor", "ClearString is called after the xor pass");
+
+        string record = Tools().ReadAnnotation($"0x{Callee:X}");
+
+        Assert.Contains("ClearString", record);
+        Assert.Contains("clears the decoded buffer", record);
+        Assert.Contains("arg_0=buffer", record);
+        Assert.Contains("string-xor", record);   // the note that names it
+    }
+
+    [Fact]
+    public void ReadAnnotationOnAMidFunctionAddressFallsBackToItsFunction()
+    {
+        Tools().Annotate($"0x{Entry:X}", name: "TheCaller");
+
+        // An address inside TheCaller with nothing on it: the answer is the function, not "nothing".
+        string record = Tools().ReadAnnotation($"0x{Entry + 2:X}");
+        Assert.Contains("TheCaller", record);
+    }
+
+    [Fact]
+    public void ListAnnotationsFiltersByQuery()
+    {
+        Tools().Annotate($"0x{Entry:X}", name: "ParseHeader", comment: "reads the magic");
+        Tools().Annotate($"0x{Callee:X}", name: "ClearString", comment: "wipes the buffer");
+
+        string magic = Tools().ListAnnotations(query: "magic");
+        Assert.Contains("ParseHeader", magic);
+        Assert.DoesNotContain("ClearString", magic);
+    }
+
+    [Fact]
+    public void ReadOnlyRefusesNoteButStillReadsIt()
+    {
+        Tools().Note("overview", "written while writable");
+
+        string refusal = Tools(readOnly: true).Note("overview", "should not take");
+        Assert.Contains("read-only", refusal);
+        Assert.Equal("written while writable", _notes.Get("overview")!.Text);
+
+        // Reading still works under read-only.
+        string read = Tools(readOnly: true).ReadNotes("overview");
+        Assert.Contains("written while writable", read);
     }
 }

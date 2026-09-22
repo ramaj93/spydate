@@ -386,6 +386,19 @@ public sealed class CodeTools
             sb.Append(CultureInfo.InvariantCulture, $"comment     {comment}\n");
         }
 
+        // Comments recorded mid-function. In pseudo-C the instruction they sit on may fold away, so a
+        // previous reader's note would otherwise be invisible unless the whole asm listing is read.
+        var midComments = analysis.Annotations.Snapshot()
+            .Where(e => e.Key > function.EntryVa && e.Key < function.EndVa && e.Value.Comment is { Length: > 0 })
+            .OrderBy(e => e.Key)
+            .Select(e => $"0x{e.Key:X} {e.Value.Comment}")
+            .ToList();
+        if (midComments.Count > 0)
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $"comments    {string.Join("; ", midComments.Take(8))}{(midComments.Count > 8 ? $" (+{midComments.Count - 8} more: read_annotation)" : string.Empty)}\n");
+        }
+
         if (function.Notes.Count > 0)
         {
             sb.Append(CultureInfo.InvariantCulture, $"notes       {string.Join("; ", function.Notes.Take(2))}\n");

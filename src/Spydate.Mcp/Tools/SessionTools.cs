@@ -216,6 +216,8 @@ public sealed class SessionTools
             Line(sb, "next", "list_functions(named=\"unnamed\", sort=\"refs\") | list_imports() | find_strings(query=...)");
         }
 
+        Notes(sb, session);
+
         return Budget.Clip(sb.ToString());
     }
 
@@ -301,9 +303,47 @@ public sealed class SessionTools
         _ => "no PDB",
     };
 
+    /// <summary>
+    /// What has been learned about the binary as a whole. On open this is the only standing surface an
+    /// external agent has — there is no system prompt to carry it — so the section keys are always
+    /// listed and the bodies follow up to a small cap, past which read_notes reads the rest.
+    /// </summary>
+    private static void Notes(StringBuilder sb, BinarySession session)
+    {
+        var sections = session.Notes.Snapshot();
+        if (sections.Count == 0)
+        {
+            Line(sb, "notes", "none yet (record what you learn with note)");
+            return;
+        }
+
+        Line(sb, "notes", $"{sections.Count} section{(sections.Count == 1 ? string.Empty : "s")} (read_notes): {string.Join(", ", sections.Select(s => s.Key))}");
+
+        const int cap = 2_500;
+        var body = new System.Text.StringBuilder();
+        int shown = 0;
+        foreach (var (key, note) in sections)
+        {
+            string block = $"\n## {key}\n{note.Text}\n";
+            if (body.Length + block.Length > cap && shown > 0)
+            {
+                break;
+            }
+
+            body.Append(block);
+            shown++;
+        }
+
+        sb.Append(body);
+        if (shown < sections.Count)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"\n-- {sections.Count - shown} more: read_notes --\n");
+        }
+    }
+
     private static string Project(BinarySession session) => session.Project switch
     {
-        { Loaded: true } p => $"{p.Applied} annotations from {p.Path}",
+        { Loaded: true } p => $"{p.Applied} annotations{(p.NotesApplied > 0 ? $", {p.NotesApplied} notes" : string.Empty)} from {p.Path}",
         { Reason: { Length: > 0 } reason } => reason,
         _ => "none yet; annotations will be saved when you make one",
     };

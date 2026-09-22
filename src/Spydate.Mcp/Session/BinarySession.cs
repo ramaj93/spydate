@@ -57,14 +57,16 @@ public sealed class BinarySession : IDisposable
         DiscoveryState discovery,
         Func<PeImage, AnnotationStore, string?>? save = null,
         PatchStore? patches = null,
+        NoteStore? notes = null,
         ManagedAssembly? managed = null,
         string? managedLoadError = null,
         bool ownsManaged = true)
     {
-        // A lambda rather than the method group: SpydateProject.Save takes an optional patch store
-        // now, and a group with a defaulted parameter no longer converts on its own.
+        // A lambda rather than the method group: SpydateProject.Save takes optional stores now, and a
+        // group with defaulted parameters no longer converts on its own.
         Patches = patches ?? new PatchStore();
-        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations, Patches));
+        Notes = notes ?? new NoteStore();
+        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations, Patches, notes: Notes));
         Path = path;
         Image = image;
         Analysis = analysis;
@@ -177,6 +179,9 @@ public sealed class BinarySession : IDisposable
     /// <summary>Byte changes recorded against this image. Never written to any binary from here.</summary>
     public PatchStore Patches { get; }
 
+    /// <summary>What has been learned about the binary as a whole — keyed sections, saved in the project.</summary>
+    public NoteStore Notes { get; }
+
     /// <summary>Writes the annotations out, returning where they went.</summary>
     public Func<PeImage, AnnotationStore, string?> Save { get; }
 
@@ -247,14 +252,15 @@ public sealed class BinarySession : IDisposable
         var analysis = new BinaryAnalysis(image) { ResolveImportSignatures = true };
         analysis.Annotations.Source = AnnotationSource.Agent;
         analysis.LoadPdbSymbols();
-        var project = SpydateProject.LoadFor(image, analysis.Annotations);
+        var notes = new NoteStore { Source = AnnotationSource.Agent };
+        var project = SpydateProject.LoadFor(image, analysis.Annotations, notes: notes);
 
         var clock = Stopwatch.StartNew();
         var found = analysis.DiscoverAll(options.MaxFunctions, progress: null, cancellationToken);
         clock.Stop();
 
         var discovery = new DiscoveryState(found.Count, found.Count < options.MaxFunctions, clock.Elapsed);
-        return new BinarySession(full, image, analysis, project, discovery, managed: managed, managedLoadError: managedError);
+        return new BinarySession(full, image, analysis, project, discovery, notes: notes, managed: managed, managedLoadError: managedError);
     }
 
     /// <summary>

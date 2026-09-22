@@ -161,17 +161,34 @@ rather than leaving it to be discovered. Discovery still runs on such a file, de
 is one bit in a header, and a binary that hides native code behind it is exactly the binary somebody
 opened this to look at.
 
-**Naming** — `annotate` · `annotate_local` · `list_annotations`
+**Naming and notes** — `annotate` · `annotate_local` · `list_annotations` · `read_annotation` ·
+`note` · `read_notes`
 
 Writes save immediately; there is no save tool, because one whose only failure mode is "the agent
 forgot" would lose work by default. `list_annotations` is what to read after a context compaction to
-pick up where you left off, and what a person reads to review what the agent has done.
+pick up where you left off, and what a person reads to review what the agent has done. It takes a
+`query` to search names, comments and locals.
 
 `annotate` takes a target the way the reading tools do, including a managed method by name —
 `annotate(target="Namespace.Type::Method", comment="…")`. A comment belongs to an address, and a
 managed method's is where its IL begins, so this resolves the name the same way `read_function` and
 `debug_break` do and notes the method there, rather than making an agent hand-compute an RVA for it. A
 type or a field, having no single address, is refused with that said.
+
+`read_annotation(target)` returns one address's record whole — name, comment, local names, the
+comments recorded inside its function, and the note sections that mention it. It exists because the
+list elides long comments and `read_function` shows mid-function ones only in the asm view, so an
+agent that half-remembered its own earlier work kept re-reading functions to recover it; this returns
+what it already knows without the re-read.
+
+`note(key, text)` and `read_notes(key?)` are for what is true of the **binary as a whole** and belongs
+to no address — how the strings are encoded, what a subsystem is for, a dead end not worth chasing
+again. Sections are keyed by a short name the writer chooses (`string-xor`, `dead-ends`), Markdown, up
+to 4,000 characters each and as many as needed; a longer one is refused with the overage rather than
+truncated, because a note is knowledge and half of it is worse than none. `read_notes` with no key
+returns the section index — always whole — then the sections themselves as far as the budget allows;
+with a key, that one section. The notes also ride on `open_binary`/`get_overview`, so they are in
+front of an agent from the start.
 
 ## Sharing a binary with the window
 

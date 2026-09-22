@@ -152,6 +152,7 @@ public sealed class AnnotationTools
     [Description("Every name and comment recorded for this binary, and who set it. Read this to pick up where a previous session left off, or to review what an agent has done.")]
     public string ListAnnotations(
         [Description("\"agent\", \"user\" or \"all\". Default \"all\".")] string source = "all",
+        [Description("Text to look for in names, comments and local names; an address or exact name matches its row.")] string? query = null,
         [Description("Rows to skip, for paging.")] int offset = 0,
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
     {
@@ -162,6 +163,7 @@ public sealed class AnnotationTools
 
         limit = Math.Clamp(limit, 1, MaxLimit);
         offset = Math.Max(0, offset);
+        string? needle = string.IsNullOrWhiteSpace(query) ? null : query.Trim();
 
         var all = analysis.Annotations.Snapshot();
         var matching = all
@@ -171,9 +173,10 @@ public sealed class AnnotationTools
                 "user" => e.Value.Source == AnnotationSource.User,
                 _ => true,
             })
+            .Where(e => needle is null || Matches(e.Key, e.Value, needle))
             .ToList();
 
-        var table = new TextTable(("address", 18), ("by", 5), ("name", 44), ("comment", 52), ("locals", 30));
+        var table = new TextTable(("address", 18), ("by", 5), ("name", 44), ("comment", 80), ("locals", 30));
         foreach (var (va, annotation) in matching.Skip(offset).Take(limit))
         {
             table.Add(
@@ -185,11 +188,301 @@ public sealed class AnnotationTools
         }
 
         int returned = Math.Max(0, Math.Min(limit, matching.Count - offset));
-        string? next = offset + returned < matching.Count ? $"list_annotations(offset={offset + returned})" : null;
+        string paging = needle is null ? $"offset={offset + returned}" : $"query=\"{needle}\", offset={offset + returned}";
+        string? next = offset + returned < matching.Count ? $"list_annotations({paging})" : null;
+        string filters = needle is null ? $"source={source}" : $"source={source}, query={needle}";
 
-        return Budget.Clip(table.Render("nothing has been named yet") + '\n'
-                           + TextTable.Meta(returned, matching.Count, all.Count, "annotations", next, $"source={source}")
+        return Budget.Clip(table.Render(needle is null ? "nothing has been named yet" : $"nothing matches \"{needle}\"") + '\n'
+                           + TextTable.Meta(returned, matching.Count, all.Count, "annotations", next, filters)
                            + Where(session));
+    }
+
+    /// <summary>Whether an annotation's text contains the needle, case-insensitively — name, comment, or a slot name.</summary>
+    private static bool Matches(ulong va, Annotation annotation, string needle)
+    {
+        if ($"0x{va:X}".Contains(needle, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (annotation.Name is { } name && name.Contains(needle, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (annotation.Comment is { } comment && comment.Contains(needle, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return annotation.Locals is { } locals
+               && locals.Any(l => l.Key.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                                  || l.Value.Contains(needle, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [McpServerTool(Name = "read_annotation")]
+    [Description("Everything recorded about one function or address, whole: name, comment, local names, the comments inside it with their addresses, and the note sections that mention it. Read before re-reading a function a past session worked on.")]
+    public string ReadAnnotation(
+        [Description("Address, sub_XXXX, an existing name, or a .NET Type::Method.")] string target)
+    {
+        if (_store.Current is not { Analysis: { } analysis } session)
+        {
+            return SessionTools.NothingOpen;
+        }
+
+        if (!Resolve(session, target, out ulong va, out string? problem))
+        {
+            return problem!;
+        }
+
+        var here = analysis.Annotations.Get(va);
+        var containing = analysis.FunctionContaining(va);
+
+        // A bare mid-function address with nothing on it is not an empty answer: the function it sits
+        // in is what the caller is really asking about, so show that instead of "nothing recorded".
+        if ((here is null || here.IsEmpty) && containing is { } fn && fn.EntryVa != va)
+        {
+            return $"nothing recorded at 0x{va:X} itself; it is inside {fn.Name}:\n\n"
+                   + RenderAnnotation(session, fn.EntryVa);
+        }
+
+        return RenderAnnotation(session, va);
+    }
+
+    [McpServerTool(Name = "note")]
+    [Description("Record what you learn about the binary as a whole, which has no single address: how strings are encoded, what a subsystem does, a dead end. You choose the section key (e.g. string-xor, dead-ends). Markdown, up to 4000 chars a section, as many sections as you need. Saved at once; pass \"\" to remove one.")]
+    public string Note(
+        [Description("Short section key, e.g. \"overview\" or \"string-xor\".")] string key,
+        [Description("The section text. Markdown, multi-line. \"\" removes the section.")] string? text = null)
+    {
+        if (_options.ReadOnly)
+        {
+            return ReadOnlyRefusal;
+        }
+
+        if (_store.Current is not { } session)
+        {
+            return SessionTools.NothingOpen;
+        }
+
+        Note? stored;
+        try
+        {
+            stored = session.Notes.Set(key, text);
+        }
+        catch (ArgumentException ex)
+        {
+            return ex.Message;
+        }
+
+        string canonical = NoteStore.CleanKey(key) ?? key;
+        string head = stored is null
+            ? $"section {canonical} removed"
+            : $"section {canonical} saved ({stored.Text.Length} chars)";
+
+        return head + "\n\n" + NoteIndex(session) + PersistNotes(session);
+    }
+
+    [McpServerTool(Name = "read_notes")]
+    [Description("What was learned about the binary as a whole. No key: the section index (always whole) then the sections in full as far as fits. A key: that section whole.")]
+    public string ReadNotes(
+        [Description("A section key to read whole. Omit for the index and as many sections as fit.")] string? key = null,
+        [Description("Sections to skip, to read the rest a few at a time.")] int offset = 0)
+    {
+        if (_store.Current is not { } session)
+        {
+            return SessionTools.NothingOpen;
+        }
+
+        var sections = session.Notes.Snapshot();
+        if (sections.Count == 0)
+        {
+            return "nothing has been noted yet; record what you learn with note";
+        }
+
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            string? clean = NoteStore.CleanKey(key);
+            if (clean is null || session.Notes.Get(clean) is not { } one)
+            {
+                return $"no section \"{key}\"\n\n" + NoteIndex(session);
+            }
+
+            return $"## {clean}\n{one.Text}";
+        }
+
+        return NoteBodies(session, Math.Max(0, offset));
+    }
+
+    /// <summary>
+    /// Resolves a target to a VA the way <see cref="Annotate"/> does — an address, a sub_ name, an
+    /// existing name, or a managed <c>Type::Method</c> whose IL start it addresses — and checks it is
+    /// inside the image. Returns false with the problem to hand back when it does not resolve.
+    /// </summary>
+    private static bool Resolve(BinarySession session, string target, out ulong va, out string? problem)
+    {
+        va = 0;
+        problem = null;
+
+        var resolved = Targets.Resolve(session, target);
+        if (!resolved.Found)
+        {
+            if (ManagedMethodVa(session, target) is { } managedVa)
+            {
+                resolved = TargetResult.Of(managedVa);
+            }
+            else if (session.ManagedIndex is not null && ManagedTargets.Resolve(session, target) is { Found: true } named)
+            {
+                problem = $"{named.Describe()} has no single address; name a method as Namespace.Type::Method, or give an address";
+                return false;
+            }
+            else
+            {
+                problem = resolved.Problem!;
+                return false;
+            }
+        }
+
+        if (!InsideImage(session, resolved.Va))
+        {
+            problem = $"0x{resolved.Va:X} is outside the image";
+            return false;
+        }
+
+        va = resolved.Va;
+        return true;
+    }
+
+    /// <summary>
+    /// One address's record, whole: its name and full comment, its local names, every comment recorded
+    /// inside the function it heads, and the note sections whose text names it. This is what a re-read
+    /// would rediscover, without the re-read — and it does not truncate, because trusting the record is
+    /// the whole point of reading it.
+    /// </summary>
+    private static string RenderAnnotation(BinarySession session, ulong va)
+    {
+        var analysis = session.Analysis!;
+        var annotation = analysis.Annotations.Get(va);
+        string name = analysis.NameFor(va);
+        string by = annotation is { Source: AnnotationSource.Agent } ? "agent" : "user";
+        string when = annotation?.Modified is { } m ? $", {m.ToLocalTime():yyyy-MM-dd HH:mm}" : string.Empty;
+
+        var sb = new StringBuilder();
+        sb.Append(CultureInfo.InvariantCulture, $"0x{va:X}  {name}");
+        if (annotation is not null && !annotation.IsEmpty)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"  (by {by}{when})");
+        }
+
+        sb.Append('\n');
+
+        if (annotation?.Comment is { Length: > 0 } comment)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"comment   {comment}\n");
+        }
+
+        if (annotation?.Locals is { Count: > 0 } locals)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"locals    {string.Join("  ", locals.OrderBy(l => l.Key, StringComparer.Ordinal).Select(l => $"{l.Key}={l.Value}"))}\n");
+        }
+
+        // Comments the previous reader left mid-function. These vanish from pseudo-C where the
+        // instruction they sit on folds away, so they are exactly the work a re-read would miss.
+        if (analysis.FunctionContaining(va) is { } fn && fn.EntryVa == va)
+        {
+            var inside = analysis.Annotations.Snapshot()
+                .Where(e => e.Key > fn.EntryVa && e.Key < fn.EndVa && e.Value.Comment is { Length: > 0 })
+                .OrderBy(e => e.Key)
+                .ToList();
+
+            for (int i = 0; i < inside.Count; i++)
+            {
+                var (at, note) = inside[i];
+                string label = i == 0 ? "inside" : "      ";
+                string src = note.Source == AnnotationSource.Agent ? "agent" : "user";
+                sb.Append(CultureInfo.InvariantCulture, $"{label}    0x{at:X}  {note.Comment}  ({src})\n");
+            }
+        }
+
+        // Note sections that name this function, so a truth recorded about the binary as a whole is
+        // linked back to the place it is about.
+        if (annotation?.Name is { Length: > 0 } named)
+        {
+            var mentions = session.Notes.Snapshot()
+                .Where(s => s.Value.Text.Contains(named, StringComparison.OrdinalIgnoreCase))
+                .Select(s => s.Key)
+                .ToList();
+
+            if (mentions.Count > 0)
+            {
+                sb.Append(CultureInfo.InvariantCulture, $"notes     {string.Join(", ", mentions)}  (read_notes)\n");
+            }
+        }
+
+        if (annotation is null || annotation.IsEmpty)
+        {
+            sb.Append("nothing recorded here yet\n");
+        }
+
+        return sb.ToString().TrimEnd('\n');
+    }
+
+    /// <summary>The section index — every key, who wrote it, when, and its size. Never cut by the budget.</summary>
+    private static string NoteIndex(BinarySession session)
+    {
+        var sections = session.Notes.Snapshot();
+        if (sections.Count == 0)
+        {
+            return "no sections yet";
+        }
+
+        var table = new TextTable(("section", 30), ("by", 5), ("modified", 16), ("chars", 6));
+        foreach (var (key, note) in sections)
+        {
+            table.Add(
+                key,
+                note.Source == AnnotationSource.Agent ? "agent" : "user",
+                note.Modified is { } m ? m.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : string.Empty,
+                note.Text.Length.ToString(CultureInfo.InvariantCulture));
+        }
+
+        return table.Render();
+    }
+
+    /// <summary>
+    /// The index followed by section bodies from <paramref name="offset"/>, as many as the budget
+    /// allows. The index is always whole; only the bodies are paged, so "read me everything" is a
+    /// couple of calls rather than a silent clip.
+    /// </summary>
+    private static string NoteBodies(BinarySession session, int offset)
+    {
+        var sections = session.Notes.Snapshot();
+        var sb = new StringBuilder();
+        sb.Append(NoteIndex(session)).Append('\n');
+
+        int room = Budget.MaxChars - sb.Length - 120;   // keep space for the continuation notice
+        int shown = 0;
+        for (int i = offset; i < sections.Count; i++)
+        {
+            var (key, note) = sections[i];
+            string block = $"\n## {key}\n{note.Text}\n";
+            if (sb.Length + block.Length > room && shown > 0)
+            {
+                break;
+            }
+
+            sb.Append(block);
+            shown++;
+        }
+
+        int remaining = sections.Count - offset - shown;
+        if (remaining > 0)
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $"\n-- {remaining} more section{(remaining == 1 ? string.Empty : "s")}: read_notes(offset={offset + shown}) or read_notes(key=...) --");
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
@@ -242,6 +535,25 @@ public sealed class AnnotationTools
         catch (IOException ex)
         {
             return $"\nNOT SAVED: {ex.Message}. The name is set for this session but will not outlive it.";
+        }
+    }
+
+    /// <summary>
+    /// Writes a note through, tolerating a session with no native analysis — a purely managed assembly
+    /// has no annotation store, but its notes are still worth keeping. An empty store touches nothing
+    /// in the file's annotations, so passing one is safe and the merge preserves everything else.
+    /// </summary>
+    private string PersistNotes(BinarySession session)
+    {
+        try
+        {
+            var annotations = session.Analysis?.Annotations ?? new Spydate.Core.Project.AnnotationStore();
+            string? path = session.Save(session.Image, annotations);
+            return path is null ? string.Empty : $"\nsaved to {path}";
+        }
+        catch (IOException ex)
+        {
+            return $"\nNOT SAVED: {ex.Message}. The note is set for this session but will not outlive it.";
         }
     }
 

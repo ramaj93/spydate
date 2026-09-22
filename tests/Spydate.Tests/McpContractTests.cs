@@ -49,8 +49,20 @@ public class McpContractTests
     /// image; this is the one tool that reads a file the server cannot open, which is a fourth thing a
     /// file can be to it and, like the engines, earns its own tool rather than a strained overload of
     /// read_data.
+    ///
+    /// Raised to 8,900 for notes — knowledge about the binary that has no address at all. An
+    /// annotation lives at a place; how the strings are encoded, what a subsystem is for, a dead end
+    /// not worth chasing again do not, and until now had nowhere to go but chat, which is compacted
+    /// away. That is a new kind of thing the project holds — the first since patches — and it earns
+    /// note and read_notes, one to write a section and one to read the index and the rest. read_annotation
+    /// is the third and the reason the raise is this size: the record an agent already has is elided in
+    /// list_annotations and split across view modes in read_function, so it kept re-reading functions it
+    /// had already understood. read_annotation is the verb for "what do I already know about this one
+    /// thing" that answers it whole, and no sentence shaved off another tool would have bought any of
+    /// the three. The descriptions were tightened to what they mean before the number was moved, so this
+    /// is the honest cost, paid once and on purpose.
     /// </summary>
-    private const int MaxManifestChars = 7_700;
+    private const int MaxManifestChars = 8_900;
 
     private const int MaxDescriptionChars = 400;
 

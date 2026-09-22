@@ -4,6 +4,7 @@ using Spydate.Agent;
 using Spydate.Agent.Providers;
 using Spydate.Agent.Text;
 using Spydate.Agent.Secrets;
+using Spydate.Core.Project;
 using Spydate.Mcp;
 using Spydate.Mcp.Session;
 
@@ -22,6 +23,18 @@ public class AgentTests
         var store = new SessionStore();
         store.Set(new BinarySession(path, Corpus.Image(path), analysis, null, new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero)));
         return store;
+    }
+
+    /// <summary>A session whose note store the test can write to, to see the notes reach the prompt.</summary>
+    private static (SessionStore Store, NoteStore Notes) StoreWithNotes()
+    {
+        var analysis = Corpus.Analysed(Corpus.NotepadX64);
+        var notes = new NoteStore();
+        var store = new SessionStore();
+        store.Set(new BinarySession(
+            Corpus.NotepadX64, Corpus.Image(Corpus.NotepadX64), analysis, null,
+            new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero), notes: notes));
+        return (store, notes);
     }
 
     // ------------------------------------------------------------------
@@ -127,6 +140,60 @@ public class AgentTests
         // Reset forgets the conversation but not the instructions.
         Assert.Single(agent.History);
         Assert.Equal(ChatRole.System, agent.History[0].Role);
+    }
+
+    [Fact]
+    public void NotesInTheProjectRideOnTheSystemMessage()
+    {
+        var (store, notes) = StoreWithNotes();
+        notes.Set("string-xor", "strings are xor'd with 0x5A before use");
+
+        using var agent = new AnalysisAgent(
+            new ScriptedChatClient(null, "x"), store, McpOptions.Default, new ProviderSettings { Model = "test" });
+
+        Assert.Equal(ChatRole.System, agent.History[0].Role);
+        Assert.Contains("string-xor", agent.History[0].Text);
+        Assert.Contains("strings are xor'd with 0x5A", agent.History[0].Text);
+    }
+
+    [Fact]
+    public void EverySectionIsIndexedEvenWhenTheBodiesDoNotAllFit()
+    {
+        var (store, notes) = StoreWithNotes();
+        string big = new('a', 3_000);
+        for (int i = 0; i < 30; i++)
+        {
+            notes.Set($"section-{i:D2}", big);
+        }
+
+        using var agent = new AnalysisAgent(
+            new ScriptedChatClient(null, "x"), store, McpOptions.Default, new ProviderSettings { Model = "test" });
+
+        string system = agent.History[0].Text!;
+        for (int i = 0; i < 30; i++)
+        {
+            Assert.Contains($"section-{i:D2}", system);   // the index names them all
+        }
+
+        Assert.True(system.Length < 30 * 3_000, "the bodies were not budgeted");
+        Assert.Contains("not shown", system);
+    }
+
+    [Fact]
+    public async Task ARecordedNoteReachesTheNextTurnsSystemMessage()
+    {
+        var (store, notes) = StoreWithNotes();
+        var client = new CapturingChatClient();
+
+        using var agent = new AnalysisAgent(client, store, McpOptions.Default, new ProviderSettings { Model = "test" });
+
+        await agent.AskAsync("first");
+        notes.Set("late-note", "learned this only after the first turn");
+        await agent.AskAsync("second");
+
+        var lastSystem = client.LastSeen.First(m => m.Role == ChatRole.System);
+        Assert.Contains("late-note", lastSystem.Text);
+        Assert.Contains("learned this only after the first turn", lastSystem.Text);
     }
 
     /// <summary>An earlier conversation's tool call and its result, the way a restart hands them back.</summary>
@@ -982,6 +1049,34 @@ public class AgentTests
     /// A provider that says what it was told to say: one tool call, then an answer. Enough to drive
     /// the loop end to end without a key, and it records what the tools handed back.
     /// </summary>
+    /// <summary>Records the messages it was handed each turn, so a test can read the system message.</summary>
+    private sealed class CapturingChatClient : IChatClient
+    {
+        public IReadOnlyList<ChatMessage> LastSeen { get; private set; } = new List<ChatMessage>();
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            LastSeen = messages.ToList();
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")));
+        }
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            LastSeen = messages.ToList();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "ok");
+            await Task.CompletedTask.ConfigureAwait(false);
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
+        }
+    }
+
     private sealed class ScriptedChatClient : IChatClient
     {
         private readonly FunctionCallContent? _call;
