@@ -52,6 +52,9 @@ public sealed record ProjectLoadResult
     /// <summary>Breakpoints read back from the file.</summary>
     public int BreakpointsApplied { get; init; }
 
+    /// <summary>Note sections read back from the file.</summary>
+    public int NotesApplied { get; init; }
+
     public override string ToString() => Loaded
         ? $"{Applied} annotation(s) from {Path}"
         : Reason ?? "no project file";
@@ -105,7 +108,7 @@ public static class SpydateProject
     /// Writes the annotations to the first path that accepts them. Returns where they went, or null when
     /// there was nothing to write and no file to update.
     /// </summary>
-    public static string? Save(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
+    public static string? Save(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(annotations);
@@ -113,7 +116,7 @@ public static class SpydateProject
         var candidates = CandidatePaths(image);
         // Keep updating a file that already exists rather than starting a second one elsewhere.
         string? existing = candidates.FirstOrDefault(File.Exists);
-        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0 && (breakpoints?.Count ?? 0) == 0)
+        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0 && (breakpoints?.Count ?? 0) == 0 && (notes?.Count ?? 0) == 0)
         {
             return null;
         }
@@ -124,7 +127,7 @@ public static class SpydateProject
         {
             try
             {
-                SaveTo(path, image, annotations, patches, breakpoints);
+                SaveTo(path, image, annotations, patches, breakpoints, notes);
                 annotations.MarkSaved();
                 return path;
             }
@@ -148,7 +151,7 @@ public static class SpydateProject
     /// (a cleared one being removed). Entries collide only when both sides edited the same address,
     /// which is rare and resolves in favour of the writer, since that is the more recent decision.
     /// </summary>
-    public static void SaveTo(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
+    public static void SaveTo(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -212,6 +215,7 @@ public static class SpydateProject
             Annotations = entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList(),
             Patches = MergePatches(path, identity, patches),
             Breakpoints = MergeBreakpoints(path, identity, breakpoints),
+            Notes = MergeNotes(path, identity, notes),
         };
 
         // Write beside the target and move into place, so a failure cannot truncate the previous
@@ -227,6 +231,7 @@ public static class SpydateProject
         annotations.MarkSaved();
         patches?.MarkSaved();
         breakpoints?.MarkSaved();
+        notes?.MarkSaved();
     }
 
     /// <summary>
@@ -306,6 +311,79 @@ public static class SpydateProject
         }
 
         return entries.Count == 0 ? null : entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList();
+    }
+
+    /// <summary>
+    /// Note sections for the file being written, merged the way annotations are: only the keys this
+    /// session touched are overlaid, so a section a second writer added survives. Null when there is
+    /// nothing to say, which keeps the member out of the file for a project that never had a note.
+    /// </summary>
+    private static List<NoteDto>? MergeNotes(string path, ProjectIdentity identity, NoteStore? notes)
+    {
+        var existing = ExistingNotes(path, identity);
+
+        if (notes is null)
+        {
+            // Not that there are none — that this caller does not know about them. Anything already in
+            // the file stays, rather than being dropped by a save that never considered it.
+            return existing?.Values.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        var mine = notes.Snapshot().ToDictionary(e => e.Key, e => e.Value, StringComparer.OrdinalIgnoreCase);
+        var entries = existing ?? new Dictionary<string, NoteDto>(StringComparer.OrdinalIgnoreCase);
+        var overlay = existing is null ? mine.Keys : notes.ChangedKeys;
+
+        foreach (string key in overlay)
+        {
+            if (mine.TryGetValue(key, out var note))
+            {
+                entries[key] = new NoteDto
+                {
+                    Key = key,
+                    Text = note.Text,
+                    Source = note.Source,
+                    Modified = note.Modified,
+                };
+            }
+            else
+            {
+                entries.Remove(key);   // cleared here, so it goes from the file too
+            }
+        }
+
+        return entries.Count == 0 ? null : entries.Values.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static Dictionary<string, NoteDto>? ExistingNotes(string path, ProjectIdentity identity)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var file = JsonSerializer.Deserialize<ProjectFile>(File.ReadAllText(path), Options);
+            if (file is null || file.Format > FormatVersion || !IdentityOf(file).Matches(identity))
+            {
+                return null;
+            }
+
+            var entries = new Dictionary<string, NoteDto>(StringComparer.OrdinalIgnoreCase);
+            foreach (var note in file.Notes ?? [])
+            {
+                if (note.Key is { Length: > 0 } key)
+                {
+                    entries[key] = note;   // last wins if a hand-edit left two keys differing only in case
+                }
+            }
+
+            return entries;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static Dictionary<string, BreakpointDto>? ExistingBreakpoints(string path, ProjectIdentity identity)
@@ -397,7 +475,7 @@ public static class SpydateProject
     }
 
     /// <summary>Finds the project belonging to <paramref name="image"/> and applies it.</summary>
-    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
+    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentNullException.ThrowIfNull(image);
 
@@ -409,7 +487,7 @@ public static class SpydateProject
                 continue;
             }
 
-            var result = Load(path, image, annotations, patches, breakpoints);
+            var result = Load(path, image, annotations, patches, breakpoints, notes);
             if (result.Loaded)
             {
                 return result;
@@ -422,7 +500,7 @@ public static class SpydateProject
     }
 
     /// <summary>Applies one project file, rejecting it if it was made for a different build.</summary>
-    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null)
+    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -535,6 +613,28 @@ public static class SpydateProject
             breakpoints.MarkSaved();
         }
 
+        int notesApplied = 0;
+        if (notes is not null)
+        {
+            foreach (var entry in file.Notes ?? [])
+            {
+                if (entry.Key is not { Length: > 0 } key || entry.Text is not { Length: > 0 } text)
+                {
+                    continue;
+                }
+
+                notes.Restore(key, new Note
+                {
+                    Text = text,
+                    Source = entry.Source ?? AnnotationSource.User,
+                    Modified = entry.Modified,
+                });
+                notesApplied++;
+            }
+
+            notes.MarkSaved();
+        }
+
         annotations.MarkSaved();
         return new ProjectLoadResult
         {
@@ -545,6 +645,7 @@ public static class SpydateProject
             PatchesApplied = patchesApplied,
             PatchesSkipped = patchesSkipped,
             BreakpointsApplied = breakpointsApplied,
+            NotesApplied = notesApplied,
         };
     }
 
@@ -643,6 +744,13 @@ public static class SpydateProject
         /// version opens in the other losing only what it never understood.
         /// </summary>
         [JsonPropertyName("breakpoints")] public List<BreakpointDto>? Breakpoints { get; set; }
+
+        /// <summary>
+        /// Still format 1, on the same reasoning as patches and breakpoints: a reader that predates
+        /// notes skips a member it does not know, and an absent list means none, so a project written
+        /// by either version opens in the other losing only what it never understood.
+        /// </summary>
+        [JsonPropertyName("notes")] public List<NoteDto>? Notes { get; set; }
     }
 
     private sealed class ImageDto
@@ -685,6 +793,18 @@ public static class SpydateProject
 
         /// <summary>Absent means on, so a hand-written entry does not need it.</summary>
         [JsonPropertyName("enabled")] public bool? Enabled { get; set; }
+
+        [JsonPropertyName("source")] public AnnotationSource? Source { get; set; }
+        [JsonPropertyName("modified")] public DateTimeOffset? Modified { get; set; }
+    }
+
+    private sealed class NoteDto
+    {
+        /// <summary>The section key, the short heading the writer chose (<c>overview</c>, <c>string-xor</c>).</summary>
+        [JsonPropertyName("key")] public string? Key { get; set; }
+
+        /// <summary>The section text, Markdown with LF newlines. Multi-line, unlike a comment.</summary>
+        [JsonPropertyName("text")] public string? Text { get; set; }
 
         [JsonPropertyName("source")] public AnnotationSource? Source { get; set; }
         [JsonPropertyName("modified")] public DateTimeOffset? Modified { get; set; }
