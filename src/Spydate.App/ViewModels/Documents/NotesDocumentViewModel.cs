@@ -50,6 +50,32 @@ public sealed partial class NotesDocumentViewModel : DocumentViewModel
     [ObservableProperty]
     private string _summary = string.Empty;
 
+    /// <summary>
+    /// Whether the pane shows the sections as one rendered Markdown document rather than the editor.
+    /// A reading view, not an editing one — the whole point is to see the notes together.
+    /// </summary>
+    [ObservableProperty]
+    private bool _showAsDocument;
+
+    /// <summary>
+    /// Every section as one Markdown document, each under its key as a heading, in the order the list
+    /// shows them (alphabetical by key — the store keeps no other order). This is what the document
+    /// view renders; it is rebuilt whenever the sections change.
+    /// </summary>
+    public string CombinedMarkdown
+    {
+        get
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var (key, note) in _notes.Snapshot())
+            {
+                sb.Append("## ").Append(key).Append("\n\n").Append(note.Text).Append("\n\n");
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+    }
+
     partial void OnSelectedRowChanged(NoteRow? value)
     {
         if (value is not null && _notes.Get(value.Key) is { } note)
@@ -92,6 +118,8 @@ public sealed partial class NotesDocumentViewModel : DocumentViewModel
             1 => "1 section",
             _ => $"{Rows.Count} sections",
         };
+
+        OnPropertyChanged(nameof(CombinedMarkdown));
     }
 
     /// <summary>Clears the editor for a section that does not exist yet.</summary>

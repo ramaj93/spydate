@@ -16,7 +16,12 @@
         <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
             <DockPanel>
                 <Button DockPanel.Dock="Left" Content="New section" Command="{Binding NewSectionCommand}"
-                        Margin="2,0,8,0" />
+                        Margin="2,0,6,0"
+                        Visibility="{Binding ShowAsDocument, Converter={StaticResource InverseBoolToVisibility}}" />
+                <ToggleButton DockPanel.Dock="Left" Content="View as document" Margin="0,0,8,0"
+                              IsChecked="{Binding ShowAsDocument, Mode=TwoWay}"
+                              AutomationProperties.Name="View as document"
+                              ToolTip="Show every section as one Markdown document" />
                 <TextBlock Text="{Binding Summary}" VerticalAlignment="Center"
                            Foreground="{DynamicResource Text.Secondary}" />
                 <TextBlock Text="  ·  a note is what is true of the whole binary, with no address"
@@ -25,8 +30,9 @@
         </Border>
 
         <!-- The section list on the left, an editor on the right. Unlike annotations, a note has no
-             address to open to, so the pane edits the section rather than reading it. -->
-        <Grid Grid.Row="1">
+             address to open to, so the pane edits the section rather than reading it. Hidden when the
+             document view is on, where the sections are read together instead of edited one at a time. -->
+        <Grid Grid.Row="1" Visibility="{Binding ShowAsDocument, Converter={StaticResource InverseBoolToVisibility}}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" MinWidth="200" />
                 <ColumnDefinition Width="Auto" />
@@ -70,5 +76,29 @@
                          FontFamily="{DynamicResource Mono.FontFamily}" />
             </DockPanel>
         </Grid>
+
+        <!-- The document view: every section rendered as one Markdown document, read-only. The host
+             is filled from code-behind with the same renderer the assistant's answers use. -->
+        <ScrollViewer Grid.Row="1" x:Name="DocumentHost" Padding="20,14,20,20"
+                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      Visibility="{Binding ShowAsDocument, Converter={StaticResource BoolToVisibility}}" />
+
+        <TextBlock Grid.Row="1" Text="No notes to show yet." HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Foreground="{DynamicResource Text.Tertiary}" IsHitTestVisible="False">
+            <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Style.Triggers>
+                        <MultiDataTrigger>
+                            <MultiDataTrigger.Conditions>
+                                <Condition Binding="{Binding ShowAsDocument}" Value="True" />
+                                <Condition Binding="{Binding Rows.Count}" Value="0" />
+                            </MultiDataTrigger.Conditions>
+                            <Setter Property="Visibility" Value="Visible" />
+                        </MultiDataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </TextBlock.Style>
+        </TextBlock>
     </Grid>
 </UserControl>
