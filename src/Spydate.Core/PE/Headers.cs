@@ -1,3 +1,5 @@
+using Spydate.Core.Binary;
+
 namespace Spydate.Core.PE;
 
 /// <summary>IMAGE_DOS_HEADER (only the fields that matter for PE navigation are kept).</summary>
@@ -88,9 +90,19 @@ public readonly record struct DataDirectory(uint Rva, uint Size)
 }
 
 /// <summary>IMAGE_SECTION_HEADER.</summary>
-public sealed record SectionHeader
+public sealed record SectionHeader : IBinarySection
 {
     public const int Size = 40;
+
+    // The generic view, under the names every format shares. The rest of IBinarySection — Index, Name, EndRva,
+    // the permissions and ContainsRva — already has the same name and meaning here.
+    uint IBinarySection.Rva => VirtualAddress;
+
+    uint IBinarySection.Extent => VirtualExtent;
+
+    uint IBinarySection.RawOffset => PointerToRawData;
+
+    uint IBinarySection.RawSize => SizeOfRawData;
 
     public required int Index { get; init; }
     public required string Name { get; init; }

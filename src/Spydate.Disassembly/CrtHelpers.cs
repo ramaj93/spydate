@@ -1,3 +1,4 @@
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Symbols;
 
@@ -51,7 +52,7 @@ public static class CrtHelpers
     /// A canonical name for a discovered helper, or null when nothing matches confidently.
     /// Only called for functions discovery has not otherwise named.
     /// </summary>
-    public static string? Identify(Function function, PeImage image)
+    public static string? Identify(Function function, IBinaryImage image)
     {
         // All of these are small; anything long is application code that happens to share an opcode.
         if (function.InstructionCount is 0 or > 32)
@@ -67,7 +68,8 @@ public static class CrtHelpers
             return is64 ? "__chkstk" : "_chkstk";
         }
 
-        if (image.LoadConfig is { SecurityCookieVa: not 0 } config)
+        // The /GS cookie check is found through the PE load config, which names where the cookie lives.
+        if (image is PeImage { LoadConfig: { SecurityCookieVa: not 0 } config })
         {
             string cookie = $"0x{config.SecurityCookieVa:x}";
             bool touchesCookie = text.Any(t => t.Contains(cookie, StringComparison.OrdinalIgnoreCase));

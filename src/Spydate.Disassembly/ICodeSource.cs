@@ -1,8 +1,8 @@
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 
 namespace Spydate.Disassembly;
 
-/// <summary>Abstracts "give me bytes at this virtual address" so discovery does not depend on <see cref="PeImage"/> directly.</summary>
+/// <summary>Abstracts "give me bytes at this virtual address" so discovery does not depend on a container format directly.</summary>
 public interface ICodeSource
 {
     ulong ImageBase { get; }
@@ -19,20 +19,20 @@ public interface ICodeSource
     bool IsMapped(ulong va);
 }
 
-/// <summary><see cref="ICodeSource"/> over a <see cref="PeImage"/>.</summary>
-public sealed class PeCodeSource : ICodeSource
+/// <summary><see cref="ICodeSource"/> over any <see cref="IBinaryImage"/> — a PE today, an ELF next.</summary>
+public sealed class ImageCodeSource : ICodeSource
 {
-    private readonly PeImage _pe;
+    private readonly IBinaryImage _image;
 
-    public PeCodeSource(PeImage pe) => _pe = pe;
+    public ImageCodeSource(IBinaryImage image) => _image = image;
 
-    public ulong ImageBase => _pe.ImageBase;
+    public ulong ImageBase => _image.ImageBase;
 
-    public int Bitness => _pe.Bitness;
+    public int Bitness => _image.Bitness;
 
-    public ReadOnlyMemory<byte> Read(ulong va, int length) => _pe.ReadAtVa(va, length);
+    public ReadOnlyMemory<byte> Read(ulong va, int length) => _image.ReadAtVa(va, length);
 
-    public bool IsExecutable(ulong va) => _pe.SectionFromVa(va)?.IsExecutable ?? false;
+    public bool IsExecutable(ulong va) => _image.SectionFromVa(va)?.IsExecutable ?? false;
 
-    public bool IsMapped(ulong va) => _pe.VaToRva(va) is { } rva && rva < _pe.OptionalHeader.SizeOfImage;
+    public bool IsMapped(ulong va) => _image.VaToRva(va) is { } rva && rva < _image.ImageSize;
 }

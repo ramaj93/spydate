@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 
 namespace Spydate.Core.Project;
@@ -9,13 +11,18 @@ namespace Spydate.Core.Project;
 /// Enough of the image to tell whether a project belongs to the file being opened. The same reasoning as
 /// the PDB check: annotations from a different build land at the wrong addresses, which is worse than
 /// having none.
+///
+/// The build is told apart by the image's <see cref="IBinaryImage.Fingerprint"/> — whatever the format says
+/// distinguishes one build from another. For a PE that is the link timestamp and checksum as
+/// <c>"TTTTTTTT-CCCCCCCC"</c>, exactly the string the per-user store has always used in its file names, so
+/// every project written before formats were generalised still matches.
 /// </summary>
-public sealed record ProjectIdentity(string FileName, long FileSize, uint TimeDateStamp, uint CheckSum)
+public sealed partial record ProjectIdentity(string FileName, long FileSize, string Fingerprint)
 {
-    public static ProjectIdentity Of(PeImage image)
+    public static ProjectIdentity Of(IBinaryImage image)
     {
         ArgumentNullException.ThrowIfNull(image);
-        return new ProjectIdentity(image.FileName, image.Data.Length, image.FileHeader.TimeDateStamp, image.OptionalHeader.CheckSum);
+        return new ProjectIdentity(image.FileName, image.Data.Length, image.Fingerprint);
     }
 
     /// <summary>
@@ -25,10 +32,16 @@ public sealed record ProjectIdentity(string FileName, long FileSize, uint TimeDa
     public bool Matches(ProjectIdentity other)
     {
         ArgumentNullException.ThrowIfNull(other);
-        return FileSize == other.FileSize && TimeDateStamp == other.TimeDateStamp && CheckSum == other.CheckSum;
+        return FileSize == other.FileSize && string.Equals(Fingerprint, other.Fingerprint, StringComparison.OrdinalIgnoreCase);
     }
 
-    public string Describe() => $"{FileName}, {FileSize} bytes, stamp 0x{TimeDateStamp:X8}, checksum 0x{CheckSum:X8}";
+    /// <summary>A PE's fingerprint is spelled out as the stamp and checksum it is made of; any other is shown as it is.</summary>
+    public string Describe() => PeFingerprint().Match(Fingerprint) is { Success: true } pe
+        ? $"{FileName}, {FileSize} bytes, stamp 0x{pe.Groups[1].Value}, checksum 0x{pe.Groups[2].Value}"
+        : $"{FileName}, {FileSize} bytes, build {Fingerprint}";
+
+    [GeneratedRegex("^([0-9A-F]{8})-([0-9A-F]{8})$", RegexOptions.IgnoreCase)]
+    private static partial Regex PeFingerprint();
 }
 
 /// <summary>Outcome of looking for the project file that belongs to an image.</summary>
@@ -78,7 +91,7 @@ public static class SpydateProject
     /// Where a project for this image may live, most preferred first: beside the binary, then a per-user
     /// store. The second exists because the interesting binaries are in places one cannot write to.
     /// </summary>
-    public static IReadOnlyList<string> CandidatePaths(PeImage image)
+    public static IReadOnlyList<string> CandidatePaths(IBinaryImage image)
     {
         ArgumentNullException.ThrowIfNull(image);
         var paths = new List<string>(2);
@@ -92,11 +105,11 @@ public static class SpydateProject
     }
 
     /// <summary>Per-user location, named so two files with the same name do not collide.</summary>
-    public static string UserStorePath(PeImage image)
+    public static string UserStorePath(IBinaryImage image)
     {
         ArgumentNullException.ThrowIfNull(image);
         var identity = ProjectIdentity.Of(image);
-        string key = $"{identity.TimeDateStamp:X8}-{identity.CheckSum:X8}-{identity.FileSize:X}";
+        string key = $"{identity.Fingerprint}-{identity.FileSize:X}";
         return System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Spydate",
@@ -108,7 +121,7 @@ public static class SpydateProject
     /// Writes the annotations to the first path that accepts them. Returns where they went, or null when
     /// there was nothing to write and no file to update.
     /// </summary>
-    public static string? Save(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static string? Save(IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(annotations);
@@ -151,7 +164,7 @@ public static class SpydateProject
     /// (a cleared one being removed). Entries collide only when both sides edited the same address,
     /// which is rare and resolves in favour of the writer, since that is the more recent decision.
     /// </summary>
-    public static void SaveTo(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static void SaveTo(string path, IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -208,8 +221,11 @@ public static class SpydateProject
             {
                 Name = identity.FileName,
                 Size = identity.FileSize,
-                TimeDateStamp = Hex(identity.TimeDateStamp),
-                CheckSum = Hex(identity.CheckSum),
+                // A PE keeps writing the stamp and checksum its fingerprint is made of, so its project file is
+                // unchanged and an older build still reads it; any other format writes the fingerprint itself.
+                TimeDateStamp = image is PeImage stamped ? Hex(stamped.FileHeader.TimeDateStamp) : null,
+                CheckSum = image is PeImage summed ? Hex(summed.OptionalHeader.CheckSum) : null,
+                Fingerprint = image is PeImage ? null : identity.Fingerprint,
                 ImageBase = Hex(image.ImageBase),
             },
             Annotations = entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList(),
@@ -476,7 +492,7 @@ public static class SpydateProject
     }
 
     /// <summary>Finds the project belonging to <paramref name="image"/> and applies it.</summary>
-    public static ProjectLoadResult LoadFor(PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static ProjectLoadResult LoadFor(IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentNullException.ThrowIfNull(image);
 
@@ -501,7 +517,7 @@ public static class SpydateProject
     }
 
     /// <summary>Applies one project file, rejecting it if it was made for a different build.</summary>
-    public static ProjectLoadResult Load(string path, PeImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static ProjectLoadResult Load(string path, IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -686,11 +702,16 @@ public static class SpydateProject
     }
 
     /// <summary>The build a parsed project file says it belongs to.</summary>
+    /// <summary>
+    /// The build a parsed project file says it belongs to. A file with a fingerprint is taken at its word; one
+    /// without was written for a PE, and its stamp and checksum are the fingerprint, spelled as the image spells it.
+    /// </summary>
     private static ProjectIdentity IdentityOf(ProjectFile file) => new(
         file.Image?.Name ?? string.Empty,
         file.Image?.Size ?? 0,
-        ParseHex32(file.Image?.TimeDateStamp),
-        ParseHex32(file.Image?.CheckSum));
+        file.Image?.Fingerprint is { Length: > 0 } fingerprint
+            ? fingerprint
+            : $"{ParseHex32(file.Image?.TimeDateStamp):X8}-{ParseHex32(file.Image?.CheckSum):X8}");
 
     private static string Hex(ulong value) => "0x" + value.ToString("X", CultureInfo.InvariantCulture);
 
@@ -762,6 +783,9 @@ public static class SpydateProject
         [JsonPropertyName("timeDateStamp")] public string? TimeDateStamp { get; set; }
         [JsonPropertyName("checkSum")] public string? CheckSum { get; set; }
         [JsonPropertyName("imageBase")] public string? ImageBase { get; set; }
+
+        /// <summary>Written for formats other than PE, whose build is told apart some other way than a stamp and checksum.</summary>
+        [JsonPropertyName("fingerprint")] public string? Fingerprint { get; set; }
     }
 
     private sealed class AnnotationDto

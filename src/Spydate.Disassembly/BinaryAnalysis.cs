@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Pdb;
 using Spydate.Core.Project;
@@ -69,11 +70,11 @@ public sealed class BinaryAnalysis
     /// </summary>
     private readonly ConcurrentDictionary<ulong, Symbol?> _renamedOver = new();
 
-    public BinaryAnalysis(PeImage image, AsmSyntax syntax = AsmSyntax.Intel, DiscoveryOptions? options = null)
+    public BinaryAnalysis(IBinaryImage image, AsmSyntax syntax = AsmSyntax.Intel, DiscoveryOptions? options = null)
     {
         Image = image;
         Symbols = SymbolTable.FromImage(image);
-        Source = new PeCodeSource(image);
+        Source = new ImageCodeSource(image);
         Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
         options ??= DiscoveryOptions.Default;
         _options = options;
@@ -99,21 +100,29 @@ public sealed class BinaryAnalysis
             }
         }
 
-        CrtHelpers.ApplyLoadConfigSymbols(image, Symbols);
+        // The load config's security cookie and guard tables are a PE's own; nothing else has them.
+        if (image is PeImage pe)
+        {
+            CrtHelpers.ApplyLoadConfigSymbols(pe, Symbols);
+        }
 
         Annotations.Changed += OnAnnotationChanged;
 
-        foreach (var rf in image.ExceptionTable)
+        // Where the compiler declared a function's extent, that is its extent. Any format with unwind tables says so.
+        if (image is IUnwindInfoSource unwind)
         {
-            if (!rf.IsChained && rf.BeginRva != 0 && rf.EndRva > rf.BeginRva)
+            foreach (var (begin, end) in unwind.UnwindRanges)
             {
-                _bounds[image.RvaToVa(rf.BeginRva)] = image.RvaToVa(rf.EndRva);
+                if (end > begin)
+                {
+                    _bounds[image.RvaToVa(begin)] = image.RvaToVa(end);
+                }
             }
         }
 
     }
 
-    public PeImage Image { get; }
+    public IBinaryImage Image { get; }
 
     public SymbolTable Symbols { get; }
 
@@ -146,7 +155,8 @@ public sealed class BinaryAnalysis
 
             lock (_signatureGate)
             {
-                return _signatures ??= ImportSignatures.For(Image);
+                // Signatures come from the Windows DLLs a PE imports from; another format has none to read yet.
+                return _signatures ??= Image is PeImage pe ? ImportSignatures.For(pe) : null;
             }
         }
     }
@@ -211,7 +221,10 @@ public sealed class BinaryAnalysis
     /// </summary>
     public PdbLoadResult LoadPdbSymbols()
     {
-        var result = PdbSymbols.TryLoadFor(Image, Symbols);
+        // A PDB is named by a PE's CodeView record; nothing else points at one.
+        var result = Image is PeImage pe
+            ? PdbSymbols.TryLoadFor(pe, Symbols)
+            : new PdbLoadResult { Loaded = false, Reason = $"a PDB belongs to a PE; this is {Image.Format}" };
         Pdb = result;
         return result;
     }
@@ -275,7 +288,7 @@ public sealed class BinaryAnalysis
     }
 
     /// <summary>Whether the image's machine type is supported by the x86 disassembler.</summary>
-    public bool CanDisassemble => Image.IsX86Family;
+    public bool CanDisassemble => Image.Architecture is Architecture.X86 or Architecture.X64;
 
     /// <summary>Functions discovered so far, sorted by entry VA.</summary>
     public IReadOnlyList<Function> Functions => _functions.Values.OrderBy(f => f.EntryVa).ToList();
@@ -327,10 +340,10 @@ public sealed class BinaryAnalysis
 
         if (Image.EntryPointRva != 0)
         {
-            Add(Image.EntryPointVa, Image.IsDll ? "DllEntryPoint" : "EntryPoint");
+            Add(Image.EntryPointVa, Image.IsLibrary ? "DllEntryPoint" : "EntryPoint");
         }
 
-        if (Image.Tls is { } tls)
+        if (Image is PeImage { Tls: { } tls })
         {
             for (int i = 0; i < tls.CallbackVas.Count; i++)
             {
@@ -338,22 +351,19 @@ public sealed class BinaryAnalysis
             }
         }
 
-        if (Image.Exports is { } exports)
+        foreach (var e in Image.Exports)
         {
-            foreach (var e in exports.Entries)
+            if (!e.IsForwarder && e.Rva != 0)
             {
-                if (!e.IsForwarder && e.Rva != 0)
-                {
-                    Add(Image.RvaToVa(e.Rva), e.Name ?? $"Ordinal{e.Ordinal}");
-                }
+                Add(Image.RvaToVa(e.Rva), e.Name ?? $"Ordinal{e.Ordinal}");
             }
         }
 
-        foreach (var rf in Image.ExceptionTable)
+        if (Image is IUnwindInfoSource unwind)
         {
-            if (!rf.IsChained && rf.BeginRva != 0)
+            foreach (var (begin, _) in unwind.UnwindRanges)
             {
-                Add(Image.RvaToVa(rf.BeginRva), null);
+                Add(Image.RvaToVa(begin), null);
             }
         }
 
@@ -363,7 +373,7 @@ public sealed class BinaryAnalysis
             Add(symbol.Va, symbol.Name);
         }
 
-        if (Image.LoadConfig is { } config)
+        if (Image is PeImage { LoadConfig: { } config })
         {
             foreach (uint rva in config.GuardCfFunctionRvas)
             {
@@ -460,18 +470,18 @@ public sealed class BinaryAnalysis
 
         foreach (var section in Image.Sections)
         {
-            if (!section.IsExecutable || section.SizeOfRawData == 0)
+            if (!section.IsExecutable || section.RawSize == 0)
             {
                 continue;
             }
 
-            uint size = section.VirtualSize == 0 ? section.SizeOfRawData : Math.Min(section.VirtualSize, section.SizeOfRawData);
-            ulong sectionStart = Image.RvaToVa(section.VirtualAddress);
+            uint size = section.VirtualSize == 0 ? section.RawSize : Math.Min(section.VirtualSize, section.RawSize);
+            ulong sectionStart = Image.RvaToVa(section.Rva);
             var covered = BuildCoverage(sectionStart, size);
 
             // Read the section once: probing through the code source per byte would repeat a
             // section lookup for every candidate offset and dominate the runtime.
-            var body = Image.ReadAtRva(section.VirtualAddress, (int)size);
+            var body = Image.ReadAtRva(section.Rva, (int)size);
             if (body.IsEmpty)
             {
                 continue;

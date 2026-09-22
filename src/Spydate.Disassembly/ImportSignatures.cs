@@ -286,7 +286,7 @@ public sealed class ImportSignatures
 
                 var symbols = SymbolTable.FromImage(image);
                 var discovery = new FunctionDiscovery(
-                    new PeCodeSource(image),
+                    new ImageCodeSource(image),
                     new X86Disassembler(image.Bitness, symbols),
                     symbols,
                     DiscoveryOptions.Default with { MaxInstructionsPerFunction = ExportInstructionBudget, SweepUnreachedBytes = false });

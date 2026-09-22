@@ -578,12 +578,12 @@ public sealed partial class FileViewModel : ObservableObject
     /// </summary>
     private void WarmModuleSymbols(string path, OpenedBinary module)
     {
-        if (module.Analysis is not { } analysis || !_symbolsWarmed.Add(path))
+        // A module's PDB is named by its PE CodeView record, so only a PE module has one to fetch.
+        if (module.Analysis is not { Image: PeImage image } analysis || !_symbolsWarmed.Add(path))
         {
             return;
         }
 
-        var image = analysis.Image;
         var codeView = image.Debug.Select(d => d.CodeView).FirstOrDefault(c => c is not null);
         if (codeView is null)
         {
@@ -1890,15 +1890,13 @@ public sealed partial class FileViewModel : ObservableObject
             return _imports;
         }
 
+        // Normal imports then delay-loaded ones, first module to name a function wins — the order the image lists them.
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var module in analysis.Image.Imports.Concat(analysis.Image.DelayImports))
+        foreach (var import in analysis.Image.Imports)
         {
-            foreach (var function in module.Functions)
+            if (import.Name is { Length: > 0 } name)
             {
-                if (function.Name is { Length: > 0 } name)
-                {
-                    map.TryAdd(name, module.Name);
-                }
+                map.TryAdd(name, import.Module);
             }
         }
 

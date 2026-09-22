@@ -1,7 +1,9 @@
+using Spydate.Core.Binary;
+
 namespace Spydate.Core.PE;
 
 /// <summary>Thrown when a file cannot be interpreted as a PE image (fatal structural error).</summary>
-public sealed class PeParseException : Exception
+public sealed class PeParseException : BinaryParseException
 {
     public PeParseException(string message) : base(message)
     {

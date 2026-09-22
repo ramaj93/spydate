@@ -1,4 +1,5 @@
 using System.Text;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 
 namespace Spydate.Core.Strings;
@@ -57,7 +58,7 @@ public sealed record StringScanOptions
 /// </summary>
 public static class StringScanner
 {
-    public static IReadOnlyList<FoundString> Scan(PeImage image, StringScanOptions? options = null, CancellationToken cancellationToken = default)
+    public static IReadOnlyList<FoundString> Scan(IBinaryImage image, StringScanOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(image);
         var opts = options ?? StringScanOptions.Default;
@@ -82,7 +83,7 @@ public static class StringScanner
         return results;
     }
 
-    private static void ScanAsciiRuns(PeImage image, ReadOnlySpan<byte> data, StringScanOptions opts, List<FoundString> results, CancellationToken token)
+    private static void ScanAsciiRuns(IBinaryImage image, ReadOnlySpan<byte> data, StringScanOptions opts, List<FoundString> results, CancellationToken token)
     {
         int start = -1;
         for (int i = 0; i <= data.Length; i++)
@@ -121,7 +122,7 @@ public static class StringScanner
         }
     }
 
-    private static void ScanUtf16Runs(PeImage image, ReadOnlySpan<byte> data, StringScanOptions opts, List<FoundString> results, CancellationToken token, int startOffset)
+    private static void ScanUtf16Runs(IBinaryImage image, ReadOnlySpan<byte> data, StringScanOptions opts, List<FoundString> results, CancellationToken token, int startOffset)
     {
         // Only the common case: printable ASCII characters widened to 16 bits, little endian.
         int start = -1;
@@ -163,12 +164,12 @@ public static class StringScanner
         }
     }
 
-    private static FoundString Create(PeImage image, int offset, string text, StringEncodingKind encoding, bool nullTerminated)
+    private static FoundString Create(IBinaryImage image, int offset, string text, StringEncodingKind encoding, bool nullTerminated)
     {
         uint? rva = image.OffsetToRva((uint)offset);
         string section = rva is { } r
             ? image.SectionFromRva(r)?.Name ?? "(headers)"
-            : offset >= image.Overlay.Offset && image.Overlay.Length > 0 ? "(overlay)" : "(unmapped)";
+            : image is PeImage pe && pe.Overlay.Length > 0 && offset >= pe.Overlay.Offset ? "(overlay)" : "(unmapped)";
 
         return new FoundString
         {

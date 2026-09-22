@@ -151,7 +151,7 @@ public class ImportSignatureTests
         var image = PeImage.Load(Kernel32X86);
         var entry = image.Exports!.Entries.First(e => e.Name == "CloseHandle");
         var symbols = SymbolTable.FromImage(image);
-        var thunk = new FunctionDiscovery(new PeCodeSource(image), new X86Disassembler(32, symbols), symbols)
+        var thunk = new FunctionDiscovery(new ImageCodeSource(image), new X86Disassembler(32, symbols), symbols)
             .Discover(image.RvaToVa(entry.Rva));
 
         Assert.Equal(1, thunk.InstructionCount);

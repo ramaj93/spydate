@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 
 namespace Spydate.Core.Symbols;
 
@@ -65,42 +65,35 @@ public sealed class SymbolTable
     public string NameOrDefault(ulong va, string prefix = "loc")
         => _byVa.TryGetValue(va, out var s) ? s.Name : $"{prefix}_{va:X}";
 
-    /// <summary>Builds the initial symbol table from a PE image: entry point, exports, IAT slots.</summary>
-    public static SymbolTable FromImage(PeImage pe)
+    /// <summary>Builds the initial symbol table from an image: entry point, exports, import slots, sections.</summary>
+    public static SymbolTable FromImage(IBinaryImage image)
     {
         var table = new SymbolTable();
 
-        if (pe.EntryPointRva != 0)
+        if (image.EntryPointRva != 0)
         {
-            table.Add(new Symbol(pe.EntryPointVa, pe.IsDll ? "DllEntryPoint" : "EntryPoint", SymbolKind.EntryPoint));
+            table.Add(new Symbol(image.EntryPointVa, image.IsLibrary ? "DllEntryPoint" : "EntryPoint", SymbolKind.EntryPoint));
         }
 
-        if (pe.Exports is { } exports)
+        foreach (var e in image.Exports)
         {
-            foreach (var e in exports.Entries)
+            if (e.IsForwarder || e.Rva == 0)
             {
-                if (e.IsForwarder || e.Rva == 0)
-                {
-                    continue;
-                }
-
-                table.Add(new Symbol(pe.RvaToVa(e.Rva), e.Name ?? $"Ordinal{e.Ordinal}", SymbolKind.Export));
+                continue;
             }
+
+            table.Add(new Symbol(image.RvaToVa(e.Rva), e.Name ?? $"Ordinal{e.Ordinal}", SymbolKind.Export));
         }
 
-        foreach (var module in pe.Imports.Concat(pe.DelayImports))
+        foreach (var import in image.Imports)
         {
-            string moduleName = StripExtension(module.Name);
-            foreach (var f in module.Functions)
-            {
-                table.Add(new Symbol(pe.RvaToVa(f.IatRva), $"{moduleName}!{f.DisplayName}", SymbolKind.Import, (uint)(pe.Is64Bit ? 8 : 4)));
-            }
+            table.Add(new Symbol(image.RvaToVa(import.SlotRva), $"{StripExtension(import.Module)}!{import.DisplayName}", SymbolKind.Import, (uint)(image.Is64Bit ? 8 : 4)));
         }
 
-        foreach (var s in pe.Sections)
+        foreach (var s in image.Sections)
         {
             // Sections are useful as low-priority names for the start of data regions.
-            table.Add(new Symbol(pe.RvaToVa(s.VirtualAddress), s.Name.Length == 0 ? $"section_{s.Index}" : s.Name, SymbolKind.Section, s.VirtualExtent));
+            table.Add(new Symbol(image.RvaToVa(s.Rva), s.Name.Length == 0 ? $"section_{s.Index}" : s.Name, SymbolKind.Section, s.Extent));
         }
 
         return table;

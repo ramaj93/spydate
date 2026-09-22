@@ -1,5 +1,5 @@
 using System.Globalization;
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 using Spydate.Core.Strings;
 using Spydate.Core.Symbols;
 using Spydate.Decompiler.Native.IR;
@@ -14,13 +14,13 @@ namespace Spydate.Decompiler.Native.Passes;
 /// </summary>
 public sealed class GlobalNames
 {
-    private readonly PeImage _image;
+    private readonly IBinaryImage _image;
     private readonly SymbolTable? _symbols;
     private readonly Lazy<StringIndex> _strings;
     private readonly Func<ulong, bool> _isFunction;
 
     /// <summary>The string index is a function so scanning is deferred until a literal is actually looked up.</summary>
-    public GlobalNames(PeImage image, SymbolTable? symbols, Func<StringIndex>? strings = null, Func<ulong, bool>? isFunction = null)
+    public GlobalNames(IBinaryImage image, SymbolTable? symbols, Func<StringIndex>? strings = null, Func<ulong, bool>? isFunction = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         _image = image;
@@ -37,7 +37,7 @@ public sealed class GlobalNames
     }
 
     /// <summary>The section holding <paramref name="va"/>, or null when the address is outside the image.</summary>
-    public SectionHeader? SectionAt(ulong va) => _image.SectionFromVa(va);
+    public IBinarySection? SectionAt(ulong va) => _image.SectionFromVa(va);
 
     /// <summary>
     /// A string that starts exactly at <paramref name="va"/> — an interior pointer does not count, and

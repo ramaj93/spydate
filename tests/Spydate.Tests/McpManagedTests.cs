@@ -265,7 +265,10 @@ public class McpManagedTests
 
         // And the inward direction on a type is empty for a reason worth stating: a type is named by
         // its members' signatures far more often than by an instruction, and signatures are not IL.
-        Assert.Contains("members are referred to individually", nav.Xrefs("Spydate.Core.PE.PeImage"), StringComparison.Ordinal);
+        // The fixture has to be a type no instruction names, and a plain class: a record's generated
+        // Equals(object) is an isinst naming its own type. PeImage stopped qualifying when analysis began
+        // asking "is this image a PeImage?" — each such test is an isinst too, and the tool rightly lists them.
+        Assert.Contains("members are referred to individually", nav.Xrefs("Spydate.Core.Symbols.SymbolTable"), StringComparison.Ordinal);
     }
 
     [Fact]

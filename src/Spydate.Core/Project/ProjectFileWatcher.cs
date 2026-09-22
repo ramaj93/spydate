@@ -1,4 +1,4 @@
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 
 namespace Spydate.Core.Project;
 
@@ -31,7 +31,7 @@ public sealed class ProjectFileWatcher : IDisposable
     /// per-user store used when that folder is not writable. Which one is in play can change during
     /// a session, since the first save is what creates it, so both are watched from the start.
     /// </param>
-    public ProjectFileWatcher(PeImage image, IEnumerable<string>? directories = null)
+    public ProjectFileWatcher(IBinaryImage image, IEnumerable<string>? directories = null)
     {
         ArgumentNullException.ThrowIfNull(image);
 

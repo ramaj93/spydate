@@ -1,5 +1,5 @@
 using Iced.Intel;
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 using Spydate.Core.Project;
 
 namespace Spydate.Disassembly;
@@ -231,13 +231,13 @@ public static class InstructionPatches
     }
 
     /// <summary>The bytes as they are now, or null when the address is not in the file.</summary>
-    private static byte[]? Original(PeImage image, ulong va, int length)
+    private static byte[]? Original(IBinaryImage image, ulong va, int length)
     {
         var present = image.ReadAtVa(va, length);
         return present.Length == length ? present.ToArray() : null;
     }
 
-    private static PatchProposal Build(PeImage image, ulong va, byte[] bytes, byte[] original, string comment)
+    private static PatchProposal Build(IBinaryImage image, ulong va, byte[] bytes, byte[] original, string comment)
     {
         if (image.VaToRva(va) is not { } rva)
         {

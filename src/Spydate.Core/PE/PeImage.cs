@@ -10,7 +10,7 @@ namespace Spydate.Core.PE;
 /// Construction is bounds-checked; fatal structural problems throw <see cref="PeParseException"/>,
 /// non-fatal problems (a corrupt import table, for example) are recorded in <see cref="Warnings"/>.
 /// </summary>
-public sealed class PeImage
+public sealed class PeImage : IBinaryImage, IUnwindInfoSource
 {
     private const uint PeSignature = 0x00004550; // "PE\0\0"
     private const int MaxSections = 96;          // loader limit
@@ -169,6 +169,60 @@ public sealed class PeImage
 
     /// <summary>Whether the machine type is one Spydate can disassemble natively (x86 / x64).</summary>
     public bool IsX86Family => Machine is MachineType.I386 or MachineType.Amd64;
+
+    // ---------------------------------------------------------------------
+    // IBinaryImage — the generic view the analysis works through
+    // ---------------------------------------------------------------------
+
+    public BinaryFormat Format => BinaryFormat.Pe;
+
+    public Architecture Architecture => Machine switch
+    {
+        MachineType.I386 => Architecture.X86,
+        MachineType.Amd64 => Architecture.X64,
+        MachineType.Arm or MachineType.ArmNt or MachineType.Thumb => Architecture.Arm,
+        MachineType.Arm64 or MachineType.Arm64Ec or MachineType.Arm64X => Architecture.Arm64,
+        _ => Architecture.Unknown,
+    };
+
+    public ulong ImageSize => OptionalHeader.SizeOfImage;
+
+    public bool IsLibrary => IsDll;
+
+    /// <summary>
+    /// The link timestamp and checksum, as the per-user project store has always keyed its file names — kept
+    /// character for character, so every project written before this existed still finds its binary.
+    /// </summary>
+    public string Fingerprint => $"{FileHeader.TimeDateStamp:X8}-{OptionalHeader.CheckSum:X8}";
+
+    IReadOnlyList<IBinarySection> IBinaryImage.Sections => Sections;
+
+    IBinarySection? IBinaryImage.SectionFromRva(uint rva) => SectionFromRva(rva);
+
+    IBinarySection? IBinaryImage.SectionFromVa(ulong va) => SectionFromVa(va);
+
+    IReadOnlyList<ExportedSymbol> IBinaryImage.Exports => _genericExports ??= Exports is { } table
+        ? table.Entries.Select(e => new ExportedSymbol(e.Name, e.Ordinal, e.Rva, e.ForwarderName)).ToList()
+        : [];
+
+    /// <summary>Normal imports then delay-loaded ones, in the order the directories list them.</summary>
+    IReadOnlyList<ImportedSymbol> IBinaryImage.Imports => _genericImports ??= Imports.Concat(DelayImports)
+        .SelectMany(m => m.Functions.Select(f => new ImportedSymbol(m.Name, f.Name, f.Ordinal, f.IatRva, m.IsDelayLoad)))
+        .ToList();
+
+    /// <summary>
+    /// The <c>.pdata</c> entries that start a function; chained entries continue one and are left out. A damaged
+    /// table can hold an end at or before its begin — the start is still a real function, so the entry is kept,
+    /// and a consumer that wants a range checks the end itself.
+    /// </summary>
+    public IReadOnlyList<(uint BeginRva, uint EndRva)> UnwindRanges => _unwindRanges ??= ExceptionTable
+        .Where(rf => !rf.IsChained && rf.BeginRva != 0)
+        .Select(rf => (rf.BeginRva, rf.EndRva))
+        .ToList();
+
+    private IReadOnlyList<ExportedSymbol>? _genericExports;
+    private IReadOnlyList<ImportedSymbol>? _genericImports;
+    private IReadOnlyList<(uint BeginRva, uint EndRva)>? _unwindRanges;
 
     public DataDirectory GetDirectory(DataDirectoryIndex index)
     {
