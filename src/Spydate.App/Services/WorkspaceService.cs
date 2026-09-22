@@ -10,7 +10,7 @@ namespace Spydate.App.Services;
 /// <summary>Everything loaded for one file: the PE image plus the native and/or managed analysis objects.</summary>
 public sealed class OpenedBinary : IDisposable
 {
-    public OpenedBinary(PeImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null)
+    public OpenedBinary(PeImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         Image = image;
         Analysis = analysis;
@@ -20,6 +20,7 @@ public sealed class OpenedBinary : IDisposable
         NativeDecompiler = analysis is null ? null : new NativeDecompiler(analysis);
         Patches = patches ?? new PatchStore();
         Breakpoints = breakpoints ?? new BreakpointStore();
+        Notes = notes ?? new NoteStore();
     }
 
     public PeImage Image { get; }
@@ -56,14 +57,25 @@ public sealed class OpenedBinary : IDisposable
     /// <summary>Breakpoints recorded against this image, so the gutter marks survive reopening.</summary>
     public BreakpointStore Breakpoints { get; }
 
+    /// <summary>
+    /// What has been learned about the binary as a whole — the keyed sections. Independent of the
+    /// analysis, since a note belongs to no address; it exists even for an image that cannot be
+    /// disassembled, so the notes an agent recorded about a managed-only assembly still have a home.
+    /// </summary>
+    public NoteStore Notes { get; }
+
     /// <summary>Names and comments the user has added; empty when the image cannot be analysed.</summary>
     public AnnotationStore? Annotations => Analysis?.Annotations;
 
-    /// <summary>True when there are annotations, patches or breakpoints that have not been written to disk.</summary>
-    public bool HasUnsavedAnnotations => Annotations is { IsDirty: true } || Patches.IsDirty || Breakpoints.IsDirty;
+    /// <summary>True when there are annotations, patches, breakpoints or notes that have not been written to disk.</summary>
+    public bool HasUnsavedAnnotations => Annotations is { IsDirty: true } || Patches.IsDirty || Breakpoints.IsDirty || Notes.IsDirty;
 
-    /// <summary>Writes the annotations out, returning where they went (null when there was nothing to write).</summary>
-    public string? SaveProject() => Annotations is null ? null : SpydateProject.Save(Image, Annotations, Patches, Breakpoints);
+    /// <summary>
+    /// Writes the project out, returning where it went (null when there was nothing to write). Notes go
+    /// even when there is no analysis to carry annotations — an empty annotation store touches nothing
+    /// in the file, so the merge keeps everything else and only the notes are written.
+    /// </summary>
+    public string? SaveProject() => SpydateProject.Save(Image, Annotations ?? new AnnotationStore(), Patches, Breakpoints, Notes);
 
     public string DisplayName => Image.FileName;
 
@@ -172,12 +184,16 @@ public sealed class WorkspaceService : IDisposable
 
         if (binary.Analysis is not { } analysis)
         {
+            // Still catch up on notes for a managed-only image, whose agent may have written some.
+            binary.Notes.Clear();
+            SpydateProject.LoadFor(binary.Image, new AnnotationStore(), notes: binary.Notes);
             return null;
         }
 
         analysis.Annotations.Clear();
         binary.Patches.Clear();
-        return SpydateProject.LoadFor(binary.Image, analysis.Annotations, binary.Patches);
+        binary.Notes.Clear();
+        return SpydateProject.LoadFor(binary.Image, analysis.Annotations, binary.Patches, notes: binary.Notes);
     }
 
     private void Watch(OpenedBinary opened)
@@ -235,7 +251,19 @@ public sealed class WorkspaceService : IDisposable
         // Before discovery, so a renamed function is discovered under the name the user gave it.
         var patches = new PatchStore();
         var breakpoints = new BreakpointStore();
-        var project = analysis is null ? null : SpydateProject.LoadFor(pe, analysis.Annotations, patches, breakpoints);
+        var notes = new NoteStore();
+        ProjectLoadResult? project;
+        if (analysis is not null)
+        {
+            project = SpydateProject.LoadFor(pe, analysis.Annotations, patches, breakpoints, notes);
+        }
+        else
+        {
+            // No analysis to carry annotations, but a managed-only assembly can still have notes an
+            // agent wrote against it; load them over a throwaway store so they reappear in the window.
+            SpydateProject.LoadFor(pe, new AnnotationStore(), notes: notes);
+            project = null;
+        }
 
         ManagedAssembly? managed = null;
         string? managedError = null;
@@ -252,6 +280,6 @@ public sealed class WorkspaceService : IDisposable
             }
         }
 
-        return new OpenedBinary(pe, analysis, managed, managedError, project, patches, breakpoints);
+        return new OpenedBinary(pe, analysis, managed, managedError, project, patches, breakpoints, notes);
     }
 }

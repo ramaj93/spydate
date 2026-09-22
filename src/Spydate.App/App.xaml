@@ -53,6 +53,9 @@
             <DataTemplate DataType="{x:Type docs:AnnotationsDocumentViewModel}">
                 <views:AnnotationsView />
             </DataTemplate>
+            <DataTemplate DataType="{x:Type docs:NotesDocumentViewModel}">
+                <views:NotesView />
+            </DataTemplate>
             <DataTemplate DataType="{x:Type docs:HexDocumentViewModel}">
                 <views:HexView />
             </DataTemplate>

@@ -1,0 +1,74 @@
+<UserControl x:Class="Spydate.App.Views.Documents.NotesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:docs="clr-namespace:Spydate.App.ViewModels.Documents"
+             mc:Ignorable="d"
+             d:DataContext="{d:DesignInstance Type=docs:NotesDocumentViewModel}"
+             Background="{DynamicResource Document.Background}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource ToolStrip}">
+            <DockPanel>
+                <Button DockPanel.Dock="Left" Content="New section" Command="{Binding NewSectionCommand}"
+                        Margin="2,0,8,0" />
+                <TextBlock Text="{Binding Summary}" VerticalAlignment="Center"
+                           Foreground="{DynamicResource Text.Secondary}" />
+                <TextBlock Text="  ·  a note is what is true of the whole binary, with no address"
+                           VerticalAlignment="Center" Foreground="{DynamicResource Text.Tertiary}" />
+            </DockPanel>
+        </Border>
+
+        <!-- The section list on the left, an editor on the right. Unlike annotations, a note has no
+             address to open to, so the pane edits the section rather than reading it. -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MinWidth="200" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="2*" MinWidth="260" />
+            </Grid.ColumnDefinitions>
+
+            <DataGrid Grid.Column="0" x:Name="Grid" ItemsSource="{Binding Rows}" Style="{StaticResource DocGrid}"
+                      SelectedItem="{Binding SelectedRow, Mode=TwoWay}"
+                      AutomationProperties.Name="Notes">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Section" Binding="{Binding Key}" Width="*"
+                                        FontFamily="{DynamicResource Mono.FontFamily}" />
+                    <DataGridTextColumn Header="By" Binding="{Binding By}" Width="Auto" />
+                    <DataGridTextColumn Header="Modified" Binding="{Binding Modified}" Width="Auto" />
+                </DataGrid.Columns>
+            </DataGrid>
+
+            <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                          Background="{DynamicResource Chrome.Border}" />
+
+            <DockPanel Grid.Column="2" Margin="16,12,16,12">
+                <TextBlock DockPanel.Dock="Top" Text="SECTION" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{DynamicResource Text.Tertiary}" />
+                <TextBox DockPanel.Dock="Top" Text="{Binding EditKey, UpdateSourceTrigger=PropertyChanged}"
+                         Margin="0,3,0,10" Tag="a short key, e.g. string-xor"
+                         FontFamily="{DynamicResource Mono.FontFamily}" />
+
+                <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="Save" Command="{Binding SaveCommand}" MinWidth="80" Margin="0,0,8,0" />
+                    <Button Content="Remove" Command="{Binding RemoveCommand}" MinWidth="80" />
+                    <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="12,0,0,0"
+                               TextWrapping="Wrap" Foreground="{DynamicResource Text.Secondary}" />
+                </StackPanel>
+
+                <TextBlock DockPanel.Dock="Top" Text="TEXT — Markdown, up to 4000 characters" FontSize="10"
+                           FontWeight="SemiBold" Foreground="{DynamicResource Text.Tertiary}" Margin="0,0,0,3" />
+                <TextBox Text="{Binding EditText, UpdateSourceTrigger=PropertyChanged}"
+                         AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top"
+                         Tag="what is true of the whole binary — how strings are encoded, what a subsystem does, a dead end"
+                         FontFamily="{DynamicResource Mono.FontFamily}" />
+            </DockPanel>
+        </Grid>
+    </Grid>
+</UserControl>

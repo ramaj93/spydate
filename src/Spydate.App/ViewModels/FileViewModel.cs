@@ -751,6 +751,10 @@ public sealed partial class FileViewModel : ObservableObject
     [RelayCommand]
     private void OpenAnnotations() => OpenTarget(new AnnotationsTarget());
 
+    /// <summary>Opens the Notes tab: what has been learned about the binary as a whole, in editable sections.</summary>
+    [RelayCommand]
+    private void OpenNotes() => OpenTarget(new NotesTarget());
+
     /// <summary>
     /// Opens the code an annotation sits on, for the list's double-click. The function that contains
     /// the address rather than the address itself: asking for a function starting mid-function makes
@@ -1456,6 +1460,10 @@ public sealed partial class FileViewModel : ObservableObject
                 case AnnotationsDocumentViewModel annotations:
                     annotations.Refresh();
                     break;
+
+                case NotesDocumentViewModel notes:
+                    notes.Refresh();
+                    break;
             }
         }
     }
@@ -1499,6 +1507,7 @@ public sealed partial class FileViewModel : ObservableObject
             ResourcePreviewTarget preview => OpenResource(preview),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
             AnnotationsTarget when b.Analysis is { } ann => Find("annotations") ?? new AnnotationsDocumentViewModel(ann, GoToAnnotation),
+            NotesTarget => Find("notes") ?? new NotesDocumentViewModel(b.Notes, b.SaveProject),
             ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),

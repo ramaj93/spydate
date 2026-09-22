@@ -601,6 +601,10 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             // analysis rather than re-reading the file.
             patches: binary.Patches,
 
+            // And the window's own notes, so a section the assistant records shows in the Notes
+            // document, and one a person typed there is in front of the assistant.
+            notes: binary.Notes,
+
             // And the window's own managed assembly. Without it the session's ManagedIndex and Bodies
             // are null, so every managed target — a method to read, a method to break on — resolves as
             // "not in this assembly", which reads exactly like the metadata being unreadable when it is
