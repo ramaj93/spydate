@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Strings;
 using Spydate.Mcp.Rendering;
@@ -48,7 +49,7 @@ public sealed class SessionTools
             var session = await _store.OpenAsync(() => BinarySession.Open(path, _options, cancellationToken), cancellationToken).ConfigureAwait(false);
             return Overview(session, opened: true);
         }
-        catch (PeParseException ex)
+        catch (BinaryParseException ex)
         {
             // Name the way out. open_binary parses a PE into an image and cannot do anything with a
             // file that is not one, and an agent that hits only this wall concludes non-PEs are
@@ -159,7 +160,7 @@ public sealed class SessionTools
     /// </summary>
     internal static string Overview(BinarySession session, bool opened)
     {
-        var image = session.Image;
+        var image = session.Pe;   // the overview reports a PE's own structures
         var sb = new StringBuilder();
 
         Line(sb, opened ? "opened" : "open", image.FileName);
@@ -232,7 +233,7 @@ public sealed class SessionTools
     /// </summary>
     private static void Managed(StringBuilder sb, BinarySession session)
     {
-        if (session.Image.ClrHeader is not { } clr)
+        if (session.Pe.ClrHeader is not { } clr)
         {
             return;
         }

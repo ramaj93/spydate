@@ -75,7 +75,7 @@ public sealed class CodeTools
 
         if (session.Analysis is not { } analysis)
         {
-            return managedProblem ?? $"there is nothing to read: {session.Image.Machine} is not a machine this disassembles";
+            return managedProblem ?? $"there is nothing to read: {session.Pe.Machine} is not a machine this disassembles";
         }
 
         var (resolved, function, inside) = Targets.ResolveFunction(session, target);
@@ -214,7 +214,7 @@ public sealed class CodeTools
 
     /// <summary>Why there is no managed reading of this file, for a view that asked for one.</summary>
     private static string NoManaged(BinarySession session, string view)
-        => session.Image.ClrHeader is null
+        => session.Pe.ClrHeader is null
             ? $"{session.Image.FileName} is not a .NET assembly, so there is no \"{view}\" of it. "
               + "Use view=\"pseudo_c\" or view=\"asm\"."
             : $"{session.Image.FileName} carries a CLR header but its metadata could not be read"

@@ -218,7 +218,7 @@ public sealed partial class FileViewModel : ObservableObject
         Explorer.Clear();
         Explorer.Add(ExplorerTreeBuilder.Build(Binary));
 
-        var pe = Binary.Image;
+        var pe = Binary.Pe;
 
         Warnings.Clear();
         foreach (string w in pe.Warnings)
@@ -998,7 +998,7 @@ public sealed partial class FileViewModel : ObservableObject
 
         try
         {
-            var result = PatchWriter.Write(Binary.Image, Binary.Patches, path);
+            var result = PatchWriter.Write(Binary.Pe, Binary.Patches, path);
             if (!result.Ok)
             {
                 foreach (string problem in result.Problems)
@@ -1153,7 +1153,7 @@ public sealed partial class FileViewModel : ObservableObject
             value = sym.Va;
         }
 
-        var pe = Binary.Image;
+        var pe = Binary.Pe;
         ulong va = value >= pe.ImageBase ? value : value < pe.OptionalHeader.SizeOfImage ? pe.RvaToVa((uint)value) : 0;
         if (va != 0 && Binary.Analysis is { } analysis && analysis.Source.IsExecutable(va))
         {
@@ -1170,7 +1170,7 @@ public sealed partial class FileViewModel : ObservableObject
     {
         if (Binary.Analysis is not null && Binary.Image.EntryPointRva != 0)
         {
-            OpenTarget(new DisassemblyTarget(Binary.Image.EntryPointVa, Binary.Image.IsDll ? "DllEntryPoint" : "EntryPoint"));
+            OpenTarget(new DisassemblyTarget(Binary.Image.EntryPointVa, Binary.Image.IsLibrary ? "DllEntryPoint" : "EntryPoint"));
         }
         else
         {
@@ -1471,7 +1471,7 @@ public sealed partial class FileViewModel : ObservableObject
     public void OpenTarget(NodeTarget target)
     {
         var b = Binary;
-        var pe = b.Image;
+        var pe = b.Pe;
 
         // A field or an event has no body to read on its own, so opening one opens its declaring type
         // and stops on the line it is declared — dnSpy's behaviour, and far more use than a document
@@ -1995,7 +1995,7 @@ public sealed partial class FileViewModel : ObservableObject
     /// </summary>
     private DocumentViewModel? OpenResource(ResourcePreviewTarget target)
     {
-        var pe = Binary.Image;
+        var pe = Binary.Pe;
         var node = new ResourceNode { Level = 3, Id = target.Id, DataRva = target.DataRva, DataSize = target.DataSize };
         var data = ResourceDecoder.ReadData(pe, node);
         if (data.IsEmpty)
@@ -2062,7 +2062,7 @@ public sealed partial class FileViewModel : ObservableObject
 
     private DocumentViewModel OpenHex(long offset)
     {
-        var hex = Find("hex") as HexDocumentViewModel ?? new HexDocumentViewModel(Binary.Image);
+        var hex = Find("hex") as HexDocumentViewModel ?? new HexDocumentViewModel(Binary.Pe);
         Show(hex);
         hex.GoToOffset(offset);
         return hex;

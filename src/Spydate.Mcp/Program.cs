@@ -1,7 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 using Spydate.Mcp.Session;
 
 namespace Spydate.Mcp;
@@ -44,7 +44,7 @@ internal static class Program
             {
                 host.Services.GetRequiredService<SessionStore>().Set(BinarySession.Open(path, options));
             }
-            catch (Exception ex) when (ex is PeParseException or IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is BinaryParseException or IOException or UnauthorizedAccessException)
             {
                 // Reported through stderr by the logger; the server still starts, and open_binary
                 // works, so a bad path in a client's configuration is not fatal to the session.

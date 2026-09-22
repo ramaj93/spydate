@@ -56,7 +56,7 @@ public sealed class PatchTools
 
         if (session is not { Analysis: not null } && session.Managed is null)
         {
-            return $"there is nothing to patch: {session.Image.Machine} is not a machine this disassembles";
+            return $"there is nothing to patch: {session.Pe.Machine} is not a machine this disassembles";
         }
 
         var resolved = Targets.Resolve(session, target);
@@ -90,7 +90,7 @@ public sealed class PatchTools
         // is one bit that untrusted input is free to get wrong; whether a method body's IL covers
         // this address is a fact about the bytes.
         var proposal = InIl(session, resolved.Va)
-            ? IlPatches.Assemble(session.Managed!, session.Bodies!, session.Image, resolved.Va, instruction, force)
+            ? IlPatches.Assemble(session.Managed!, session.Bodies!, session.Pe, resolved.Va, instruction, force)
             : InstructionPatches.Assemble(session.Analysis!, resolved.Va, instruction);
 
         if (!proposal.Ok)
@@ -222,7 +222,7 @@ public sealed class PatchTools
     /// reports success and the program behaves exactly as it did.
     /// </summary>
     private static string Precompiled(BinarySession session)
-        => session.Image.ClrHeader is { ManagedNativeHeader.Size: > 0 }
+        => session.Pe.ClrHeader is { ManagedNativeHeader.Size: > 0 }
             ? "\nnote: this assembly is precompiled (ReadyToRun), so the runtime may run its native copy "
               + "rather than the IL you changed - the patch can be correct and still do nothing"
             : string.Empty;

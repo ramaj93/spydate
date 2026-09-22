@@ -212,7 +212,7 @@ internal static class ManagedDebugging
             // module on its own, because assemblies share an image base — so it is named by method
             // instead. Inside the opened module it simply is not in any method's IL.
             ulong start = session.Image.ImageBase;
-            ulong end = start + session.Image.OptionalHeader.SizeOfImage;
+            ulong end = start + session.Image.ImageSize;
             return address.Va < start || address.Va >= end
                 ? $"0x{address.Va:X} is not in the opened module — it is in another assembly, where a "
                   + "breakpoint is set by name (Type::Method, or Type::Method+IL_7) rather than by address: "

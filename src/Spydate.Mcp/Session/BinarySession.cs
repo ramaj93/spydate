@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Decompiler.Managed;
@@ -51,11 +52,11 @@ public sealed class BinarySession : IDisposable
     /// </param>
     public BinarySession(
         string path,
-        PeImage image,
+        IBinaryImage image,
         BinaryAnalysis? analysis,
         ProjectLoadResult? project,
         DiscoveryState discovery,
-        Func<PeImage, AnnotationStore, string?>? save = null,
+        Func<IBinaryImage, AnnotationStore, string?>? save = null,
         PatchStore? patches = null,
         NoteStore? notes = null,
         ManagedAssembly? managed = null,
@@ -87,7 +88,15 @@ public sealed class BinarySession : IDisposable
 
     public string Path { get; }
 
-    public PeImage Image { get; }
+    public IBinaryImage Image { get; }
+
+    /// <summary>
+    /// The PE behind <see cref="Image"/>, for the tools that report a PE's own structures. Temporary: every
+    /// format opened today is a PE, so this never throws, and each use is a place the next format has to be
+    /// taught about. Grep for it; that is the to-do list.
+    /// </summary>
+    public PeImage Pe => Image as PeImage
+        ?? throw new InvalidOperationException($"{Image.FileName} is {Image.Format}, not a PE; this tool does not know that format yet");
 
     /// <summary>Null when the image is not x86 or x64: there is nothing here that can read it.</summary>
     public BinaryAnalysis? Analysis { get; }
@@ -183,7 +192,7 @@ public sealed class BinarySession : IDisposable
     public NoteStore Notes { get; }
 
     /// <summary>Writes the annotations out, returning where they went.</summary>
-    public Func<PeImage, AnnotationStore, string?> Save { get; }
+    public Func<IBinaryImage, AnnotationStore, string?> Save { get; }
 
     /// <summary>
     /// The discovered functions in address order, cached. <see cref="BinaryAnalysis.Functions"/>
@@ -236,7 +245,7 @@ public sealed class BinarySession : IDisposable
         ArgumentNullException.ThrowIfNull(options);
 
         string full = System.IO.Path.GetFullPath(path);
-        var image = PeImage.Load(full);
+        var image = BinaryImage.Load(full);
 
         // Before the native analysis, and independent of it. A .NET assembly built AnyCPU says
         // I386 in its machine field and so passes the x86 test below, but the bytes in its .text
@@ -244,7 +253,7 @@ public sealed class BinarySession : IDisposable
         // one — a mixed-mode assembly has both, a NativeAOT publish has only the native side.
         var (managed, managedError) = LoadManaged(image, full);
 
-        if (!image.IsX86Family)
+        if (image.Architecture is not (Architecture.X86 or Architecture.X64))
         {
             return new BinarySession(full, image, null, null, DiscoveryState.None, managed: managed, managedLoadError: managedError);
         }
@@ -268,9 +277,9 @@ public sealed class BinarySession : IDisposable
     /// claims to be managed and is not must leave every other tool working, since a binary whose
     /// metadata is deliberately broken is a thing an analyst opens on purpose.
     /// </summary>
-    private static (ManagedAssembly? Assembly, string? Error) LoadManaged(PeImage image, string path)
+    private static (ManagedAssembly? Assembly, string? Error) LoadManaged(IBinaryImage image, string path)
     {
-        if (!image.IsManaged)
+        if (image is not PeImage { IsManaged: true })
         {
             return (null, null);
         }

@@ -1,4 +1,5 @@
 using System.IO;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Decompiler.Managed;
@@ -10,7 +11,7 @@ namespace Spydate.App.Services;
 /// <summary>Everything loaded for one file: the PE image plus the native and/or managed analysis objects.</summary>
 public sealed class OpenedBinary : IDisposable
 {
-    public OpenedBinary(PeImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public OpenedBinary(IBinaryImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
     {
         Image = image;
         Analysis = analysis;
@@ -23,7 +24,15 @@ public sealed class OpenedBinary : IDisposable
         Notes = notes ?? new NoteStore();
     }
 
-    public PeImage Image { get; }
+    public IBinaryImage Image { get; }
+
+    /// <summary>
+    /// The PE behind <see cref="Image"/>, for the views that show a PE's own structures — headers, data
+    /// directories, resources. Temporary: every format opened today is a PE, so this never throws, and each
+    /// use is a place the next format has to be taught about. Grep for it; that is the to-do list.
+    /// </summary>
+    public PeImage Pe => Image as PeImage
+        ?? throw new InvalidOperationException($"{Image.FileName} is {Image.Format}, not a PE; this view does not know that format yet");
 
     /// <summary>Native analysis session; null when the machine type is not x86/x64.</summary>
     public BinaryAnalysis? Analysis { get; }
@@ -244,8 +253,8 @@ public sealed class WorkspaceService : IDisposable
 
     private static OpenedBinary Load(string path)
     {
-        var pe = PeImage.Load(path);
-        BinaryAnalysis? analysis = pe.IsX86Family ? new BinaryAnalysis(pe) : null;
+        var image = BinaryImage.Load(path);
+        BinaryAnalysis? analysis = image.Architecture is Architecture.X86 or Architecture.X64 ? new BinaryAnalysis(image) : null;
         analysis?.LoadPdbSymbols();
 
         // Before discovery, so a renamed function is discovered under the name the user gave it.
@@ -255,19 +264,20 @@ public sealed class WorkspaceService : IDisposable
         ProjectLoadResult? project;
         if (analysis is not null)
         {
-            project = SpydateProject.LoadFor(pe, analysis.Annotations, patches, breakpoints, notes);
+            project = SpydateProject.LoadFor(image, analysis.Annotations, patches, breakpoints, notes);
         }
         else
         {
             // No analysis to carry annotations, but a managed-only assembly can still have notes an
             // agent wrote against it; load them over a throwaway store so they reappear in the window.
-            SpydateProject.LoadFor(pe, new AnnotationStore(), notes: notes);
+            SpydateProject.LoadFor(image, new AnnotationStore(), notes: notes);
             project = null;
         }
 
+        // The .NET reading rides on a PE's CLR header; no other format carries one.
         ManagedAssembly? managed = null;
         string? managedError = null;
-        if (pe.IsManaged)
+        if (image is PeImage { IsManaged: true })
         {
             try
             {
@@ -280,6 +290,6 @@ public sealed class WorkspaceService : IDisposable
             }
         }
 
-        return new OpenedBinary(pe, analysis, managed, managedError, project, patches, breakpoints, notes);
+        return new OpenedBinary(image, analysis, managed, managedError, project, patches, breakpoints, notes);
     }
 }

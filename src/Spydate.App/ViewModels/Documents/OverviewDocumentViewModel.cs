@@ -10,7 +10,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
 {
     public OverviewDocumentViewModel(OpenedBinary binary) : base("overview", "Overview", SymbolRegular.Info24)
     {
-        var pe = binary.Image;
+        var pe = binary.Pe;
         FileName = pe.FileName;
         FilePath = pe.Path ?? "(memory)";
         Kind = Describe(pe);

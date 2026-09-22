@@ -4,6 +4,7 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 
@@ -271,7 +272,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         {
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
 
-            var pe = opened.Image;
+            var pe = opened.Pe;
             StatusText = $"{opened.DisplayName}  ·  {pe.Machine}  ·  {(pe.Is64Bit ? "PE32+" : "PE32")}{(pe.IsManaged ? "  ·  .NET" : string.Empty)}  ·  {pe.Sections.Count} sections";
             Log($"Loaded {opened.DisplayName}: {pe.Machine}, {(pe.Is64Bit ? "PE32+" : "PE32")}, {pe.Length:N0} bytes, " +
                 $"{pe.Sections.Count} sections, {pe.Imports.Count + pe.DelayImports.Count} imported modules, " +
@@ -300,11 +301,13 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             // land in the menu as something worth trying again.
             RefreshRecent(RecentFiles.Add(path));
         }
-        catch (PeParseException ex)
+        catch (BinaryParseException ex)
         {
+            // A recognised format Spydate does not open yet is named as such, not as a broken PE.
+            string title = ex is UnsupportedFormatException ? "Not a format Spydate opens yet" : "Not a valid PE file";
             StatusText = $"Cannot open: {ex.Message}";
             Log($"ERROR: {ex.Message}");
-            MessageBox.Show(ex.Message, "Not a valid PE file", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         finally
         {

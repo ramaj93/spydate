@@ -102,14 +102,14 @@ public sealed class NavigationTools
         // Managed first when there is a managed reading. The native symbol table of an IL-only
         // assembly holds one import and the loader stub, so answering from it would be answering a
         // question about the file that nobody asked.
-        if (open.ManagedIndex is { } managed && open.Image.ClrHeader?.IsILOnly == true)
+        if (open.ManagedIndex is { } managed && open.Pe.ClrHeader?.IsILOnly == true)
         {
             return FindManaged(managed, open.Managed!.PInvokes, query, limit);
         }
 
         if (open.Analysis is not { } analysis)
         {
-            return $"there is no symbol table: {open.Image.Machine} is not a machine this disassembles";
+            return $"there is no symbol table: {open.Pe.Machine} is not a machine this disassembles";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -154,20 +154,20 @@ public sealed class NavigationTools
 
         // An IL-only assembly's import directory holds one entry, for the loader. Answering from it
         // would be truthfully describing the wrong table: what the program uses is in its MemberRefs.
-        if (open.Managed is not null && open.Image.ClrHeader?.IsILOnly == true)
+        if (open.Managed is not null && open.Pe.ClrHeader?.IsILOnly == true)
         {
             return ManagedImports(open, module, filter, sort, Math.Max(0, offset), Math.Clamp(limit, 1, MaxLimit));
         }
 
         if (open is not { Analysis: { } analysis } session)
         {
-            return $"there is no import table to read: {open.Image.Machine} is not a machine this disassembles";
+            return $"there is no import table to read: {open.Pe.Machine} is not a machine this disassembles";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
         offset = Math.Max(0, offset);
 
-        var image = session.Image;
+        var image = session.Pe;   // the import table as a PE lists it, module by module
         var rows = image.Imports.Concat(image.DelayImports)
             .Where(m => module is null || m.Name.Contains(module, StringComparison.OrdinalIgnoreCase))
             .SelectMany(m => m.Functions.Select(f => (Module: m, Function: f)))
@@ -228,7 +228,7 @@ public sealed class NavigationTools
             // no analysis to fall through, and "who calls File.Delete" is still a fair question.
             return open.References?.Import(target) is { } only
                 ? Outside(open, only, offset, Math.Clamp(limit, 1, MaxLimit))
-                : managed.Problem ?? $"there is nothing to cross-reference: {open.Image.Machine} is not a machine this disassembles";
+                : managed.Problem ?? $"there is nothing to cross-reference: {open.Pe.Machine} is not a machine this disassembles";
         }
 
         var resolved = Targets.Resolve(session, target);
@@ -563,7 +563,7 @@ public sealed class NavigationTools
     /// unnamed-by-references worklist made of those would be a day's work naming nothing.
     /// </summary>
     private static string Stub(BinarySession session)
-        => session.Managed is not null && session.Image.ClrHeader?.IsILOnly == true
+        => session.Managed is not null && session.Pe.ClrHeader?.IsILOnly == true
             ? "-- IL-only .NET assembly: these are x86 shapes found in bytes that hold IL, not this "
               + "program's methods. Its own code is find_symbol() and read_function(view=\"csharp\") --\n"
             : string.Empty;

@@ -13,7 +13,7 @@ public static class ExplorerTreeBuilder
 {
     public static ExplorerNodeViewModel Build(OpenedBinary binary)
     {
-        var pe = binary.Image;
+        var pe = binary.Pe;
         string subtitle = $"{(pe.Is64Bit ? "PE32+" : "PE32")} · {pe.Machine}{(pe.IsManaged ? " · .NET" : string.Empty)}";
         var root = new ExplorerNodeViewModel(pe.FileName, pe.IsManaged ? SymbolRegular.Library24 : SymbolRegular.Document24, new OverviewTarget(), subtitle)
         {

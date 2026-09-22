@@ -513,7 +513,7 @@ public sealed class AnnotationTools
     /// meant something. Annotating a place that does not exist is worse than refusing to.
     /// </summary>
     private static bool InsideImage(BinarySession session, ulong va)
-        => session.Image.VaToRva(va) is { } rva && rva < session.Image.OptionalHeader.SizeOfImage;
+        => session.Image.VaToRva(va) is { } rva && rva < session.Image.ImageSize;
 
     /// <summary>
     /// The VA where a <c>Namespace.Type::Method</c>'s IL begins, or null when the text is not a managed

@@ -178,6 +178,20 @@ public sealed class BinaryImageTests : IDisposable
         Assert.ThrowsAny<BinaryParseException>(() => BinaryImage.Load(garbage));
     }
 
+    [Fact]
+    public async Task OpenBinaryNamesAnElfAndPointsAtReadFile()
+    {
+        // Without the shared base the refusal would escape open_binary as an unhandled exception. It must be
+        // an answer instead — naming the format, and naming the tool that can still read the bytes.
+        string elf = Write("tool", [0x7F, (byte)'E', (byte)'L', (byte)'F', 2, 1, 1, 0]);
+        var tools = new Spydate.Mcp.Tools.SessionTools(new Spydate.Mcp.Session.SessionStore(), Spydate.Mcp.McpOptions.Default);
+
+        string answer = await tools.OpenBinaryAsync(elf);
+
+        Assert.Contains("ELF", answer, StringComparison.Ordinal);
+        Assert.Contains("read_file", answer, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(new byte[0])]
     [InlineData(new byte[] { (byte)'M' })]
