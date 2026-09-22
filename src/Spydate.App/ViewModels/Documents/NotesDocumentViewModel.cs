@@ -57,6 +57,15 @@ public sealed partial class NotesDocumentViewModel : DocumentViewModel
     [ObservableProperty]
     private bool _showAsDocument;
 
+    /// <summary>What the view-switch button says: it names the view it goes to, not the one you are in.</summary>
+    public string ViewToggleLabel => ShowAsDocument ? "View sections" : "View as document";
+
+    partial void OnShowAsDocumentChanged(bool value) => OnPropertyChanged(nameof(ViewToggleLabel));
+
+    /// <summary>Switches between the section editor and the one-document reading view.</summary>
+    [RelayCommand]
+    private void ToggleView() => ShowAsDocument = !ShowAsDocument;
+
     /// <summary>
     /// Every section as one Markdown document, each under its key as a heading, in the order the list
     /// shows them (alphabetical by key — the store keeps no other order). This is what the document
@@ -120,6 +129,29 @@ public sealed partial class NotesDocumentViewModel : DocumentViewModel
         };
 
         OnPropertyChanged(nameof(CombinedMarkdown));
+    }
+
+    /// <summary>Copies every section, as the combined Markdown document, to the clipboard.</summary>
+    [RelayCommand]
+    private void CopyDocument()
+    {
+        string markdown = CombinedMarkdown;
+        if (string.IsNullOrEmpty(markdown))
+        {
+            Status = "Nothing to copy yet.";
+            return;
+        }
+
+        try
+        {
+            System.Windows.Clipboard.SetText(markdown);
+            Status = Rows.Count == 1 ? "Copied the note." : $"Copied {Rows.Count} sections.";
+        }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            // The clipboard is held by another process often enough to be worth not throwing over.
+            Status = "Could not reach the clipboard; try again.";
+        }
     }
 
     /// <summary>Clears the editor for a section that does not exist yet.</summary>

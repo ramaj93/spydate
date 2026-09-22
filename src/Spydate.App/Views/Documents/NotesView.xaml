@@ -18,10 +18,14 @@
                 <Button DockPanel.Dock="Left" Content="New section" Command="{Binding NewSectionCommand}"
                         Margin="2,0,6,0"
                         Visibility="{Binding ShowAsDocument, Converter={StaticResource InverseBoolToVisibility}}" />
-                <ToggleButton DockPanel.Dock="Left" Content="View as document" Margin="0,0,8,0"
-                              IsChecked="{Binding ShowAsDocument, Mode=TwoWay}"
-                              AutomationProperties.Name="View as document"
-                              ToolTip="Show every section as one Markdown document" />
+                <Button DockPanel.Dock="Left" Content="{Binding ViewToggleLabel}" Command="{Binding ToggleViewCommand}"
+                        Margin="0,0,6,0" MinWidth="118"
+                        AutomationProperties.Name="Toggle view"
+                        ToolTip="Switch between editing sections and reading them as one document" />
+                <Button DockPanel.Dock="Left" Content="Copy" Command="{Binding CopyDocumentCommand}"
+                        Margin="0,0,8,0" AutomationProperties.Name="Copy document"
+                        ToolTip="Copy every section as one Markdown document"
+                        Visibility="{Binding ShowAsDocument, Converter={StaticResource BoolToVisibility}}" />
                 <TextBlock Text="{Binding Summary}" VerticalAlignment="Center"
                            Foreground="{DynamicResource Text.Secondary}" />
                 <TextBlock Text="  ·  a note is what is true of the whole binary, with no address"
