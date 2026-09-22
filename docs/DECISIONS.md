@@ -879,3 +879,49 @@ the window, and the document and the note index follow it; a new section appends
 in. The document view drops the `## key` headings and joins the bodies, because the keys are
 organisational labels, not part of the writing — a section that wants a heading carries its own in its
 text. A move keeps the section's author and time: arranging notes is not authoring them.
+
+## A binary is an IBinaryImage, and PE is one implementation of it
+
+Spydate read only PE files, and `PeImage` was the type at every boundary — the analysis, the open file,
+the MCP session, the project file's identity. Adding ELF, JAR or APK against that would mean either a
+second copy of everything or a `PeImage` asked to pretend. So the seam is drawn first, on its own, with
+no second format behind it and no change in behaviour: the full test suite passing unchanged is the
+proof that it is only a seam.
+
+**The interface is what the analysis was measured to use, not what a binary might have.** Disassembly,
+function discovery, the native decompiler and the project file ask about a dozen things of an image:
+its sections, address conversion, reads, entry point, exports and imports, and size. That is
+`IBinaryImage`. A format's own structures — PE's data directories, ELF's segments — stay on the concrete
+type, where the views that show them can reach them. A wider interface would have been guesswork about
+formats not yet written, and every member on it a thing each future format must fake.
+
+**A feature is an interface only when a second format will really have it.** Unwind ranges are
+`IUnwindInfoSource`, because ELF carries `.eh_frame` and will implement it. The load config's guard
+tables and security cookie, TLS callbacks, the PDB named by a CodeView record and signatures read from
+the Windows DLLs a PE imports are a PE's own, and the analysis asks for them as such — `is PeImage` —
+rather than through an interface only PE would ever implement.
+
+**Recognising a file names it; it does not change what an unrecognised file gets.** `BinaryImage.Detect`
+knows PE, ELF, JAR and APK by their bytes, and calls a zip Java only when it holds Java — a Word
+document is a zip too. A recognised format Spydate does not open yet is refused by name. Anything
+unrecognised still goes to the PE parser, whose error says what it found where a header should be, so
+opening an unknown file answers exactly as it always has.
+
+**A project is matched on a fingerprint the format defines, and a PE's is the one it always had.** The
+identity was a PE's link stamp and checksum. It is now a string each format supplies; a PE's is that
+stamp and checksum as `TTTTTTTT-CCCCCCCC`, which is character for character the key the per-user store
+has always used in its file names. So every existing project resolves, and a PE's project file is
+written in the same shape — no `fingerprint` member appears in a file people keep in version control.
+RVAs stay the unit of address in the file for the same reason: they are what it already holds.
+
+**The views keep their PE for now, through one named accessor.** The explorer, the overview, the
+headers and the debugger show a PE's own structures. Rather than rework them before a second format
+exists to design against, they reach the PE through `OpenedBinary.Pe` / `BinarySession.Pe`, which
+returns the same object as before and would name the format if it were ever not a PE. It is a
+deliberate, temporary leak: each use is a place ELF support has to decide what that view shows, and
+grepping for it is that work's list.
+
+One consequence surfaced as a test: a fixture relied on no IL instruction naming the `PeImage` type.
+The new `is PeImage` checks are `isinst` instructions that do, and the xrefs tool now reports them —
+correctly. The fixture moved to a plain class; a record would not do either, since a record's
+generated `Equals(object)` is itself an `isinst` naming its type.

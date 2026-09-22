@@ -40,16 +40,24 @@
                 │
 ┌───────────────┴─────────────────────────────────────────────┐
 │ Spydate.Core (net10.0, no external deps)                    │
+│  Binary: IBinaryImage · BinaryImage (detect/load) · SpanReader │
 │  PE: PeImage + headers/sections/imports/exports/CLR/debug   │
 │      + relocations/TLS/load config/resources/Rich           │
-│  Strings: StringScanner · Binary: SpanReader                │
-│  Binary: SpanReader · Symbols: SymbolTable                  │
+│  Strings: StringScanner · Symbols: SymbolTable              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 Rules: strictly downward references. Core knows nothing about Iced/ILSpy/WPF. `Spydate.Mcp` sits
 beside the app rather than under it: neither references the other, and they share a binary only
 through the `.spydate` project file.
+
+**A binary is an `IBinaryImage`; PE is one implementation.** Everything opens through
+`BinaryImage.Load`, which recognises the container from its bytes and hands it to that format's
+parser. The analysis — disassembly, discovery, the native decompiler, the project file — works
+through the interface and never names a format. What only a PE has (its data directories, CLR
+header, load config, PDB reference) stays on `PeImage`, reached with `is PeImage` where analysis can
+use it and, in the views and tools that display it, through a temporary `OpenedBinary.Pe` /
+`BinarySession.Pe` accessor. Each use of that accessor is a place the next format has to be taught.
 
 ### `Spydate.Agent` — the assistant in the window
 
