@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<!-- A JVM bytecode listing as BytecodeListing prints it: "0012  invokevirtual   java.io.PrintStream.println(...)".
+     The same palette as IL, so the two bytecode views read alike. -->
+<SyntaxDefinition name="Spydate.JvmBytecode" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <Color name="Comment"   foreground="#6A9955" />
+  <Color name="String"    foreground="#CE9178" />
+  <Color name="Directive" foreground="#C586C0" fontWeight="bold" />
+  <Color name="Opcode"    foreground="#569CD6" />
+  <Color name="Branch"    foreground="#DCDCAA" fontWeight="bold" />
+  <Color name="Label"     foreground="#6E7681" />
+  <Color name="Type"      foreground="#4EC9B0" />
+  <Color name="Number"    foreground="#B5CEA8" />
+  <Color name="Keyword"   foreground="#9CDCFE" />
+
+  <RuleSet>
+    <Span color="Comment" begin="//" />
+    <Span color="String" begin="&quot;" end="&quot;">
+      <RuleSet>
+        <Span begin="\\" end="." />
+      </RuleSet>
+    </Span>
+
+    <!-- The offset at the start of an instruction line, and the offsets branches and switch cases go to. -->
+    <Rule color="Label">^\s*[0-9A-F]{4}(?=\s)|(?&lt;=:\s)[0-9A-F]{4}\b</Rule>
+
+    <!-- What changes where execution goes next: branches, switches, returns, throws, calls, allocation. -->
+    <Rule color="Branch">(?&lt;=^\s*[0-9A-F]{4}\s+(wide\s+)?)(if\w*|goto(_w)?|jsr(_w)?|ret|[ailfd]?return|athrow|tableswitch|lookupswitch|invoke\w+|new|newarray|anewarray|multianewarray)\b</Rule>
+    <Rule color="Opcode">(?&lt;=^\s*[0-9A-F]{4}\s+)(wide\s+)?[a-z][a-z0-9_]*</Rule>
+    <Rule color="Label">(?&lt;=^\s*[0-9A-F]{4}\s+(if\w*|goto(_w)?|jsr(_w)?)\s+)[0-9A-F]{4}\b</Rule>
+
+    <!-- The lines under a method that describe it rather than run it. -->
+    <Rule color="Directive">^\s*(descriptor|stack|exception table|locals)\b</Rule>
+
+    <!-- Qualified Java names: java.lang.String, com.example.Greeter$Inner. -->
+    <Rule color="Type">\b(?:[a-z_$][\w$]*\.)+[A-Z][\w$]*</Rule>
+
+    <Keywords color="Type">
+      <Word>void</Word><Word>boolean</Word><Word>byte</Word><Word>char</Word><Word>short</Word><Word>int</Word>
+      <Word>long</Word><Word>float</Word><Word>double</Word>
+    </Keywords>
+
+    <Keywords color="Keyword">
+      <Word>public</Word><Word>private</Word><Word>protected</Word><Word>static</Word><Word>final</Word><Word>abstract</Word>
+      <Word>synchronized</Word><Word>volatile</Word><Word>transient</Word><Word>native</Word><Word>strictfp</Word>
+      <Word>class</Word><Word>interface</Word><Word>enum</Word><Word>record</Word><Word>module</Word>
+      <Word>extends</Word><Word>implements</Word><Word>throws</Word><Word>default</Word>
+    </Keywords>
+
+    <Rule color="Number">\b-?\d+(\.\d+)?([eE]-?\d+)?[LfdD]?\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

@@ -1515,7 +1515,14 @@ public sealed partial class FileViewModel : ObservableObject
             text = $"// {target.Type.FullName} could not be read as {reading.Views[0]}: {ex.Message}";
         }
 
-        return CodeDocumentViewModel.ForText(ReadingKey(target), title, SymbolRegular.Code24, HighlightingService.Plain, text);
+        // Coloured by the view it was rendered in; a view nothing has a definition for stays plain.
+        string highlighting = reading.Views[0] switch
+        {
+            JvmReading.BytecodeView => HighlightingService.JvmBytecode,
+            _ => HighlightingService.Plain,
+        };
+
+        return CodeDocumentViewModel.ForText(ReadingKey(target), title, SymbolRegular.Code24, highlighting, text);
     }
 
     /// <summary>

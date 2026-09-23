@@ -12,6 +12,9 @@ public sealed class HighlightingService
     public const string PseudoC = "Spydate.PseudoC";
     public const string CSharp = "Spydate.CSharp";
     public const string Il = "Spydate.IL";
+
+    /// <summary>A JVM bytecode listing, in the IL palette so the two bytecode views read alike.</summary>
+    public const string JvmBytecode = "Spydate.JvmBytecode";
     public const string Plain = "";
 
     /// <summary>Manifests are XML; AvalonEdit's built-in definition assumes a light background.</summary>
@@ -23,6 +26,7 @@ public sealed class HighlightingService
         (PseudoC, "pseudoc.xshd", new[] { ".pc" }),
         (CSharp, "csharp-dark.xshd", new[] { ".cs" }),
         (Il, "il.xshd", new[] { ".il" }),
+        (JvmBytecode, "jvm-bytecode.xshd", new[] { ".jbc" }),
         (Xml, "xml-dark.xshd", new[] { ".manifest" }),
     };
 
