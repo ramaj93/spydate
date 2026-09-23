@@ -985,3 +985,44 @@ every MCP debug tool, before anything reaches the Win32 loop: it is read and dec
 
 Not done here, and each its own decision: ARM and AArch64 code (a second decoder, Phase 4), DWARF debug
 information, applying an object file's relocations, and demangling C++ names.
+
+## A file's bytecode is an IBytecodeReading, and .NET is one implementation of it
+
+A file can be read twice: as native code, and as bytecode. A .NET assembly is a PE whose program is CIL, a
+JAR is only JVM bytecode, an APK is Dalvik bytecode with native libraries beside it. The .NET reading was
+`ManagedAssembly`, typed to ILSpy's metadata from end to end, so a second reading had nowhere to go. As with
+the image seam, the reading seam is drawn first and alone, against the one reading there is, with no
+change in behaviour: the managed and MCP tests passing unchanged are the proof.
+
+**The interface is what the browsing tools ask, not everything .NET can do.** Resolving a name to a type or
+member, `find_symbol`, the overview's identity lines, the explorer's namespace tree and reading one type or
+member as text are what a JVM or Dalvik reading will also answer. That is `IBytecodeReading`, with
+`IBytecodeNamespace`, `IBytecodeType` and `IBytecodeMember`, in `Spydate.Core/Readings` — platform-free, no
+ILSpy. Method bodies at file addresses, the debugger's breakpoints, IL patching, P/Invokes, cross-references
+read from IL and resolving referenced assemblies are .NET's own, and stay on `ManagedAssembly`, reached by
+asking for the .NET reading — the way a PE's load config stays on `PeImage`.
+
+**Nothing is wrapped twice.** `ManagedType`, `ManagedMember` and `ManagedNamespace` implement the interfaces
+themselves, and `DotNetReading` wraps the assembly without copying it. A tool that resolved a name through
+the seam and now needs a metadata handle takes the .NET view of the same object (`BytecodeTarget.DotNetType`)
+rather than looking it up again. Kinds map onto the seam's small enums, and `KindName` keeps the exact word
+each reading printed before, so no listing changed.
+
+**The index and resolver are the seam's.** `BytecodeIndex` indexes a type under its full name, every name
+in `OtherNames` (the metadata's `+` and backtick form for .NET, a slashed internal name for the JVM) and its
+bare name; `BytecodeTargets` resolves against it with the same rules and messages as before, the noun in
+them ("this assembly", "this archive") coming from the reading. `BinarySession` and `OpenedBinary` hold
+`Bytecode`; `Managed` is the .NET assembly behind it, when that is what it is. A reading that is the whole
+program — an IL-only assembly, or any reading of a format with no native code — is what `find_symbol` and
+the overview answer from.
+
+**A second reading is usable before it has a view of its own.** `read_function` renders any reading
+through `IBytecodeReading.Render` in its own views, paged like any body; the explorer opens a type or member
+of it as that rendering. .NET keeps its richer paths — addresses on IL lines, P/Invokes named, the C#
+document with its gutter — because it has them. A test holds an in-memory JVM-shaped reading and drives
+`find_symbol`, `read_function`, the overview and `xrefs` through it, and none of them names its format.
+
+Two parts of the plan were left out on purpose. The native reading keeps its name, `Analysis`: renaming it
+`Native` everywhere would be churn with nothing behind it. And there is no `IArchive` yet: the first thing
+that is an archive is the JAR, and the interface should be drawn when it has an implementation to be
+measured against, in Phase 3, not guessed at here.

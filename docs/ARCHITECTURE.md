@@ -45,6 +45,7 @@
 │      + relocations/TLS/load config/resources/Rich           │
 │  Elf: ElfImage + segments/sections/dynsym/versions/PLT     │
 │       + .eh_frame/build-id                                  │
+│  Readings: IBytecodeReading · types · members (no ILSpy)    │
 │  Strings: StringScanner · Symbols: SymbolTable              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -154,6 +155,15 @@ library and version each import was linked against) and `StaticSymbols`, the dyn
 `PltStubs` (stub → import), `BuildId`. It implements `IUnwindInfoSource` from `.eh_frame` and
 `ISymbolSource` from `.symtab`, the PLT stubs and a `main` recovered from `_start`. `Fingerprint` is the
 build-id, or a hash of the headers without one. See DECISIONS, "An ELF is parsed in-house".
+
+### 3.1c `IBytecodeReading`
+
+A file's second reading, beside its native code: namespaces → types → members, and one type or member
+rendered as text in one of the reading's `Views` (.NET: `csharp`, `il`). In `Spydate.Core/Readings`, with
+no dependency on ILSpy. The MCP server indexes any reading with `BytecodeIndex` and resolves names with
+`BytecodeTargets`; `find_symbol`, `read_function`, the overview and the explorer's namespace tree go through
+it. What only .NET has (bodies at addresses, IL patching, P/Invokes, IL cross-references, the debugger) is
+reached through `ManagedAssembly`. See DECISIONS, "A file's bytecode is an IBytecodeReading".
 
 ### 3.2 `StringScanner`
 
@@ -345,6 +355,9 @@ See `DECOMPILER-DESIGN.md`. Summary:
 - **Managed**: `ManagedAssembly` (metadata browsing: namespaces → types →
   members) and `ManagedDecompiler` (`DecompileType`, `DecompileMethod`,
   `DecompileWholeModule`, `DisassembleIl`) built on `ICSharpCode.Decompiler`.
+  `DotNetReading` is the assembly as an `IBytecodeReading` (see §3.1c): the
+  records implement the seam directly, and everything only .NET has stays on
+  `ManagedAssembly`.
 
 ## 5b. User annotations and the project file
 
@@ -386,8 +399,10 @@ the lookups are the part worth testing, and the window is the part that cannot b
 ## 6. App: `Spydate.App`
 
 See `UI-DESIGN.md`. `WorkspaceService` loads a file (`BinaryImage.Load`: a `PeImage` or an `ElfImage`), builds a
-`BinaryAnalysis` (native) and/or `ManagedAssembly` (managed) on a background
-thread and exposes an `OpenedBinary`. `MainViewModel` builds the explorer tree
+`BinaryAnalysis` (native) and/or a bytecode reading (`DotNetReading` over a
+`ManagedAssembly` today) on a background thread and exposes an `OpenedBinary`,
+which holds `Analysis` and `Bytecode` side by side; the explorer composes what is
+present. `MainViewModel` builds the explorer tree
 and opens `DocumentViewModel`s in the tab strip.
 
 ## 7. Data flow (native file)
