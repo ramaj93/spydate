@@ -1,5 +1,7 @@
 using System.Globalization;
 using Spydate.App.Services;
+using Spydate.Core.Binary;
+using Spydate.Core.Elf;
 using Spydate.Core.PE;
 using Wpf.Ui.Controls;
 
@@ -10,7 +12,35 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
 {
     public OverviewDocumentViewModel(OpenedBinary binary) : base("overview", "Overview", SymbolRegular.Info24)
     {
-        var pe = binary.Pe;
+        if (binary.Image is ElfImage elf)
+        {
+            FileName = elf.FileName;
+            FilePath = elf.Path ?? "(memory)";
+            Kind = $"{(elf.IsLibrary ? "Shared object" : "Linux executable")} ({ArchitectureName(elf)})";
+            General = ElfGeneral(elf, binary);
+            Security = ElfDocuments.Hardening(elf).ToList();
+            SecurityTitle = "Hardening";
+            Version = new List<PropertyRow>();
+            Signature = new List<PropertyRow>();
+            Build = new List<PropertyRow>
+            {
+                new("Build ID", elf.BuildId ?? "(none)", elf.BuildId is null ? "the project file is matched on a hash of the headers instead" : "GNU build-id note"),
+            };
+            Build.AddRange(elf.SectionHeaders.Where(s => s.Name is ".comment").Select(s => new PropertyRow("Compiler", Comment(elf, s))));
+            Debug = elf.SectionHeaders
+                .Where(s => s.Name.StartsWith(".debug_", StringComparison.Ordinal) || s.Name == ".gnu_debuglink")
+                .Select(s => new PropertyRow(s.Name, $"{s.Size:N0} bytes", s.Name == ".gnu_debuglink" ? "debug info is in a separate file" : null))
+                .ToList();
+            Warnings = elf.Warnings.ToList();
+            if (binary.Analysis is null)
+            {
+                Warnings.Insert(0, $"{elf.Header.MachineName} code is not something the native disassembler reads (x86/x64 only); the structure is still shown.");
+            }
+
+            return;
+        }
+
+        var pe = binary.Image as PeImage ?? throw new NotSupportedException($"There is no overview for {binary.Image.Format} files.");
         FileName = pe.FileName;
         FilePath = pe.Path ?? "(memory)";
         Kind = Describe(pe);
@@ -180,6 +210,9 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
     public bool HasManaged => Managed is not null;
     /// <summary>Mitigations and loader-visible security data (load config, CFG, TLS).</summary>
     public List<PropertyRow> Security { get; }
+
+    /// <summary>What that group is called: a PE's is load config and TLS, an ELF's is how it was hardened.</summary>
+    public string SecurityTitle { get; } = "Security and TLS";
     public bool HasSecurity => Security.Count > 0;
     /// <summary>Decoded VS_VERSIONINFO resource.</summary>
     public List<PropertyRow> Version { get; }
@@ -194,6 +227,53 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
     public bool HasDebug => Debug.Count > 0;
     public List<string> Warnings { get; }
     public bool HasWarnings => Warnings.Count > 0;
+
+    private static List<PropertyRow> ElfGeneral(ElfImage elf, OpenedBinary binary)
+    {
+        var rows = new List<PropertyRow>
+        {
+            new("File", elf.Path ?? "(memory)"),
+            new("Size", $"{elf.Length:N0} bytes"),
+            new("Machine", $"{elf.Header.MachineName} ({elf.Header.Machine})"),
+            new("Format", $"{elf.Header.ClassName}, {elf.Header.ByteOrder}, {elf.Header.OsAbiName}"),
+            new("Type", elf.Kind),
+            new("Image base", $"0x{elf.ImageBase:X}"),
+            new("Entry point", elf.EntryPointRva == 0 ? "(none)" : $"RVA 0x{elf.EntryPointRva:X} → VA 0x{elf.EntryPointVa:X}"),
+            new("Size of image", $"0x{elf.ImageSize:X}"),
+            new("Segments", elf.Segments.Count.ToString(CultureInfo.InvariantCulture), $"{elf.Segments.Count(s => s.IsLoad)} loadable"),
+            new("Sections", elf.SectionHeaders.Count.ToString(CultureInfo.InvariantCulture)),
+            new("Interpreter", elf.Interpreter ?? "(none)", elf.Interpreter is null && elf.Dynamic.Count == 0 ? "statically linked" : null),
+            new("Libraries", elf.Needed.Count == 0 ? "(none)" : string.Join(", ", elf.Needed)),
+            new("Imports", $"{elf.Imports.Count:N0} symbols", elf.PltStubs.Count > 0 ? $"{elf.PltStubs.Count:N0} called through PLT stubs" : null),
+            new("Exports", elf.Exports.Count == 0 ? "(none)" : $"{elf.Exports.Count:N0} symbols", elf.SoName is { } soname ? $"SONAME {soname}" : null),
+            new("Symbols", elf.StaticSymbols.Count > 0 ? $"{elf.StaticSymbols.Count:N0} in .symtab" : "stripped (no .symtab)", $"{elf.DynamicSymbols.Count:N0} in .dynsym"),
+            new("Unwind table", elf.UnwindRanges.Count > 0 ? $"{elf.UnwindRanges.Count:N0} functions in .eh_frame" : "(none)"),
+            new("Debugging", "not available", "the debugger runs Windows programs; an ELF is read, not run"),
+        };
+
+        if (binary.Analysis is not null)
+        {
+            rows.Insert(rows.Count - 1, new PropertyRow("Calling convention", Spydate.Disassembly.CallingConvention.For(elf).Name));
+        }
+
+        return rows;
+    }
+
+    /// <summary><c>.comment</c> holds the compiler's version strings, NUL-separated.</summary>
+    private static string Comment(ElfImage elf, ElfSectionHeader section)
+    {
+        var text = System.Text.Encoding.UTF8.GetString(elf.SectionBytes(section)[..Math.Min((int)section.Size, 1024)]);
+        return string.Join(" · ", text.Split('\0', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct());
+    }
+
+    private static string ArchitectureName(IBinaryImage image) => image.Architecture switch
+    {
+        Architecture.X64 => "x64",
+        Architecture.X86 => "x86",
+        Architecture.Arm64 => "ARM64",
+        Architecture.Arm => "ARM",
+        _ => image is ElfImage elf ? elf.Header.MachineName : "unknown",
+    };
 
     /// <summary>First RT_VERSION leaf in the resource tree, decoded.</summary>
     private static VersionInfo? FindVersionInfo(PeImage pe)

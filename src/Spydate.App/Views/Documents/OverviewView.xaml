@@ -68,7 +68,7 @@
             </StackPanel>
 
             <StackPanel Visibility="{Binding HasSecurity, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="Security and TLS" Style="{StaticResource SectionHeader}" />
+                <TextBlock Text="{Binding SecurityTitle}" Style="{StaticResource SectionHeader}" />
                 <Border Style="{StaticResource Card}">
                     <ItemsControl ItemsSource="{Binding Security}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
                 </Border>

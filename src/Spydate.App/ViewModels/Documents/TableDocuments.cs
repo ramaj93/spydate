@@ -1,6 +1,7 @@
 using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Strings;
 using Spydate.Disassembly;
@@ -191,15 +192,15 @@ public sealed record StringRow(string Va, string Rva, string Offset, string Sect
 
 public sealed partial class StringsDocumentViewModel : DocumentViewModel
 {
-    private readonly PeImage _pe;
+    private readonly IBinaryImage _image;
     private readonly BinaryAnalysis? _analysis;
     private readonly Action<long> _openHex;
     private IReadOnlyList<FoundString> _found = Array.Empty<FoundString>();
 
-    public StringsDocumentViewModel(PeImage pe, BinaryAnalysis? analysis, Action<long> openHex)
+    public StringsDocumentViewModel(IBinaryImage image, BinaryAnalysis? analysis, Action<long> openHex)
         : base("strings", "Strings", SymbolRegular.TextT24)
     {
-        _pe = pe;
+        _image = image;
         _analysis = analysis;
         _openHex = openHex;
     }
@@ -222,7 +223,7 @@ public sealed partial class StringsDocumentViewModel : DocumentViewModel
     /// <summary>Scanning a large image touches every byte, so it happens off the UI thread.</summary>
     public override async Task LoadAsync(CancellationToken cancellationToken)
     {
-        _found = await Task.Run(() => StringScanner.Scan(_pe, StringScanOptions.Default, cancellationToken), cancellationToken).ConfigureAwait(true);
+        _found = await Task.Run(() => StringScanner.Scan(_image, StringScanOptions.Default, cancellationToken), cancellationToken).ConfigureAwait(true);
         Rebuild();
     }
 
@@ -242,7 +243,7 @@ public sealed partial class StringsDocumentViewModel : DocumentViewModel
             ? null
             : StringReferences.Resolve(found, _analysis.Xrefs);
 
-        var codeSections = _pe.Sections.Where(s => s.IsExecutable).Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
+        var codeSections = _image.Sections.Where(s => s.IsExecutable).Select(s => s.Name).ToHashSet(StringComparer.Ordinal);
         Rows = found.Select((s, i) => new StringRow(
             s.Va is { } va ? $"0x{va:X}" : "-",
             s.Rva is { } rva ? $"0x{rva:X8}" : "-",

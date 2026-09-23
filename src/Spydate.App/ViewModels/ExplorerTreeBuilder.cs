@@ -1,19 +1,101 @@
 using System.Globalization;
 using ICSharpCode.Decompiler.TypeSystem;
 using Spydate.App.Services;
+using Spydate.Core.Elf;
 using Spydate.Core.PE;
+using Spydate.Core.Symbols;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
 
 namespace Spydate.App.ViewModels;
 
-/// <summary>Builds the explorer tree for an <see cref="OpenedBinary"/>.</summary>
+/// <summary>Builds the explorer tree for an <see cref="OpenedBinary"/>: each format shows its own structures.</summary>
 public static class ExplorerTreeBuilder
 {
-    public static ExplorerNodeViewModel Build(OpenedBinary binary)
+    public static ExplorerNodeViewModel Build(OpenedBinary binary) => binary.Image switch
     {
-        var pe = binary.Pe;
+        ElfImage elf => BuildElf(binary, elf),
+        PeImage pe => BuildPe(binary, pe),
+        var other => throw new NotSupportedException($"No explorer for {other.Format}."),
+    };
+
+    /// <summary>
+    /// An ELF's tree: its own structures (segments, the dynamic section, symbol tables) where a PE has directories
+    /// and resources, then the same analysis nodes every native binary gets.
+    /// </summary>
+    private static ExplorerNodeViewModel BuildElf(OpenedBinary binary, ElfImage elf)
+    {
+        string subtitle = $"{elf.Header.ClassName} · {elf.Header.MachineName} · {elf.Kind}";
+        var root = new ExplorerNodeViewModel(elf.FileName, elf.IsLibrary ? SymbolRegular.Library24 : SymbolRegular.Document24, new OverviewTarget(), subtitle)
+        {
+            IsExpanded = true,
+        };
+
+        root.Add(new ExplorerNodeViewModel("Overview", SymbolRegular.Info24, new OverviewTarget()));
+        root.Add(new ExplorerNodeViewModel("Headers", SymbolRegular.DocumentHeader24, new HeadersTarget()));
+        root.Add(new ExplorerNodeViewModel("Segments", SymbolRegular.Storage24, new SegmentsTarget(), elf.Segments.Count.ToString(CultureInfo.InvariantCulture)));
+
+        var sections = root.Add(new ExplorerNodeViewModel("Sections", SymbolRegular.Layer24, new SectionsTarget(), elf.SectionHeaders.Count.ToString(CultureInfo.InvariantCulture)));
+        sections.ChildrenFactory = () => elf.SectionHeaders.Where(s => s.Index > 0).Select(s => new ExplorerNodeViewModel(
+            s.Name.Length == 0 ? $"<section {s.Index}>" : s.Name,
+            s.IsExecutable ? SymbolRegular.Code24 : SymbolRegular.Storage24,
+            new HexTarget((long)s.Offset),
+            s.IsAllocated ? $"{s.TypeName} · 0x{elf.AddressOf(s):X}" : s.TypeName));
+
+        if (elf.Dynamic.Count > 0)
+        {
+            root.Add(new ExplorerNodeViewModel("Dynamic", SymbolRegular.PlugConnected24, new DynamicTarget(), elf.Needed.Count == 1 ? "1 library" : $"{elf.Needed.Count} libraries"));
+        }
+
+        var imports = root.Add(new ExplorerNodeViewModel("Imports", SymbolRegular.ArrowImport24, new ImportsTarget(), elf.Imports.Count.ToString(CultureInfo.InvariantCulture)));
+        imports.ChildrenFactory = () => elf.Imports
+            .GroupBy(i => i.Module.Length == 0 ? "(any library)" : i.Module)
+            .Select(g =>
+            {
+                var module = new ExplorerNodeViewModel(g.Key, SymbolRegular.Box24, new ImportsTarget(), g.Count().ToString(CultureInfo.InvariantCulture));
+                module.ChildrenFactory = () => g.Select(i => new ExplorerNodeViewModel(i.DisplayName, SymbolRegular.ArrowRight24, new ImportsTarget(), $"GOT 0x{elf.RvaToVa(i.SlotRva):X}"));
+                return module;
+            });
+
+        var exports = root.Add(new ExplorerNodeViewModel("Exports", SymbolRegular.ArrowExport24, new ExportsTarget(), elf.Exports.Count == 0 ? "none" : elf.Exports.Count.ToString(CultureInfo.InvariantCulture)));
+        exports.ChildrenFactory = () => elf.Exports.Select(e => new ExplorerNodeViewModel(
+            e.DisplayName,
+            SymbolRegular.Flash24,
+            binary.Analysis is not null && elf.SectionFromRva(e.Rva) is { IsExecutable: true } ? new DisassemblyTarget(elf.RvaToVa(e.Rva), e.DisplayName) : new ExportsTarget(),
+            $"0x{elf.RvaToVa(e.Rva):X}"));
+
+        root.Add(new ExplorerNodeViewModel(
+            "Symbols",
+            SymbolRegular.Tag24,
+            new SymbolsTarget(),
+            elf.StaticSymbols.Count > 0 ? $"{elf.DynamicSymbols.Count + elf.StaticSymbols.Count:N0}" : $"{elf.DynamicSymbols.Count:N0} · stripped"));
+
+        AddAnalysisNodes(binary, root);
+        root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "ascii + utf-16"));
+        root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{elf.Length:N0} bytes"));
+        return root;
+    }
+
+    /// <summary>Functions, and the entry point under Headers, for any binary the native analysis can read.</summary>
+    private static void AddAnalysisNodes(OpenedBinary binary, ExplorerNodeViewModel root)
+    {
+        if (binary.Analysis is not { } analysis)
+        {
+            return;
+        }
+
+        var image = binary.Image;
+        var functions = root.Add(new ExplorerNodeViewModel("Functions", SymbolRegular.BranchFork24, new FunctionsTarget(), "analyzing…"));
+        functions.ChildrenFactory = () => FunctionNodes(analysis);
+        var entryNode = new ExplorerNodeViewModel("Entry point", SymbolRegular.Play24,
+            image.EntryPointRva != 0 ? new DisassemblyTarget(image.EntryPointVa, SymbolTable.EntryPointName(image)) : new OverviewTarget(),
+            image.EntryPointRva != 0 ? $"0x{image.EntryPointVa:X}" : "none");
+        root.Children.Insert(2, entryNode);
+    }
+
+    private static ExplorerNodeViewModel BuildPe(OpenedBinary binary, PeImage pe)
+    {
         string subtitle = $"{(pe.Is64Bit ? "PE32+" : "PE32")} · {pe.Machine}{(pe.IsManaged ? " · .NET" : string.Empty)}";
         var root = new ExplorerNodeViewModel(pe.FileName, pe.IsManaged ? SymbolRegular.Library24 : SymbolRegular.Document24, new OverviewTarget(), subtitle)
         {
@@ -55,15 +137,7 @@ public static class ExplorerTreeBuilder
             root.Add(new ExplorerNodeViewModel("Exports", SymbolRegular.ArrowExport24, new ExportsTarget(), "none"));
         }
 
-        if (binary.Analysis is { } analysis)
-        {
-            var functions = root.Add(new ExplorerNodeViewModel("Functions", SymbolRegular.BranchFork24, new FunctionsTarget(), "analyzing…"));
-            functions.ChildrenFactory = () => FunctionNodes(analysis);
-            var entryNode = new ExplorerNodeViewModel("Entry point", SymbolRegular.Play24,
-                pe.EntryPointRva != 0 ? new DisassemblyTarget(pe.EntryPointVa, pe.IsDll ? "DllEntryPoint" : "EntryPoint") : new OverviewTarget(),
-                pe.EntryPointRva != 0 ? $"0x{pe.EntryPointVa:X}" : "none");
-            root.Children.Insert(2, entryNode);
-        }
+        AddAnalysisNodes(binary, root);
 
         if (binary.Managed is { } managed)
         {

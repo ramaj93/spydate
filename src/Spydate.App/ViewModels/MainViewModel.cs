@@ -49,7 +49,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         AssistantProvider = assistantProvider;
         Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
-        Log("Spydate started. Open a PE file to begin (Ctrl+O).");
+        Log("Spydate started. Open a PE or ELF binary to begin (Ctrl+O).");
     }
 
     /// <summary>
@@ -153,6 +153,11 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     public string WindowTitle => Active is null ? ProductTitle : $"{ProductTitle} — {Active.DisplayName}";
 
     public void Log(string message) => Output.Add($"{DateTime.Now:HH:mm:ss}  {message}");
+
+    /// <summary>A PE imports from modules; an ELF imports symbols, and names the libraries separately.</summary>
+    private static string ImportSummary(IBinaryImage image) => image is PeImage pe
+        ? $"{pe.Imports.Count + pe.DelayImports.Count} imported modules"
+        : $"{image.Imports.Count} imported symbols";
 
     /// <summary>How the reader wants a module stepped into to be shown.</summary>
     public ForeignModuleView ModuleView => _preferences.ForeignModule;
@@ -272,11 +277,11 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         {
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
 
-            var pe = opened.Pe;
-            StatusText = $"{opened.DisplayName}  ·  {pe.Machine}  ·  {(pe.Is64Bit ? "PE32+" : "PE32")}{(pe.IsManaged ? "  ·  .NET" : string.Empty)}  ·  {pe.Sections.Count} sections";
-            Log($"Loaded {opened.DisplayName}: {pe.Machine}, {(pe.Is64Bit ? "PE32+" : "PE32")}, {pe.Length:N0} bytes, " +
-                $"{pe.Sections.Count} sections, {pe.Imports.Count + pe.DelayImports.Count} imported modules, " +
-                $"{pe.Exports?.Entries.Count ?? 0} exports{(pe.IsManaged ? ", managed" : string.Empty)}.");
+            var image = opened.Image;
+            StatusText = $"{opened.DisplayName}  ·  {opened.MachineName}  ·  {opened.ContainerName}{(opened.IsManaged ? "  ·  .NET" : string.Empty)}  ·  {image.Sections.Count} sections";
+            Log($"Loaded {opened.DisplayName}: {opened.MachineName}, {opened.ContainerName}, {image.Length:N0} bytes, " +
+                $"{image.Sections.Count} sections, {ImportSummary(image)}, " +
+                $"{image.Exports.Count} exports{(opened.IsManaged ? ", managed" : string.Empty)}.");
 
             // Where the new tab goes, worked out before the old one is closed so that replacing
             // puts it back in the same place in the strip rather than at the end.
@@ -304,7 +309,12 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         catch (BinaryParseException ex)
         {
             // A recognised format Spydate does not open yet is named as such, not as a broken PE.
-            string title = ex is UnsupportedFormatException ? "Not a format Spydate opens yet" : "Not a valid PE file";
+            string title = ex switch
+            {
+                UnsupportedFormatException => "Not a format Spydate opens yet",
+                Core.Elf.ElfParseException => "Not a valid ELF file",
+                _ => "Not a valid PE file",
+            };
             StatusText = $"Cannot open: {ex.Message}";
             Log($"ERROR: {ex.Message}");
             MessageBox.Show(ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Warning);

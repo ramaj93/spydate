@@ -71,7 +71,9 @@ public sealed class FileDialogService : IFileDialogService
         var dialog = new OpenFileDialog
         {
             Title = "Open executable",
-            Filter = "PE files (*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui)|*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui|All files (*.*)|*.*",
+            // A Linux program usually has no extension at all, so "All files" is how most ELF executables are found;
+            // the ELF filter catches the libraries and objects that do have one.
+            Filter = "PE files (*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui)|*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui|ELF files (*.so;*.so.*;*.o;*.elf)|*.so;*.so.*;*.o;*.elf|All files (*.*)|*.*",
             CheckFileExists = true,
             Multiselect = false,
         };

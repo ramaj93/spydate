@@ -412,7 +412,7 @@
                                 Visibility="{Binding HasBinary, Converter={StaticResource InverseBoolToVisibility}}">
                         <TextBlock Text="No file loaded" HorizontalAlignment="Center"
                                    Foreground="{DynamicResource Text.Secondary}" />
-                        <TextBlock Text="File ▸ Open, or drop a PE file here" HorizontalAlignment="Center" Margin="0,3,0,0"
+                        <TextBlock Text="File ▸ Open, or drop a PE or ELF file here" HorizontalAlignment="Center" Margin="0,3,0,0"
                                    FontSize="{DynamicResource Small.FontSize}"
                                    Foreground="{DynamicResource Text.Tertiary}" />
                     </StackPanel>

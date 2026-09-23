@@ -8,6 +8,7 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
+using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Debugger;
 using Spydate.Debugger.Managed;
@@ -372,7 +373,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     private string _workingDirectory = string.Empty;
 
     /// <summary>Whether the open binary cannot be started without a host being chosen first.</summary>
-    public bool NeedsHost => _binary.Pe.IsDll == true && Host.Trim().Length == 0;
+    public bool NeedsHost => _binary.Image is PeImage { IsDll: true } && Host.Trim().Length == 0;
 
     /// <summary>
     /// Whether the open binary is an IL-only assembly.
@@ -383,7 +384,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// reachable by name, and stopping in one of those means the native loop has to own the process.
     /// So what the file is and what drives it are two questions, and this answers the first.
     /// </summary>
-    public bool IsManaged => _binary.Pe.ClrHeader?.IsILOnly == true;
+    public bool IsManaged => _binary.Image is PeImage { ClrHeader.IsILOnly: true };
 
     /// <summary>
     /// Drive this .NET program with the native loop instead of the CLR's interface.
@@ -439,7 +440,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
     /// a native EXE", written as its negation: managed, or DLL-marked. Off during a run too, like the
     /// rest of the run configuration.
     /// </summary>
-    public bool CanEditHost => CanEditRun && (IsManaged || _binary.Pe.IsDll == true);
+    public bool CanEditHost => CanEditRun && (IsManaged || _binary.Image is PeImage { IsDll: true });
 
     /// <summary>One row of a chooser: what it means, and what to call it on screen.</summary>
     public sealed record EngineChoice(bool Native, string Label);
@@ -765,7 +766,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     // ------------------------------------------------------------------
 
-    private bool CanStart() => _binary is not null && !IsDebugging && !_starting;
+    private bool CanStart() => _binary is { CanDebug: true } && !IsDebugging && !_starting;
 
     /// <summary>
     /// Whether a start is in flight. Not the same as running: getting hold of a runtime takes a
@@ -821,6 +822,15 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             return;
         }
 
+        // The debugger drives Windows processes. An ELF is read here, never run, and saying so beats a
+        // CreateProcess error about a file Windows does not recognise.
+        if (!binary.CanDebug)
+        {
+            Status = $"Debugging is not available for {binary.Image.Format} files.";
+            Add($"{binary.DisplayName} is an {binary.Image.Format} binary: Spydate can read and decompile it, but its debugger runs Windows programs only.");
+            return;
+        }
+
         // Asked before anything starts, and already filled in with whatever was used for this binary
         // last time. Closing it is not discarding: every box writes itself through as it is edited,
         // the way it always has, so Close keeps the settings and only declines to run.
@@ -834,7 +844,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // confirmation, so it asked whether to run something that could not be run. Something else
         // has to load it, and that is what the host is for.
         string? host = Host is { Length: > 0 } chosen ? chosen.Trim() : null;
-        if (binary.Pe.IsDll && host is null)
+        if (binary.Image is PeImage { IsDll: true } && host is null)
         {
             Status = "A DLL needs a host program to load it.";
             Add($"{binary.DisplayName} is a DLL, so it cannot be started on its own. "
@@ -925,7 +935,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
             session.Start(
                 run,
                 binary.Image.ImageBase,
-                binary.Pe.OptionalHeader.SizeOfImage,
+                (uint)binary.Image.ImageSize,
                 Arguments is { Length: > 0 } arguments ? arguments : null,
                 WorkingDirectory is { Length: > 0 } directory ? directory : null,
                 host is null ? null : binary.Image.FileName,
@@ -1632,7 +1642,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
         if (_binary is { } binary)
         {
-            bool managed = binary.Pe.ClrHeader?.IsILOnly == true;
+            bool managed = binary.Image is PeImage { ClrHeader.IsILOnly: true };
             foreach (uint rva in binary.Breakpoints.Snapshot())
             {
                 ulong va = binary.Image.RvaToVa(rva);
@@ -2653,7 +2663,7 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
 
     /// <summary>Why a patch cannot go into the running image, or null when it can.</summary>
     private static string? Unsafe(OpenedBinary binary, uint rva, int length)
-        => binary.Pe.RelocationWithin(rva, length) is { } at
+        => binary.Image is PeImage pe && pe.RelocationWithin(rva, length) is { } at
             ? $"it covers an address the loader relocates (0x{binary.Image.RvaToVa(at):X}), so the file's "
               + "bytes are wrong for the running image; save a patched copy instead"
             : null;

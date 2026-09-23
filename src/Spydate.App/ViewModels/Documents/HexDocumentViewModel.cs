@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Wpf.Ui.Controls;
 
@@ -126,15 +127,20 @@ public sealed class HexRowList : IList<HexRow>, IList, IReadOnlyList<HexRow>
 /// <summary>Hex dump of the whole file with go-to-offset and section jump support.</summary>
 public sealed partial class HexDocumentViewModel : DocumentViewModel
 {
-    private readonly PeImage _pe;
+    private readonly IBinaryImage _image;
 
-    public HexDocumentViewModel(PeImage pe) : base("hex", "Hex", SymbolRegular.Grid24)
+    public HexDocumentViewModel(IBinaryImage image) : base("hex", "Hex", SymbolRegular.Grid24)
     {
-        _pe = pe;
-        Rows = new HexRowList(pe.Data);
-        Sections = pe.Sections.Select(s => new SectionJump(s.Name, s.PointerToRawData)).ToList();
+        _image = image;
+        Rows = new HexRowList(image.Data);
+
+        // An ELF's jump list is every section with bytes in the file, loaded or not (.symtab, .debug_*): the
+        // hex view is where the ones the analysis never reads are looked at.
+        Sections = image is Core.Elf.ElfImage elf
+            ? elf.SectionHeaders.Where(s => s.Index > 0 && !s.HasNoBits && s.Size > 0).Select(s => new SectionJump(s.Name, (uint)Math.Min(s.Offset, uint.MaxValue))).ToList()
+            : image.Sections.Select(s => new SectionJump(s.Name, s.RawOffset)).ToList();
         Sections.Insert(0, new SectionJump("Headers", 0));
-        if (pe.Overlay.Length > 0)
+        if (image is PeImage { Overlay.Length: > 0 } pe)
         {
             Sections.Add(new SectionJump("Overlay", pe.Overlay.Offset));
         }
@@ -173,10 +179,10 @@ public sealed partial class HexDocumentViewModel : DocumentViewModel
         }
 
         uint offset = (uint)value.Offset;
-        var section = _pe.Sections.FirstOrDefault(s => offset >= s.PointerToRawData && offset < s.PointerToRawData + s.SizeOfRawData);
-        uint? rva = _pe.OffsetToRva(offset);
+        var section = _image.Sections.FirstOrDefault(s => offset >= s.RawOffset && offset < s.RawOffset + s.RawSize);
+        uint? rva = _image.OffsetToRva(offset);
         PositionInfo = rva is { } r
-            ? $"offset 0x{offset:X}  •  RVA 0x{r:X}  •  VA 0x{_pe.RvaToVa(r):X}  •  {section?.Name ?? "headers"}"
+            ? $"offset 0x{offset:X}  •  RVA 0x{r:X}  •  VA 0x{_image.RvaToVa(r):X}  •  {section?.Name ?? "headers"}"
             : $"offset 0x{offset:X}  •  not mapped";
     }
 
@@ -201,11 +207,11 @@ public sealed partial class HexDocumentViewModel : DocumentViewModel
 
         // Accept VA or RVA too: try file offset first, then VA, then RVA.
         long offset = value;
-        if (value >= (long)_pe.ImageBase && _pe.VaToOffset((ulong)value) is { } fromVa)
+        if (value >= (long)_image.ImageBase && _image.VaToOffset((ulong)value) is { } fromVa)
         {
             offset = fromVa;
         }
-        else if (value >= _pe.Length && _pe.RvaToOffset((uint)Math.Min(value, uint.MaxValue)) is { } fromRva)
+        else if (value >= _image.Length && _image.RvaToOffset((uint)Math.Min(value, uint.MaxValue)) is { } fromRva)
         {
             offset = fromRva;
         }

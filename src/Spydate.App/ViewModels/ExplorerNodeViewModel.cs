@@ -17,6 +17,10 @@ public sealed record ResourcesTarget : NodeTarget;
 public sealed record StringsTarget : NodeTarget;
 public sealed record AnnotationsTarget : NodeTarget;
 public sealed record NotesTarget : NodeTarget;
+/// <summary>An ELF's program headers, dynamic section and symbol tables: structures a PE does not have.</summary>
+public sealed record SegmentsTarget : NodeTarget;
+public sealed record DynamicTarget : NodeTarget;
+public sealed record SymbolsTarget : NodeTarget;
 /// <summary>A resource leaf that can be shown as text rather than bytes.</summary>
 public sealed record ResourcePreviewTarget(uint TypeId, uint Id, uint DataRva, uint DataSize, string Title) : NodeTarget;
 public sealed record HexTarget(long Offset) : NodeTarget;

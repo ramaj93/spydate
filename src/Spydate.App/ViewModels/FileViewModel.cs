@@ -8,6 +8,8 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
+using Spydate.Core.Binary;
+using Spydate.Core.Elf;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Core.Text;
@@ -218,10 +220,8 @@ public sealed partial class FileViewModel : ObservableObject
         Explorer.Clear();
         Explorer.Add(ExplorerTreeBuilder.Build(Binary));
 
-        var pe = Binary.Pe;
-
         Warnings.Clear();
-        foreach (string w in pe.Warnings)
+        foreach (string w in Binary.Image.Warnings)
         {
             Warnings.Add(w);
         }
@@ -231,12 +231,19 @@ public sealed partial class FileViewModel : ObservableObject
             Warnings.Add($"Managed decompiler could not load the assembly: {managedError}");
         }
 
-        if (Binary.Analysis is null && !pe.IsManaged)
+        if (Binary.Analysis is null && !Binary.IsManaged)
         {
-            Warnings.Add($"Machine type {pe.Machine} is not supported by the native disassembler (x86/x64 only).");
+            Warnings.Add($"Machine type {Binary.MachineName} is not supported by the native disassembler (x86/x64 only).");
         }
 
-        if (Binary.Analysis?.Pdb is { } pdb)
+        if (Binary.Image is ElfImage elf)
+        {
+            // An ELF carries its own symbols; there is no PDB to go looking for.
+            Log(elf.StaticSymbols.Count > 0
+                ? $"Symbols: {elf.StaticSymbols.Count:N0} in .symtab, {elf.DynamicSymbols.Count:N0} in .dynsym, {elf.UnwindRanges.Count:N0} functions in .eh_frame."
+                : $"Stripped (no .symtab): {elf.DynamicSymbols.Count:N0} dynamic symbols, {elf.UnwindRanges.Count:N0} functions in .eh_frame.");
+        }
+        else if (Binary.Analysis?.Pdb is { } pdb)
         {
             Log(pdb.Loaded
                 ? $"Loaded {pdb.SymbolsAdded:N0} symbols from {pdb.Path}."
@@ -991,14 +998,17 @@ public sealed partial class FileViewModel : ObservableObject
                            + ".patched"
                            + Path.GetExtension(Binary.Image.FileName);
 
-        if (_dialogs.SaveFile("Save patched copy", "PE files (*.exe;*.dll;*.sys)|*.exe;*.dll;*.sys|All files (*.*)|*.*", suggested) is not { } path)
+        string filter = Binary.Image.Format == BinaryFormat.Pe
+            ? "PE files (*.exe;*.dll;*.sys)|*.exe;*.dll;*.sys|All files (*.*)|*.*"
+            : "All files (*.*)|*.*";
+        if (_dialogs.SaveFile("Save patched copy", filter, suggested) is not { } path)
         {
             return;
         }
 
         try
         {
-            var result = PatchWriter.Write(Binary.Pe, Binary.Patches, path);
+            var result = PatchWriter.Write(Binary.Image, Binary.Patches, path);
             if (!result.Ok)
             {
                 foreach (string problem in result.Problems)
@@ -1153,8 +1163,8 @@ public sealed partial class FileViewModel : ObservableObject
             value = sym.Va;
         }
 
-        var pe = Binary.Pe;
-        ulong va = value >= pe.ImageBase ? value : value < pe.OptionalHeader.SizeOfImage ? pe.RvaToVa((uint)value) : 0;
+        var pe = Binary.Image;
+        ulong va = value >= pe.ImageBase ? value : value < pe.ImageSize ? pe.RvaToVa((uint)value) : 0;
         if (va != 0 && Binary.Analysis is { } analysis && analysis.Source.IsExecutable(va))
         {
             OpenTarget(new DisassemblyTarget(va, analysis.NameFor(va)));
@@ -1170,7 +1180,7 @@ public sealed partial class FileViewModel : ObservableObject
     {
         if (Binary.Analysis is not null && Binary.Image.EntryPointRva != 0)
         {
-            OpenTarget(new DisassemblyTarget(Binary.Image.EntryPointVa, Binary.Image.IsLibrary ? "DllEntryPoint" : "EntryPoint"));
+            OpenTarget(new DisassemblyTarget(Binary.Image.EntryPointVa, Core.Symbols.SymbolTable.EntryPointName(Binary.Image)));
         }
         else
         {
@@ -1468,10 +1478,18 @@ public sealed partial class FileViewModel : ObservableObject
         }
     }
 
+    /// <summary>Opens the code at an address, when there is an analysis to read it with.</summary>
+    private void OpenCode(ulong va, string name)
+    {
+        if (Binary.Analysis is not null)
+        {
+            OpenTarget(new DisassemblyTarget(va, name));
+        }
+    }
+
     public void OpenTarget(NodeTarget target)
     {
         var b = Binary;
-        var pe = b.Pe;
 
         // A field or an event has no body to read on its own, so opening one opens its declaring type
         // and stops on the line it is declared — dnSpy's behaviour, and far more use than a document
@@ -1500,15 +1518,22 @@ public sealed partial class FileViewModel : ObservableObject
         DocumentViewModel? doc = target switch
         {
             OverviewTarget => Find("overview") ?? new OverviewDocumentViewModel(b),
-            HeadersTarget => Find("headers") ?? new HeadersDocumentViewModel(pe),
-            SectionsTarget => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
-            ImportsTarget => Find("imports") ?? new ImportsDocumentViewModel(pe, b.Analysis),
-            ResourcesTarget => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
+            HeadersTarget when b.Image is ElfImage elf => Find("headers") ?? ElfDocuments.Headers(elf),
+            HeadersTarget when b.Image is PeImage pe => Find("headers") ?? new HeadersDocumentViewModel(pe),
+            SegmentsTarget when b.Image is ElfImage elf => Find("segments") ?? ElfDocuments.Segments(elf, offset => OpenTarget(new HexTarget(offset))),
+            DynamicTarget when b.Image is ElfImage elf => Find("dynamic") ?? ElfDocuments.Dynamic(elf),
+            SymbolsTarget when b.Image is ElfImage elf => Find("symbols") ?? ElfDocuments.Symbols(elf, OpenCode, offset => OpenTarget(new HexTarget(offset))),
+            SectionsTarget when b.Image is ElfImage elf => Find("sections") ?? ElfDocuments.Sections(elf, offset => OpenTarget(new HexTarget(offset))),
+            SectionsTarget when b.Image is PeImage pe => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
+            ImportsTarget when b.Image is ElfImage elf => Find("imports") ?? ElfDocuments.Imports(elf, OpenCode),
+            ImportsTarget when b.Image is PeImage pe => Find("imports") ?? new ImportsDocumentViewModel(pe, b.Analysis),
+            ResourcesTarget when b.Image is PeImage pe => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
             ResourcePreviewTarget preview => OpenResource(preview),
-            StringsTarget => Find("strings") ?? new StringsDocumentViewModel(pe, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
+            StringsTarget => Find("strings") ?? new StringsDocumentViewModel(b.Image, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
             AnnotationsTarget when b.Analysis is { } ann => Find("annotations") ?? new AnnotationsDocumentViewModel(ann, GoToAnnotation),
             NotesTarget => Find("notes") ?? new NotesDocumentViewModel(b.Notes, b.SaveProject),
-            ExportsTarget => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
+            ExportsTarget when b.Image is ElfImage elf => Find("exports") ?? ElfDocuments.Exports(elf, b.Analysis is null ? null : OpenCode),
+            ExportsTarget when b.Image is PeImage pe => Find("exports") ?? new ExportsDocumentViewModel(pe, b.Analysis is null ? null : (va, name) => OpenTarget(new DisassemblyTarget(va, name))),
             FunctionsTarget when b.Analysis is { } a => Find("functions") ?? new FunctionsDocumentViewModel(a, OpenFunctionDisassembly, OpenFunctionPseudoC),
             HexTarget h => OpenHex(h.Offset),
             DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
@@ -1911,6 +1936,14 @@ public sealed partial class FileViewModel : ObservableObject
     /// </summary>
     private void OpenImportedFunction(BinaryAnalysis owner, string moduleName, string functionName)
     {
+        // An ELF's libraries are Linux files. Looking for libc in System32 would at best find nothing and at
+        // worst open a Windows DLL that happens to share the name.
+        if (owner.Image.Format != BinaryFormat.Pe)
+        {
+            StatusText = $"{functionName} comes from {moduleName}, a {owner.Image.Format} library; Spydate opens it only if you open that file yourself.";
+            return;
+        }
+
         if (ImportedModuleFile(owner, TrimExtension(moduleName)) is not { } path)
         {
             StatusText = $"Could not find {moduleName} on disk to open {functionName}.";
@@ -1995,7 +2028,11 @@ public sealed partial class FileViewModel : ObservableObject
     /// </summary>
     private DocumentViewModel? OpenResource(ResourcePreviewTarget target)
     {
-        var pe = Binary.Pe;
+        if (Binary.Image is not PeImage pe)
+        {
+            return null;   // resources are a PE's own
+        }
+
         var node = new ResourceNode { Level = 3, Id = target.Id, DataRva = target.DataRva, DataSize = target.DataSize };
         var data = ResourceDecoder.ReadData(pe, node);
         if (data.IsEmpty)
@@ -2062,7 +2099,7 @@ public sealed partial class FileViewModel : ObservableObject
 
     private DocumentViewModel OpenHex(long offset)
     {
-        var hex = Find("hex") as HexDocumentViewModel ?? new HexDocumentViewModel(Binary.Pe);
+        var hex = Find("hex") as HexDocumentViewModel ?? new HexDocumentViewModel(Binary.Image);
         Show(hex);
         hex.GoToOffset(offset);
         return hex;

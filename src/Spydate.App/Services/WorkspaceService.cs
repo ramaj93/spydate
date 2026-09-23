@@ -8,7 +8,7 @@ using Spydate.Disassembly;
 
 namespace Spydate.App.Services;
 
-/// <summary>Everything loaded for one file: the PE image plus the native and/or managed analysis objects.</summary>
+/// <summary>Everything loaded for one file: the image (PE or ELF) plus the native and/or managed analysis objects.</summary>
 public sealed class OpenedBinary : IDisposable
 {
     public OpenedBinary(IBinaryImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
@@ -26,13 +26,20 @@ public sealed class OpenedBinary : IDisposable
 
     public IBinaryImage Image { get; }
 
+    /// <summary>A .NET assembly: a PE with a CLR header. No other format has one.</summary>
+    public bool IsManaged => Image is PeImage { IsManaged: true };
+
     /// <summary>
-    /// The PE behind <see cref="Image"/>, for the views that show a PE's own structures — headers, data
-    /// directories, resources. Temporary: every format opened today is a PE, so this never throws, and each
-    /// use is a place the next format has to be taught about. Grep for it; that is the to-do list.
+    /// Whether this binary can be run under the debugger. The debugger drives Windows processes, so only a PE
+    /// can; an ELF is read, not run, and says so rather than failing somewhere in the launch.
     /// </summary>
-    public PeImage Pe => Image as PeImage
-        ?? throw new InvalidOperationException($"{Image.FileName} is {Image.Format}, not a PE; this view does not know that format yet");
+    public bool CanDebug => Image.Format == BinaryFormat.Pe;
+
+    /// <summary>The processor, in the format's own words: <c>Amd64</c> for a PE, <c>X86_64</c> for an ELF.</summary>
+    public string MachineName => BinaryImage.MachineName(Image);
+
+    /// <summary>The container and its width: <c>PE32+</c>, <c>ELF32</c>.</summary>
+    public string ContainerName => BinaryImage.ContainerName(Image);
 
     /// <summary>Native analysis session; null when the machine type is not x86/x64.</summary>
     public BinaryAnalysis? Analysis { get; }
