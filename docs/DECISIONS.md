@@ -925,3 +925,63 @@ One consequence surfaced as a test: a fixture relied on no IL instruction naming
 The new `is PeImage` checks are `isinst` instructions that do, and the xrefs tool now reports them —
 correctly. The fixture moved to a plain class; a record would not do either, since a record's
 generated `Equals(object)` is itself an `isinst` naming its type.
+
+## An ELF is parsed in-house, read through the same seam, and decompiled with its own calling convention
+
+The second format behind `IBinaryImage` is ELF, x86 and x64: a Linux, BSD or Android program, shared
+object or object file. It is parsed by `ElfImage` in `Spydate.Core/Elf`, written in-house for the reason
+the PE parser is (ADR-004) and to the same rule: only a header that cannot be read throws; every table
+after it is parsed on its own, and a damaged one becomes a warning. The reader takes its byte order and
+word size from the file, so a big-endian MIPS or PowerPC binary still shows its structure, though there
+is no decoder for its code.
+
+**The address space is the loader's.** The loadable segments are what a loader maps, so they are what an
+RVA is measured against: `ImageBase` is the lowest one's page, which makes an RVA mean "offset from the
+first loaded byte" exactly as it does for a PE, and keeps the project file's unit of address. Sections
+are the finer view the analysis reads; a file whose section headers were stripped by a packer is shown
+one range per segment instead, and an object file, which has no addresses yet, has its sections laid out
+one after another with a warning that nothing between them is relocated.
+
+**An import names a symbol; the version names the library.** A PE import says which DLL it comes from.
+An ELF import does not — the loader searches every `DT_NEEDED` library — and the only place the file
+records the provider is its symbol versions (`.gnu.version_r`: `puts` needs `GLIBC_2.2.5` from
+`libc.so.6`). So the library is read from there, from the only library when there is just one, and is
+otherwise honestly "any". The GOT slot is named `libc!puts`, the PE convention, and the PLT stub code
+actually calls is named `puts`, so a call reads as the call it is. Stubs are found by their bytes — a
+jump through a slot that belongs to an import — rather than by counting entries, because the layout
+changes with the linker and with control-flow protection (`.plt.sec`).
+
+**An ELF names its own functions, and a stripped one still names `main`.** `ISymbolSource` is the second
+optional capability after `IUnwindInfoSource`: `.symtab` functions, when the file was not stripped, and
+the PLT stubs, which become seeds and names the way a PDB's symbols do for a PE. `.eh_frame` gives every
+function's extent through `IUnwindInfoSource`, except the PLT's own entry, which covers a table of stubs
+and would have made it one function the size of the section. In a stripped C program the one place
+`main` is named at all is `_start` handing it to `__libc_start_main`, so that argument is read from
+`_start`'s bytes and becomes `main`. The C library's no-return functions (`__stack_chk_fail`, `err`) are
+kept in a list of their own that applies only to an ELF, since `err` is an ordinary name elsewhere.
+
+**The decompiler asks the image which calling convention its code follows.** It had the Windows x64
+convention written into five passes: arguments in `rcx, rdx, r8, r9`, and which registers a call
+destroys. A Linux x64 program passes them in `rdi, rsi, rdx, rcx, r8, r9` and destroys `rsi` and `rdi`
+too, so read with the Windows rules every argument was wrong. `CallingConvention` now carries those
+facts and `CallingConvention.For(image)` chooses: 32-bit is the stack whatever the platform, 64-bit is
+Microsoft for a PE and System V for anything else. The Microsoft lists are character for character the
+ones the passes had, so a PE decompiles as it did. System V numbers floats apart from integers, and
+nothing at a call site says where a float sat among them, so recovered floats follow the integers; a
+callee that reads all eight xmm registers is saving them for `va_arg`, not taking eight floats.
+
+**A build is told apart by its build-id.** The toolchain's own GNU build-id note is the fingerprint when
+there is one. Without it the ELF, program and section headers stand in, hashed: every rebuild that moves
+anything changes them, and a byte patch to the code changes none, so a project follows a patched copy as
+a PE's does.
+
+**The views ask what the file is, and the temporary accessor is gone.** Phase 0 left the views reaching
+the PE through `OpenedBinary.Pe` / `BinarySession.Pe`. Each use now says which format it means: the
+explorer, overview, hex, strings, imports and exports branch on the image; the PE-only ones (headers,
+resources, the debugger, IL patching) ask `is PeImage`. An ELF's own tables — segments, section headers,
+the dynamic section, symbols — are shown by one `RecordsDocumentViewModel` whose columns come with its
+rows, rather than a hand-written view per table. Debugging refuses an ELF by name, in the window and in
+every MCP debug tool, before anything reaches the Win32 loop: it is read and decompiled, not run.
+
+Not done here, and each its own decision: ARM and AArch64 code (a second decoder, Phase 4), DWARF debug
+information, applying an object file's relocations, and demangling C++ names.

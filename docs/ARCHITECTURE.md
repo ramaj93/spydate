@@ -43,6 +43,8 @@
 │  Binary: IBinaryImage · BinaryImage (detect/load) · SpanReader │
 │  PE: PeImage + headers/sections/imports/exports/CLR/debug   │
 │      + relocations/TLS/load config/resources/Rich           │
+│  Elf: ElfImage + segments/sections/dynsym/versions/PLT     │
+│       + .eh_frame/build-id                                  │
 │  Strings: StringScanner · Symbols: SymbolTable              │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -55,9 +57,12 @@ through the `.spydate` project file.
 `BinaryImage.Load`, which recognises the container from its bytes and hands it to that format's
 parser. The analysis — disassembly, discovery, the native decompiler, the project file — works
 through the interface and never names a format. What only a PE has (its data directories, CLR
-header, load config, PDB reference) stays on `PeImage`, reached with `is PeImage` where analysis can
-use it and, in the views and tools that display it, through a temporary `OpenedBinary.Pe` /
-`BinarySession.Pe` accessor. Each use of that accessor is a place the next format has to be taught.
+header, load config, PDB reference) stays on `PeImage`, reached with `is PeImage`; what only an ELF has
+(segments, the dynamic section, symbol versions) stays on `ElfImage`. The views and MCP tools branch on
+the image to show a format's own structures. Two capabilities are optional interfaces a format
+implements when it has them: `IUnwindInfoSource` (PE `.pdata`, ELF `.eh_frame`) and `ISymbolSource`
+(an ELF's `.symtab` and PLT stubs). The native decompiler takes its `CallingConvention` from the image
+— Microsoft x64 for a PE, System V for an ELF — so the same passes read both.
 
 ### `Spydate.Agent` — the assistant in the window
 
@@ -138,6 +143,17 @@ Key members:
 | `SectionFromRva`, `SectionFromVa` | Section lookup. |
 | `Warnings` | Non‑fatal parse issues. |
 | `Overlay` | Data past the last section. |
+
+### 3.1b `ElfImage`
+
+The ELF counterpart, in `Spydate.Core/Elf`, built the same way (`ElfImage.Load` / `ElfImage.Parse`, one
+`Guard` per table, warnings not exceptions past the header). `ElfReader` honours the byte order and word
+size the file states. What it adds over `IBinaryImage`: `Header`, `Segments`, every `SectionHeaders`
+entry (loaded or not), `Dynamic` with `Needed`/`SoName`/`Interpreter`, `DynamicSymbols` (with the
+library and version each import was linked against) and `StaticSymbols`, the dynamic `Relocations`,
+`PltStubs` (stub → import), `BuildId`. It implements `IUnwindInfoSource` from `.eh_frame` and
+`ISymbolSource` from `.symtab`, the PLT stubs and a `main` recovered from `_start`. `Fingerprint` is the
+build-id, or a hash of the headers without one. See DECISIONS, "An ELF is parsed in-house".
 
 ### 3.2 `StringScanner`
 
@@ -313,7 +329,7 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
   of two says nothing about which one the branch was taken to — discovery records the
   fall-through first, and that ordering is what makes the distinction recoverable. A
   block past the line budget keeps its head and tail and says how much was left out.
-- `BinaryAnalysis` — analysis session for one `PeImage`: owns the disassembler,
+- `BinaryAnalysis` — analysis session for one `IBinaryImage` (a PE or an ELF): owns the disassembler,
   symbol table, discovered functions; provides `DisassembleRange`,
   `GetOrDiscoverFunction(va)` and `SignatureFor(va)` (imports answered by their
   DLL, in-image functions by their own code, and a `jmp [iat]` thunk followed to
@@ -369,7 +385,7 @@ the lookups are the part worth testing, and the window is the part that cannot b
 
 ## 6. App: `Spydate.App`
 
-See `UI-DESIGN.md`. `WorkspaceService` loads a file (`PeImage`), builds a
+See `UI-DESIGN.md`. `WorkspaceService` loads a file (`BinaryImage.Load`: a `PeImage` or an `ElfImage`), builds a
 `BinaryAnalysis` (native) and/or `ManagedAssembly` (managed) on a background
 thread and exposes an `OpenedBinary`. `MainViewModel` builds the explorer tree
 and opens `DocumentViewModel`s in the tab strip.
@@ -377,14 +393,14 @@ and opens `DocumentViewModel`s in the tab strip.
 ## 7. Data flow (native file)
 
 ```
-File → PeImage.Load ─┐
-                     ├─→ BinaryAnalysis(pe) ─→ FunctionDiscovery.Run(seeds)
-SymbolTable(pe) ─────┘         │                      │
-                               │                      ▼
-                          DisassembleRange     Function/CFG ─→ X86Lifter ─→ IR ─→ passes ─→ Structurer ─→ PseudoCEmitter
-                               │                                                    │
-                               ▼                                                    ▼
-                    DisassemblyDocument (AvalonEdit)                     DecompiledDocument (AvalonEdit)
+File → BinaryImage.Load ─┐
+                         ├─→ BinaryAnalysis(image) ─→ FunctionDiscovery.Run(seeds)
+SymbolTable(image) ──────┘         │                      │
+                                   │                      ▼
+                              DisassembleRange     Function/CFG ─→ X86Lifter ─→ IR ─→ passes ─→ Structurer ─→ PseudoCEmitter
+                                   │                                                    │
+                                   ▼                                                    ▼
+                        DisassemblyDocument (AvalonEdit)                     DecompiledDocument (AvalonEdit)
 ```
 
 ## 8. Threading model

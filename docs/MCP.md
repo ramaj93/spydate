@@ -36,12 +36,16 @@ Options, all of which only ever narrow what the agent can do:
 
 **Orienting** — `open_binary(path)` · `get_overview()` · `read_file(path)`
 
-`open_binary` returns one screen: architecture, entry, sections, import and export counts, what
-discovery found, whether a PDB and a project file loaded. It is deliberately dense — every line is a
-call the agent does not have to make — and ends by naming the three worth making next.
+`open_binary` opens a PE (exe, dll, sys) or an ELF (a Linux program, shared object or object file) and
+returns one screen: architecture, entry, sections, import and export counts, what discovery found,
+whether a PDB and a project file loaded. It is deliberately dense — every line is a call the agent does
+not have to make — and ends by naming the three worth making next. For an ELF the screen says what an
+agent used to Windows would otherwise get wrong: the loader and the libraries it needs, whether the
+file was stripped, and that x64 arguments arrive in `rdi, rsi, rdx, rcx, r8, r9` (System V), which is
+also how the pseudo-C was recovered.
 
-`read_file` is the way past the one thing `open_binary` cannot do: it parses a PE into an image, so a
-file that is not a PE — a resource, a `.inx`, an unknown container beside the binary — is a wall.
+`read_file` is the way past the one thing `open_binary` cannot do: it parses a PE or an ELF into an
+image, so a file that is neither — a resource, a `.inx`, an unknown container beside the binary — is a wall.
 `read_file` reads any file's raw bytes, a window of at most 4096 by offset, as a hex dump with an
 ASCII column or decoded as UTF-8 or UTF-16, and reports the file's size so the window can be moved. It
 is bound by `--root` exactly as `open_binary` is, and reads more than PEs, so the root matters more
@@ -55,7 +59,9 @@ most-referenced first. That ordering is the point — "what should I name next, 
 question that starts a session, and address order answers a different one.
 
 `xrefs` answers "who calls `CreateFileW`" and "who reads this global", which between them are most of
-reverse engineering. For an import, pass the IAT slot address that `list_imports` gives you.
+reverse engineering. For an import, pass the IAT slot address that `list_imports` gives you. In an
+ELF, code calls the PLT stub rather than the GOT slot, so `list_imports` gives both, counts the calls
+through the stub, and the stub (`plt_va`, named after the import) is the address to pass.
 
 **Reading** — `read_function` · `disassemble` · `read_data`
 
@@ -220,7 +226,9 @@ What the server does instead is confine what a persuaded one can do:
 - **Running it is the one exception, and off by default.** `debug_run`, `debug_break`, `debug_state`
   and `debug_memory` need both `--allow-debug` and a host that has a debugger to drive. The stdio
   server has none, so the flag alone enables nothing there; the assistant panel in the window does,
-  and drives the same debugger you are watching. Everything else here reads a file.
+  and drives the same debugger you are watching. Everything else here reads a file. An ELF is never
+  run: every debug tool says so for one, whatever the flags, since the debugger drives Windows
+  processes.
 - String output is length-capped, so a kilobyte-long run cannot flood a response.
 - Every list says what it did not show, so an agent cannot mistake a page for the whole.
 
