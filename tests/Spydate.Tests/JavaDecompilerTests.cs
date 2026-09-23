@@ -88,7 +88,7 @@ public sealed class JavaDecompilerTests
 
         Assert.Contains("public static int count(int[] a, int limit) {", java, StringComparison.Ordinal);
         Assert.Contains("int n = 0;", java, StringComparison.Ordinal);
-        Assert.Contains("while (i < a.length && a[i] < limit) {", java, StringComparison.Ordinal);
+        Assert.Contains("for (int i = 0; i < a.length && a[i] < limit; i++) {", java, StringComparison.Ordinal);
         Assert.Contains("n++;", java, StringComparison.Ordinal);
         Assert.Contains("return n;", java, StringComparison.Ordinal);
         Assert.DoesNotContain("goto", java, StringComparison.Ordinal);
@@ -166,8 +166,63 @@ public sealed class JavaDecompilerTests
         var store = new SessionStore();
         store.Set(new BinarySession("loops.jar", reading.Jar, null, null, DiscoveryState.None, bytecode: reading));
         var code = new CodeTools(store);
-        Assert.Contains("while (i < a.length && a[i] < limit) {", code.ReadFunction("demo.Loops::count"), StringComparison.Ordinal);
+        Assert.Contains("for (int i = 0; i < a.length && a[i] < limit; i++) {", code.ReadFunction("demo.Loops::count"), StringComparison.Ordinal);
         Assert.Contains("if_icmpge", code.ReadFunction("demo.Loops::count", view: "bytecode"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>static void f(boolean c) { use(effect(), c ? 1 : 2); }</c>: the call's result waits on the stack while the
+    /// branch decides the second argument, and must be evaluated once — before the test, not once per path.
+    /// </summary>
+    [Fact]
+    public void AValueLeftOnTheStackAcrossABranchIsEvaluatedOnce()
+    {
+        var c = new SyntheticClass("demo/Once");
+        ushort effect = c.Method("demo/Once", "effect", "()I");
+        ushort use = c.Method("demo/Once", "use", "(II)V");
+        c.AddMethod(0x0009, "f", "(Z)V",
+            [
+                0xB8, .. SyntheticClass.U2(effect),  // 0: effect()
+                0x1A,                                // 3: iload_0
+                0x99, 0x00, 0x07,                    // 4: ifeq 11
+                0x04,                                // 7: iconst_1
+                0xA7, 0x00, 0x04,                    // 8: goto 12
+                0x05,                                // 11: iconst_2
+                0xB8, .. SyntheticClass.U2(use),     // 12: use(II)V
+                0xB1,
+            ],
+            maxStack: 3, maxLocals: 1);
+        string java = Java(Reading(("demo/Once.class", c.Build())), "demo/Once", "f");
+
+        Assert.Contains("use(effect(), arg0 ? 1 : 2);", java, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(java, @"effect\(\)"));
+    }
+
+    /// <summary>
+    /// A loop with two ways in — only an obfuscator writes one — has no goto-free Java form. It is shown with gotos
+    /// and says so, rather than failing.
+    /// </summary>
+    [Fact]
+    public void ALoopWithTwoEntriesIsShownWithGotosAndSaysWhy()
+    {
+        var c = new SyntheticClass("demo/Tangled");
+        c.AddMethod(0x0009, "f", "(I)V",
+            [
+                0x1A,                    // 0: iload_0
+                0x99, 0x00, 0x09,        // 1: ifeq 10 — into the loop's second half
+                0x84, 0x00, 0x01,        // 4: iinc 0, 1
+                0xA7, 0x00, 0x03,        // 7: goto 10
+                0x84, 0x00, 0xFF,        // 10: iinc 0, -1
+                0x1A,                    // 13: iload_0
+                0x9A, 0xFF, 0xF6,        // 14: ifne 4 — back to the first half
+                0xB1,
+            ],
+            maxStack: 1, maxLocals: 1);
+        string java = Java(Reading(("demo/Tangled.class", c.Build())), "demo/Tangled", "f");
+
+        Assert.Contains("// warning: shown with gotos:", java, StringComparison.Ordinal);
+        Assert.Contains("goto", java, StringComparison.Ordinal);
+        Assert.DoesNotContain("could not be decompiled", java, StringComparison.Ordinal);
     }
 
     // --- hostile ---------------------------------------------------------------------

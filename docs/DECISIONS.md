@@ -1146,7 +1146,8 @@ exit and caught as `Throwable`, a string switch as a switch on `hashCode()`, a p
 `StringBuilder` chain. Java 9+ concatenation is read from its recipe (`"a" + x`), and a lambda or method reference
 prints as the method that implements it (`(Runnable) Greeter::lambda$main$0`). Edges no structure covers keep a
 `goto L0012;` and a label, as pseudo-C does. Names given in the project apply everywhere a member is used, and to
-the declarations.
+the declarations. (The gotos, `finally` and `synchronized` were taken on later: see *Java is structured without
+goto, and its types are recovered*.)
 
 **Measured.** Every class of the 921 JARs Android Studio ships decompiles with no crash, commons-lang3's 4,917
 methods in about two seconds, and hand-built tests check the Java for loops with `&&`, try/catch, switches on
@@ -1169,3 +1170,76 @@ native one (`JarImage.Embedded`), the way a .NET assembly's IL sits beside its l
 browsed and decompiled as any JAR's, its member names are kept in the PE's own project file, and the tools say
 plainly that the native functions only start the JVM. `annotate` and `read_annotation` take a member when the
 name is one and an address otherwise; `list_annotations` lists both.
+
+## Java is structured without goto, and its types are recovered
+
+The first Java view kept the native structurer and a `goto` for every edge it could not nest: 256 in commons-lang3,
+1,486 in jd-gui. Stages 1 and 2 of the fidelity work take that to none in javac's output, and give the locals
+their Java types back. The measure is not how the text looks but whether it means the same: a fixture of the
+shapes javac produces (`tests/Spydate.Tests/Fixtures/Java`) is compiled with and without debug information,
+decompiled, compiled again from the decompiled text, and run; the copy must print exactly what the original does.
+
+**Java has its own structurer, after Ramsey's "Beyond Relooper" (ICFP 2022).** Java has no `goto`, so javac's
+graphs are reducible, and a reducible graph needs none: each block is written once, at its immediate dominator; a
+block reached from several places gets a labelled block around its dominator's code, so every jump to it is a
+`break`; a loop header gets a labelled loop, so every jump back is a `continue`; any other block is written where
+its one predecessor jumps to it. Blocks that leave a loop go after it, so the loop can later read as `while (c)`,
+and a switch case the arm before it runs into is written as the next arm, so fall-through reads as fall-through.
+The raw result is labels and jumps everywhere; `JavaShaping` then removes each jump that only says "carry on"
+(computed, per position, as the set of jumps equivalent to falling off the end), turns a jump out of the innermost
+loop or switch into a plain `break` or `continue`, dissolves blocks nothing leaves, and shapes: an `if` whose arm
+never falls through loses its `else`, a leading or trailing test makes `while` or `do … while` (never the latter
+when something continues the loop, since `continue` in a do-loop goes to the test), a trailing update of a
+variable the test reads makes a `for`, `if (c) s = a; else s = b;` for a stack value makes `s = c ? a : b`.
+The native structurer is untouched; a graph the new one cannot express — irreducible (only obfuscators and
+Kotlin's coroutine state machines make them), or with blocks nothing reaches — falls back to it, with a warning
+naming why.
+
+**An `if` is written fall-through first.** javac jumps past the then-part on the negated test, so the negation
+of the jump's test is the source's own condition, exactly — NaN included, since the compiler chose the comparison
+that makes the jump right. Written the other way, `if (a <= b)` for a float would have been wrong for NaN.
+
+**Try regions keep their ways out.** A collapsed try used to fall out to one join, and every other exit was
+lost to a `goto`. Now it is a block with every exit as a successor and a placeholder (`JExit`) where each one
+leaves; the enclosing structurer resolves each to the `break` or `continue` it is from there, and code after a
+try is never written inside it. A handler owns what its entry dominates once exceptions count as edges, not what
+the layout puts after it, so the method's shared `return` is no longer swallowed by the last catch. Regions
+collapse latest-start first, so a try inside a catch goes before the try around it. A jump-only block the range
+left out of its middle (a loop's closing `goto`) joins the body; a block that cannot throw and is also reached from
+outside (a coroutine's shared return) leaves it.
+
+**`synchronized` and `finally` are put back, checked whole.** `monitorenter` followed by a try whose one handler
+releases the lock and rethrows is `synchronized`, its releases removed. A handler for anything that runs code
+`F` and rethrows is `finally { F }` only when every way out of the try — each return, each jump out, falling off
+the end, and the same in each other handler — runs a copy of `F` first; copies are compared as code, not as
+records (which compare lists by reference and carry addresses). Anything short of that stays as the compiler
+wrote it.
+
+**A value left on the stack across a branch is evaluated once.** It used to be assigned to a stack variable per
+successor — calling a method twice when the value was a call (`Character.valueOf(c)` in a ternary's
+`counts.put(...)`). It is spilled before the branch now. And the lifter runs again while it learns that every
+path into a join hands a slot the same local or constant, which then needs no variable at all.
+
+**Locals get their identities and types back.** A JVM slot is a register, reused by javac across scopes and by
+shrinkers for anything, parameters included. For every slot the local variable table does not describe, the
+definitions a use can see (reaching definitions, with protected blocks feeding their handlers) are joined into
+webs, and each web is a variable of its own, typed by what is stored in it — except that a store reading the
+old value (`r = r + 2`) and a store nothing reads join their neighbour, since the source had one variable there.
+Then booleans, chars, bytes and shorts, which the JVM keeps as ints: constraints that only narrow — what is
+stored, where the value is read, what it is copied to — solved to a fixed point, int whenever they disagree. The
+printer casts where a value's type still does not fit (`(char)`, a char where a numeric overload might be picked).
+
+**Generic types from the class file, and the casts javac added for them gone.** Locals take their generic types
+from the local variable type table, parameters and fields from their signatures; `new` of a generic class into a
+parameterized target is written `new T<>()`. A cast on the result of a method returning its class's type variable
+goes when the receiver's declared type fixes that variable to exactly the cast's type — known for the JAR's own
+classes from their signatures, and for the JDK's common collections from a table; anything else keeps its cast,
+which is always valid. Widening casts numeric promotion would make anyway go (one side only: `(long) a * a`), and
+the compiler's `Integer.valueOf` / `intValue()` go where Java boxes and unboxes by itself — assignment, return,
+arithmetic, relational comparison, and arguments of collection methods with no primitive overload
+(`List.remove` excepted).
+
+**Measured.** commons-lang3: `goto`s 256 → 0. jd-gui: 1,486 → 1 (an irreducible loop in obfuscated code). All
+535,752 classes of Android Studio's 921 JARs decompile with no crash and no failed method, in 19.6 minutes against
+25.9 before; the methods still shown with gotos are almost all Kotlin coroutine state machines. The fixture
+round-trips with and without debug information.

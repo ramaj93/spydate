@@ -86,7 +86,7 @@ public sealed record JConst(object? Value, string? ConstType) : JExpr
     public static JConst Int(int value) => new(value, "I");
 
     /// <summary>The same constant, read as another type — an int that is really a boolean or a char.</summary>
-    public JConst As(string? type) => type is "Z" or "C" or "B" or "S" && Value is int ? this with { ConstType = type } : this;
+    public JConst As(string? type) => type is "Z" or "C" or "B" or "S" or "I" && Value is int ? this with { ConstType = type } : this;
 }
 
 /// <summary>A class literal, <c>String.class</c>.</summary>
@@ -282,7 +282,7 @@ public sealed record JLogical(bool And, IrExpr Left, IrExpr Right) : JExpr
 /// <summary><c>cond ? a : b</c>.</summary>
 public sealed record JConditional(IrExpr Condition, JExpr Then, JExpr Else) : JExpr
 {
-    public override string? Type => Then.Type ?? Else.Type;
+    public override string? Type => Then is JConst { Value: null } ? Else.Type ?? Then.Type : Then.Type ?? Else.Type;
 
     public override int Depth => 1 + Math.Max(DepthOf(Condition), Math.Max(Then.Depth, Else.Depth));
 
@@ -315,8 +315,51 @@ public sealed record JMonitor(bool Enter, JExpr Lock) : IrStmt;
 /// </summary>
 public sealed record JRegion(CStmt Body) : IrStmt;
 
-/// <summary>A try block and its handlers, already structured.</summary>
-public sealed record JTry(CStmt Body, IReadOnlyList<JCatch> Catches) : CStmt;
+/// <summary>A try block and its handlers, already structured; <see cref="Finally"/> once the copies javac makes of it are folded back.</summary>
+public sealed record JTry(CStmt Body, IReadOnlyList<JCatch> Catches) : CStmt
+{
+    public CStmt? Finally { get; init; }
+}
 
 /// <summary>One handler: what it catches (null for any — a <c>finally</c>), what the exception is called, and its body.</summary>
 public sealed record JCatch(string? CatchType, string? Variable, CStmt Body);
+
+// --- structured statements the Java structurer builds ------------------------------------------------------
+
+/// <summary>
+/// <c>label: { ... }</c> — a block that <c>break label</c> leaves. The structurer wraps the code before a join in
+/// one, so every jump to the join is a <c>break</c>; the ones that turn out to be falling off the end are removed
+/// afterwards, and a block nothing breaks out of any more is dissolved into its parent.
+/// </summary>
+public sealed record JBlock(int Label, CStmt Body) : CStmt;
+
+/// <summary>
+/// A loop. <see cref="CLoopKind.Forever"/> is <c>while (true)</c>, left only by a jump; the shaping passes turn a
+/// leading or trailing test into <c>while (c)</c> or <c>do … while (c)</c>, and a trailing update into a <c>for</c>.
+/// </summary>
+public sealed record JLoop(int Label, CLoopKind Kind, IrExpr? Condition, CStmt Body, ulong Va = 0) : CStmt
+{
+    /// <summary>A <c>for</c>'s initialiser, printed inside its parentheses.</summary>
+    public IrStmt? Init { get; init; }
+
+    /// <summary>A <c>for</c>'s update, run after the body and after every <c>continue</c>.</summary>
+    public IrStmt? Update { get; init; }
+}
+
+/// <summary>A switch statement; <c>break</c> in an arm leaves it, an arm that runs off its end falls into the next.</summary>
+public sealed record JSwitch(int Label, IrExpr Value, IReadOnlyList<CCase> Cases, ulong Va = 0) : CStmt;
+
+/// <summary><c>break label</c>: to just after the labelled block, loop or switch. Printed without the label when it names the innermost loop or switch.</summary>
+public sealed record JBreak(int Label) : CStmt;
+
+/// <summary><c>continue label</c>: to the next iteration of the labelled loop.</summary>
+public sealed record JContinue(int Label) : CStmt;
+
+/// <summary>
+/// A jump out of a region that was structured on its own, to a block of the graph around it. The enclosing
+/// structurer replaces it with the <c>break</c> or <c>continue</c> that reaches that block from where the region sits.
+/// </summary>
+public sealed record JExit(ulong Target) : CStmt;
+
+/// <summary><c>synchronized (lock) { ... }</c>, rebuilt from its monitor instructions and the handler that releases the lock.</summary>
+public sealed record JSynchronized(JExpr Lock, CStmt Body) : CStmt;

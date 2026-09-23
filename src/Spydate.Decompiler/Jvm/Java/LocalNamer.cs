@@ -18,6 +18,8 @@ internal sealed class LocalNamer
     private readonly Dictionary<LocalVariable, string> _tabled = new();
     private readonly Dictionary<string, string?> _declared = new(StringComparer.Ordinal);
     private readonly Dictionary<int, JLocal> _parameterSlots = new();
+    private readonly HashSet<string> _untabledNames = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _signatures = new(StringComparer.Ordinal);
 
     public LocalNamer(ClassFile file, JvmMethod method, CodeAttribute code)
     {
@@ -34,17 +36,31 @@ internal sealed class LocalNamer
         }
 
         var parameters = Descriptors.ParameterDescriptors(method.Descriptor);
+        var generic = method.Signature is { } methodSignature ? JavaGenerics.ParameterSignatures(methodSignature) : null;
         for (int i = 0; i < parameters.Count; i++)
         {
             string? name = i < method.ParameterNames.Count ? method.ParameterNames[i] : null;
             name = code.Locals.FirstOrDefault(l => l.Slot == slot && l.StartPc == 0)?.Name ?? name;
             var parameter = new JLocal(Unique(Clean(name) ?? $"arg{i}"), parameters[i], JLocalKind.Parameter);
+            if (!code.Locals.Any(l => l.Slot == slot && l.StartPc == 0))
+            {
+                _untabledNames.Add(parameter.Name);
+            }
+
+            if (generic is not null && generic.Count == parameters.Count && JavaGenerics.IsParameterized(generic[i]))
+            {
+                _signatures[parameter.Name] = generic[i];
+            }
+
             _byName[parameter.Name] = parameter;
             _parameterSlots[slot] = parameter;
             Parameters.Add(parameter);
             slot += parameters[i] is "J" or "D" ? 2 : 1;
         }
     }
+
+    /// <summary>Generic types, as signatures, of the locals and parameters that have one: <c>Ljava/util/List&lt;Ljava/lang/String;&gt;;</c>.</summary>
+    public IReadOnlyDictionary<string, string> Signatures => _signatures;
 
     /// <summary>The parameters in order, <c>this</c> excluded.</summary>
     public List<JLocal> Parameters { get; } = [];
@@ -66,6 +82,45 @@ internal sealed class LocalNamer
 
     /// <summary>A new local under a name nothing else in the method uses: <c>ex</c>, <c>ex2</c>.</summary>
     public JLocal Fresh(string name, string? type) => Local(Unique(name), type);
+
+    /// <summary>
+    /// True for a slot the local variable table does not describe — every slot of a class compiled without one, and
+    /// the compiler's own slots in one compiled with it. One name then covers everything the slot ever holds, which
+    /// <see cref="JavaLocals"/> splits into the variables it really is.
+    /// </summary>
+    public bool IsUntabled(string name) => _untabledNames.Contains(name);
+
+    /// <summary>A new local for another variable that shared a slot with <paramref name="name"/>: <c>var3_2</c>.</summary>
+    public JLocal Split(string name, string? type)
+    {
+        for (int i = 2; ; i++)
+        {
+            string candidate = $"{name}_{i}";
+            if (!_byName.ContainsKey(candidate) && !_declared.ContainsKey(candidate))
+            {
+                var local = Local(candidate, type);
+                _untabledNames.Add(candidate);
+                return local;
+            }
+        }
+    }
+
+    /// <summary>Gives a local the type its uses showed it has.</summary>
+    public JLocal Retype(JLocal local, string? type)
+    {
+        var retyped = local with { LocalType = type };
+        if (_byName.ContainsKey(local.Name))
+        {
+            _byName[local.Name] = retyped;
+        }
+
+        if (_declared.ContainsKey(local.Name))
+        {
+            _declared[local.Name] = type;
+        }
+
+        return retyped;
+    }
 
     /// <summary>Declares a local the lifter or the region builder made up — a temporary, a stack variable — with its type.</summary>
     public void Declare(JLocal local)
@@ -96,6 +151,10 @@ internal sealed class LocalNamer
             {
                 tabledName = UniqueFor(Clean(entry.Name) ?? $"var{slot}", entry.Descriptor);
                 _tabled[entry] = tabledName;
+                if (entry.Signature is { } signature && JavaGenerics.IsParameterized(signature))
+                {
+                    _signatures.TryAdd(tabledName, signature);
+                }
             }
 
             return Local(tabledName, entry.Descriptor);
@@ -107,6 +166,7 @@ internal sealed class LocalNamer
             bool first = !_untabled.Keys.Any(k => k.Slot == slot);
             name = Unique(first ? $"var{slot}" : $"var{slot}_{category}");
             _untabled[(slot, category)] = name;
+            _untabledNames.Add(name);
         }
 
         // Without a table a reference slot is only "an object"; the first value stored in it says more.

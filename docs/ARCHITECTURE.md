@@ -375,14 +375,20 @@ See `DECOMPILER-DESIGN.md`. Summary:
   `DotNetReading` is the assembly as an `IBytecodeReading` (see §3.1c): the
   records implement the seam directly, and everything only .NET has stays on
   `ManagedAssembly`.
-- **Java** (`Decompiler/Jvm/Java`): the JVM reading's `java` view, Java-shaped
-  pseudo-code on the native IR. `JvmLifter` simulates the operand stack into
-  `JExpr`/`IrStmt` blocks (bytecode offsets as addresses); `JavaInliner` folds the
-  lifter's order-keeping temporaries back; `JavaConditions` rebuilds `&&`/`||`;
-  `JavaRegions` structures each try on its own and collapses it into one block,
-  then runs the native `Structurer` unchanged; `JavaEmitter` prints Java.
-  `JavaDecompiler` runs it on a large-stack thread. See DECISIONS, "Java is
-  decompiled in-house on the native IR".
+- **Java** (`Decompiler/Jvm/Java`): the JVM reading's `java` view, Java on the
+  native IR. `JvmLifter` simulates the operand stack into `JExpr`/`IrStmt` blocks
+  (bytecode offsets as addresses); `JavaLocals` splits reused slots into webs and
+  recovers boolean/char/byte/short; `JavaInliner` folds the lifter's order-keeping
+  temporaries back; `JavaConditions` rebuilds `&&`/`||`. `JavaRegions` structures
+  each try on its own and collapses it into one block with its exits, then
+  `JavaStructurer` (dominator-tree, labelled blocks, no `goto`) structures the
+  method; `JavaShaping` removes redundant jumps and shapes loops, ifs and
+  conditionals, with `JavaSugar` for `synchronized`/`finally`; `JavaDeclarations`
+  places each local's declaration; `JavaEmitter` prints Java, with `JavaGenerics`
+  for generic types and casts. An irreducible method falls back to the native
+  `Structurer`. `JavaDecompiler` runs it on a large-stack thread. See DECISIONS,
+  "Java is decompiled in-house on the native IR" and "Java is structured without
+  goto, and its types are recovered".
 
 ## 5b. User annotations and the project file
 

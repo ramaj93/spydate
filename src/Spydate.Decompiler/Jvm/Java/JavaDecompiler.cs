@@ -3,6 +3,7 @@ using System.Text;
 using Spydate.Core.Jvm;
 using Spydate.Core.Project;
 using Spydate.Decompiler.Native.IR;
+using Spydate.Decompiler.Native.Structuring;
 
 namespace Spydate.Decompiler.Jvm.Java;
 
@@ -75,7 +76,7 @@ internal sealed partial class JavaClassWriter
         _type = type;
         _file = type.File;
         _cancellationToken = cancellationToken;
-        _naming = new JavaNaming(_file, key => reading.Annotations?.Get(key)?.Name);
+        _naming = new JavaNaming(_file, key => reading.Annotations?.Get(key)?.Name, name => reading.FindType(name)?.File);
     }
 
     public string Class()
@@ -157,7 +158,7 @@ internal sealed partial class JavaClassWriter
         }
 
         sb.Append(keyword).Append(' ').Append(_naming.ClassName(_file.Name).Split('.')[^1]);
-        var generic = _file.Signature is { } signature ? Descriptors.ClassSignature(signature, simple: true) : null;
+        var generic = _file.Signature is { } signature ? Descriptors.ClassSignature(signature, _naming.ClassName) : null;
         if (generic is { TypeParameters.Length: > 0 } g)
         {
             sb.Append(Nested(g.TypeParameters));
@@ -222,19 +223,27 @@ internal sealed partial class JavaClassWriter
         _sb.Append(" {\n");
         try
         {
-            var lifted = JvmLifter.Lift(_file, method, code);
-            JavaInliner.Run(lifted.Function);
+            // Structured without a goto when the graph allows, which javac's always do; otherwise the old way, with them.
+            LiftedMethod lifted;
+            CStmt body;
+            Dictionary<ulong, IrReturn>? returns = null;
+            try
+            {
+                lifted = Prepare(method, code);
+                body = JavaShaping.Run(JavaRegions.Structure(lifted), lifted.Locals.IsUntabled);
+            }
+            catch (NotStructurableException ex)
+            {
+                lifted = Prepare(method, code);
+                lifted.Function.Warnings.Insert(0, $"shown with gotos: {ex.Message}");
+                returns = lifted.Function.Blocks
+                    .Where(b => b.Statements is [IrReturn { Value: null or JExpr { IsSimple: true } }])
+                    .ToDictionary(b => b.StartVa, b => (IrReturn)b.Statements[0]);
+                body = JavaRegions.Structure(lifted, legacy: true);
+            }
 
-            // Conditions are merged across blocks, but never across the edge of a try: its boundaries stay blocks.
-            var pinned = code.Handlers.SelectMany(h => new[] { (ulong)h.StartPc, (ulong)h.EndPc, (ulong)h.HandlerPc }).ToHashSet();
-            JavaConditions.Merge(lifted.Function, pinned);
-
-            var returns = lifted.Function.Blocks
-                .Where(b => b.Statements is [IrReturn { Value: null or JExpr { IsSimple: true } }])
-                .ToDictionary(b => b.StartVa, b => (IrReturn)b.Statements[0]);
-            var body = JavaRegions.Structure(lifted);
             var emitter = new JavaEmitter(_naming);
-            emitter.Body(method, lifted, body, level, returns);
+            emitter.Body(method, lifted, body, level, returns, structured: returns is null);
             _sb.Append(emitter.Output);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -244,6 +253,19 @@ internal sealed partial class JavaClassWriter
             Pad(level);
             _sb.Append("}\n");
         }
+    }
+
+    /// <summary>A method lifted, its temporaries folded back, and its <c>&amp;&amp;</c> / <c>||</c> ladders merged.</summary>
+    private LiftedMethod Prepare(JvmMethod method, CodeAttribute code)
+    {
+        var lifted = JvmLifter.Lift(_file, method, code);
+        JavaLocals.Run(lifted, method);
+        JavaInliner.Run(lifted.Function);
+
+        // Conditions are merged across blocks, but never across the edge of a try: its boundaries stay blocks.
+        var pinned = code.Handlers.SelectMany(h => new[] { (ulong)h.StartPc, (ulong)h.EndPc, (ulong)h.HandlerPc }).ToHashSet();
+        JavaConditions.Merge(lifted.Function, pinned);
+        return lifted;
     }
 
     private string MethodHeader(JvmMethod method)
@@ -266,7 +288,7 @@ internal sealed partial class JavaClassWriter
         }
 
         var parameterTypes = Descriptors.ParameterDescriptors(method.Descriptor);
-        var generic = method.Signature is { } signature ? Descriptors.MethodSignature(signature, simple: true) : null;
+        var generic = method.Signature is { } signature ? Descriptors.MethodSignature(signature, _naming.ClassName) : null;
         bool useGeneric = generic is { } g && g.Parameters.Count == parameterTypes.Count;
         if (generic is { TypeParameters.Length: > 0 } withTypes)
         {
@@ -318,7 +340,7 @@ internal sealed partial class JavaClassWriter
     private static partial System.Text.RegularExpressions.Regex NestingDollar();
 
     private string GenericOr(string? signature, string descriptor)
-        => signature is not null && Descriptors.FieldSignature(signature, simple: true) is { } generic ? Nested(generic) : _naming.Type(descriptor);
+        => signature is not null && Descriptors.FieldSignature(signature, _naming.ClassName) is { } generic ? generic : _naming.Type(descriptor);
 
     private string ConstantText(Constant constant, string descriptor) => constant.Tag switch
     {

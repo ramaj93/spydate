@@ -39,6 +39,9 @@ internal sealed class JvmLifter
     /// <summary>Past this height an expression is spilled into a temporary, which bounds every recursive walk that follows.</summary>
     private const int MaxDepth = 40;
 
+    /// <summary>How many times a method is lifted again to carry values through joins; each pass reaches one join further.</summary>
+    private const int MaxPasses = 4;
+
     private readonly ClassFile _class;
     private readonly JvmMethod _method;
     private readonly CodeAttribute _code;
@@ -51,6 +54,12 @@ internal sealed class JvmLifter
     private readonly Dictionary<ulong, int?[]> _switchValues = new();
     private readonly SortedSet<int> _leaders = new();
     private readonly HashSet<int> _handlerStarts = new();
+
+    /// <summary>What each path hands each stack slot of each block, null where two paths differ.</summary>
+    private readonly Dictionary<(int Target, int Slot), JExpr?> _incoming = new();
+
+    /// <summary>From the pass before: the slots every path hands the same local or constant, which need no variable.</summary>
+    private readonly IReadOnlyDictionary<(int Target, int Slot), JExpr>? _carried;
     private int _temps;
     private int _stackVars;
     private int _uninitialized;
@@ -60,8 +69,9 @@ internal sealed class JvmLifter
     private IrBlock _block = null!;
     private int _pc;
 
-    private JvmLifter(ClassFile file, JvmMethod method, CodeAttribute code)
+    private JvmLifter(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlyDictionary<(int, int), JExpr>? carried)
     {
+        _carried = carried;
         _class = file;
         _method = method;
         _code = code;
@@ -73,8 +83,23 @@ internal sealed class JvmLifter
 
     public static LiftedMethod Lift(ClassFile file, JvmMethod method, CodeAttribute code)
     {
-        var lifter = new JvmLifter(file, method, code);
+        // Again while a join is handed values: each pass learns which slots every path fills with the same local or
+        // constant, and the next carries those as they are instead of through a variable per path — which can make
+        // the paths into a later join agree too.
+        var lifter = new JvmLifter(file, method, code, carried: null);
         lifter.Run();
+        for (int pass = 0; pass < MaxPasses; pass++)
+        {
+            var carried = lifter._incoming.Where(kv => kv.Value is { IsSimple: true } and not JUninitialized).ToDictionary(kv => kv.Key, kv => kv.Value!);
+            if (carried.Count == (lifter._carried?.Count ?? 0))
+            {
+                break;
+            }
+
+            lifter = new JvmLifter(file, method, code, carried);
+            lifter.Run();
+        }
+
         return new LiftedMethod
         {
             Function = lifter._function,
@@ -442,6 +467,11 @@ internal sealed class JvmLifter
     /// </summary>
     private void Flow(int target)
     {
+        for (int i = 0; i < _stack.Count; i++)
+        {
+            _incoming[(target, i)] = !_incoming.TryGetValue((target, i), out var seen) || Equals(seen, _stack[i]) ? _stack[i] : null;
+        }
+
         if (_stack.Count == 0 && !_entryStacks.ContainsKey(target))
         {
             _entryStacks[target] = [];
@@ -451,11 +481,18 @@ internal sealed class JvmLifter
         if (!_entryStacks.TryGetValue(target, out var entry))
         {
             entry = new List<JExpr>(_stack.Count);
-            foreach (var value in _stack)
+            for (int i = 0; i < _stack.Count; i++)
             {
+                var value = _stack[i];
                 if (value is JUninitialized)
                 {
                     entry.Add(value);
+                    continue;
+                }
+
+                if (_carried is not null && _carried.TryGetValue((target, i), out var same) && Equals(same, value))
+                {
+                    entry.Add(same);
                     continue;
                 }
 
@@ -919,6 +956,9 @@ internal sealed class JvmLifter
     {
         int target = ins.Operand;
         int fallthrough = ins.Offset + ins.Length;
+
+        // What stays on the stack is handed to both successors: evaluated once, here, not once per path.
+        Spill();
         Flow(target);
         Flow(fallthrough);
         Emit(new IrBranch(condition, (ulong)target, (ulong)fallthrough));
@@ -943,6 +983,7 @@ internal sealed class JvmLifter
 
         targets.Add((ulong)ins.Default);
         values[cases.Count] = null;
+        Spill();
         foreach (ulong target in targets.Distinct())
         {
             Flow((int)target);

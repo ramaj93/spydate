@@ -35,4 +35,9 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Java sources the javac round-trip tests compile, when a JDK is on the machine. -->
+    <None Include="Fixtures\Java\**\*.java" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

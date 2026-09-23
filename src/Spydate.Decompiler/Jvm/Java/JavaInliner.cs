@@ -1,4 +1,5 @@
 using Spydate.Decompiler.Native.IR;
+using Spydate.Decompiler.Native.Structuring;
 
 namespace Spydate.Decompiler.Jvm.Java;
 
@@ -125,48 +126,233 @@ internal static class JavaInliner
     /// <summary>An inlined tree is kept below this height, so inlining cannot undo the lifter's bound.</summary>
     private const int MaxDepth = 64;
 
+    private static bool IsTemp(JLocal local) => local is { Kind: JLocalKind.Temp, Inlinable: true };
+
     public static void Run(IrFunction function)
     {
-        var uses = CountUses(function);
+        var uses = CountUses(function.AllStatements);
         foreach (var block in function.Blocks)
         {
             var statements = block.Statements;
             for (int i = 0; i < statements.Count; i++)
             {
-                while (TryInlineRun(statements, i, uses, out int removed))
+                while (TryInlineRun(statements, i, uses, IsTemp, out var removed))
                 {
-                    i -= removed;
+                    foreach (int at in removed)
+                    {
+                        statements.RemoveAt(at);
+                    }
+
+                    i -= removed.Count;
                 }
             }
 
-            RemoveDead(statements, uses);
+            RemoveDead(statements, uses, IsTemp);
         }
     }
 
-    private static Dictionary<string, int> CountUses(IrFunction function)
+    /// <summary>
+    /// The same folding on the structured method, where a temporary and its use can end up next to each other
+    /// across what were blocks — and where a stack variable assigned once (a folded <c>?:</c>) folds like a
+    /// temporary. A statement that tests or dispatches on a value (<c>if</c>, <c>switch</c>, <c>synchronized</c>)
+    /// is a use like any other; a loop's test is not, because it runs again.
+    /// </summary>
+    public static CStmt RunOnTree(CStmt body, Func<string, bool> untabled)
     {
         var uses = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var statement in function.AllStatements)
+        var definitions = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var node in JavaTree.Descendants(body))
         {
-            foreach (var root in JavaRewrite.Evaluated(statement))
+            foreach (var statement in Evaluated(node))
             {
-                foreach (var node in JavaRewrite.PostOrder(root))
+                Count(statement, uses);
+                if (statement is IrAssign { Dst: JLocal defined })
                 {
-                    if (node is JLocal { Kind: JLocalKind.Temp } temp)
-                    {
-                        uses[temp.Name] = uses.GetValueOrDefault(temp.Name) + 1;
-                    }
+                    definitions[defined.Name] = definitions.GetValueOrDefault(defined.Name) + 1;
                 }
             }
+        }
+
+        // A slot the table does not describe and that is stored once is the compiler's own temporary — the value a
+        // return carries past a finally — or, without a table, a variable nobody named: it folds like one.
+        bool Foldable(JLocal local) => local.Inlinable
+            && (local.Kind == JLocalKind.Temp
+                || (local.Kind == JLocalKind.Stack && definitions.GetValueOrDefault(local.Name) == 1)
+                || (local.Kind == JLocalKind.Local && untabled(local.Name) && definitions.GetValueOrDefault(local.Name) == 1));
+
+        return JavaTree.Rewrite(body, statement => statement is CSeq seq ? Sequence(seq, uses, Foldable) : statement);
+    }
+
+    /// <summary>What a structured statement evaluates as it is reached, as IR statements the counting and folding read.</summary>
+    private static IEnumerable<IrStmt> Evaluated(CStmt node) => node switch
+    {
+        CRaw { Statement: var statement } => [statement],
+        CIf conditional => [new IrBranch(conditional.Condition, 0, 0)],
+        JSwitch dispatch => [new IrSwitch(dispatch.Value, [])],
+        JSynchronized locked => [new JMonitor(true, locked.Lock)],
+        JLoop loop => new IrStmt?[] { loop.Init, loop.Condition is null ? null : new IrBranch(loop.Condition, 0, 0), loop.Update }.OfType<IrStmt>(),
+        _ => [],
+    };
+
+    private static CStmt Sequence(CSeq seq, Dictionary<string, int> uses, Func<JLocal, bool> foldable)
+    {
+        var items = seq.Items.ToList();
+        CopyForward(items, uses);
+        var views = items.Select(View).ToList();
+        for (int i = 0; i < views.Count; i++)
+        {
+            while (views[i] is not IrComment && TryInlineRun(views, i, uses, foldable, out var removed, out var rewritten))
+            {
+                items[i] = Rebuild(items[i], rewritten);
+                views[i] = rewritten;
+                foreach (int at in removed)
+                {
+                    items.RemoveAt(at);
+                    views.RemoveAt(at);
+                }
+
+                i -= removed.Count;
+            }
+        }
+
+        for (int i = views.Count - 1; i >= 0; i--)
+        {
+            if (views[i] is IrAssign { Dst: JLocal local, Src: JExpr value } && foldable(local) && uses.GetValueOrDefault(local.Name) == 0)
+            {
+                if (value is JCall or JNew or JDynamic)
+                {
+                    items[i] = new CRaw(new JExprStmt(value) { Va = views[i].Va });
+                }
+                else
+                {
+                    items.RemoveAt(i);
+                }
+            }
+        }
+
+        return JavaTree.Sequence(items);
+    }
+
+    /// <summary>
+    /// <c>t = x; v = t;</c> — javac's <c>dup; astore</c>, the value kept on the stack while it is stored — is
+    /// <c>v = x;</c>, and the later reads of <c>t</c> read <c>v</c>. Only when every other read of the temporary is
+    /// in the statements that follow, and nothing stores to <c>v</c> before the last of them.
+    /// </summary>
+    private static void CopyForward(List<CStmt> items, Dictionary<string, int> uses)
+    {
+        for (int i = 0; i + 1 < items.Count; i++)
+        {
+            if (items[i] is not CRaw { Statement: IrAssign { Dst: JLocal { Kind: JLocalKind.Temp } temp, Src: var value } first }
+                || items[i + 1] is not CRaw { Statement: IrAssign { Dst: JLocal { Kind: not JLocalKind.Temp } copy, Src: JLocal source } }
+                || source.Name != temp.Name || copy.Name == temp.Name)
+            {
+                continue;
+            }
+
+            int remaining = uses.GetValueOrDefault(temp.Name) - 1;
+            int last = i + 1;
+            int seen = 0;
+            for (int k = i + 2; k < items.Count && seen < remaining; k++)
+            {
+                int here = Reads(items[k], temp.Name);
+                if (here > 0)
+                {
+                    seen += here;
+                    last = k;
+                }
+            }
+
+            if (seen != remaining || items.Skip(i + 2).Take(last - i - 1).Any(item => Stores(item, copy.Name)))
+            {
+                continue;
+            }
+
+            items[i] = new CRaw(new IrAssign(copy, value) { Va = first.Va });
+            items.RemoveAt(i + 1);
+            for (int k = i + 1; k < last; k++)
+            {
+                items[k] = JavaTree.ReplaceLocals(items[k], l => l.Name == temp.Name ? copy : null);
+            }
+
+            uses[copy.Name] = uses.GetValueOrDefault(copy.Name) + remaining;
+            uses[temp.Name] = 0;
+        }
+    }
+
+    /// <summary>How many times a statement, and everything in it, reads a local.</summary>
+    private static int Reads(CStmt statement, string name)
+        => JavaTree.Descendants(statement).SelectMany(Evaluated).SelectMany(JavaRewrite.Evaluated).SelectMany(JavaRewrite.PostOrder)
+            .Count(e => e is JLocal l && l.Name == name);
+
+    /// <summary>Whether a statement, or anything in it, stores to a local.</summary>
+    private static bool Stores(CStmt statement, string name)
+        => JavaTree.Descendants(statement).SelectMany(Evaluated).Any(s => s is IrAssign { Dst: JLocal l } && l.Name == name);
+
+    /// <summary>A statement as the IR statement that evaluates what it evaluates; anything else is a barrier.</summary>
+    private static IrStmt View(CStmt item) => item switch
+    {
+        CRaw { Statement: var statement } => statement,
+        CIf conditional => new IrBranch(conditional.Condition, 0, 0),
+        JSwitch dispatch => new IrSwitch(dispatch.Value, []),
+        JSynchronized locked => new JMonitor(true, locked.Lock),
+        _ => new IrComment("barrier"),
+    };
+
+    private static CStmt Rebuild(CStmt item, IrStmt rewritten) => (item, rewritten) switch
+    {
+        (CRaw raw, _) => raw with { Statement = rewritten },
+        (CIf conditional, IrBranch branch) => conditional with { Condition = branch.Condition },
+        (JSwitch dispatch, IrSwitch value) => dispatch with { Value = value.Value },
+        (JSynchronized locked, JMonitor monitor) => locked with { Lock = monitor.Lock },
+        _ => item,
+    };
+
+    private static Dictionary<string, int> CountUses(IEnumerable<IrStmt> statements)
+    {
+        var uses = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var statement in statements)
+        {
+            Count(statement, uses);
         }
 
         return uses;
     }
 
-    private static bool TryInlineRun(List<IrStmt> statements, int index, Dictionary<string, int> uses, out int removed)
+    /// <summary>Adds the reads of every local a statement evaluates.</summary>
+    private static void Count(IrStmt statement, Dictionary<string, int> uses)
     {
-        removed = 0;
+        foreach (var root in JavaRewrite.Evaluated(statement))
+        {
+            foreach (var node in JavaRewrite.PostOrder(root))
+            {
+                if (node is JLocal local)
+                {
+                    uses[local.Name] = uses.GetValueOrDefault(local.Name) + 1;
+                }
+            }
+        }
+    }
+
+    private static bool TryInlineRun(List<IrStmt> statements, int index, Dictionary<string, int> uses, Func<JLocal, bool> foldable, out List<int> removed)
+    {
+        bool done = TryInlineRun(statements, index, uses, foldable, out removed, out var rewritten);
+        if (done)
+        {
+            statements[index] = rewritten;
+        }
+
+        return done;
+    }
+
+    /// <summary>
+    /// Folds the run of single-use definitions just above <paramref name="index"/> into the statement there. On
+    /// success, <paramref name="removed"/> lists the definitions' indices, highest first, for the caller to drop.
+    /// </summary>
+    private static bool TryInlineRun(List<IrStmt> statements, int index, Dictionary<string, int> uses, Func<JLocal, bool> foldable, out List<int> removed, out IrStmt rewritten)
+    {
+        removed = [];
         var user = statements[index];
+        rewritten = user;
         var order = new List<string>();
         var afterEffect = new HashSet<string>(StringComparer.Ordinal);
         bool effectSeen = false;
@@ -176,11 +362,11 @@ internal static class JavaInliner
             {
                 switch (node)
                 {
-                    case JLocal { Kind: JLocalKind.Temp } temp:
-                        order.Add(temp.Name);
+                    case JLocal local when foldable(local):
+                        order.Add(local.Name);
                         if (effectSeen)
                         {
-                            afterEffect.Add(temp.Name);
+                            afterEffect.Add(local.Name);
                         }
 
                         break;
@@ -191,11 +377,11 @@ internal static class JavaInliner
             }
         }
 
-        // The run of single-use temporary definitions just above the statement, nearest last.
+        // The run of single-use definitions just above the statement, nearest last.
         var run = new List<(int Index, JLocal Temp, JExpr Value)>();
         for (int j = index - 1; j >= 0; j--)
         {
-            if (statements[j] is IrAssign { Dst: JLocal { Kind: JLocalKind.Temp, Inlinable: true } temp, Src: JExpr value }
+            if (statements[j] is IrAssign { Dst: JLocal temp, Src: JExpr value } && foldable(temp)
                 && uses.GetValueOrDefault(temp.Name) == 1 && order.Contains(temp.Name) && !afterEffect.Contains(temp.Name))
             {
                 run.Insert(0, (j, temp, value));
@@ -218,29 +404,28 @@ internal static class JavaInliner
         }
 
         var values = run.ToDictionary(r => r.Temp.Name, r => r.Value, StringComparer.Ordinal);
-        var rewritten = JavaRewrite.Replace(user, local => values.GetValueOrDefault(local.Name));
-        if (JavaRewrite.Evaluated(rewritten).Any(e => Height(e) > MaxDepth))
+        var result = JavaRewrite.Replace(user, local => values.GetValueOrDefault(local.Name));
+        if (JavaRewrite.Evaluated(result).Any(e => Height(e) > MaxDepth))
         {
             return false;
         }
 
-        statements[index] = rewritten;
+        rewritten = result;
         foreach (var (i, temp, _) in Enumerable.Reverse(run))
         {
-            statements.RemoveAt(i);
+            removed.Add(i);
             uses.Remove(temp.Name);
         }
 
-        removed = run.Count;
         return true;
     }
 
     /// <summary>A temporary nothing reads is dropped, or kept as a statement when evaluating it did something.</summary>
-    private static void RemoveDead(List<IrStmt> statements, Dictionary<string, int> uses)
+    private static void RemoveDead(List<IrStmt> statements, Dictionary<string, int> uses, Func<JLocal, bool> foldable)
     {
         for (int i = statements.Count - 1; i >= 0; i--)
         {
-            if (statements[i] is IrAssign { Dst: JLocal { Kind: JLocalKind.Temp } temp, Src: JExpr value } && uses.GetValueOrDefault(temp.Name) == 0)
+            if (statements[i] is IrAssign { Dst: JLocal temp, Src: JExpr value } && foldable(temp) && uses.GetValueOrDefault(temp.Name) == 0)
             {
                 if (value is JCall or JNew or JDynamic)
                 {

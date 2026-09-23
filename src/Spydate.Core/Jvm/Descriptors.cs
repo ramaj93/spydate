@@ -163,8 +163,12 @@ public static class Descriptors
 
     /// <summary>A field's generic signature as Java writes it: <c>java.util.List&lt;java.lang.String&gt;</c>. Null when malformed.</summary>
     public static string? FieldSignature(string signature, bool simple = false)
+        => FieldSignature(signature, name => ClassName(name, simple));
+
+    /// <summary>A field's generic signature, each class named by <paramref name="className"/> from its internal name.</summary>
+    public static string? FieldSignature(string signature, Func<string, string> className)
     {
-        var parser = new SignatureParser(signature, simple);
+        var parser = new SignatureParser(signature, className);
         return parser.ReferenceType() is { } type && parser.AtEnd ? type : null;
     }
 
@@ -173,8 +177,12 @@ public static class Descriptors
     /// its parameter types, return type and thrown types. Null when malformed.
     /// </summary>
     public static (string TypeParameters, IReadOnlyList<string> Parameters, string Return, IReadOnlyList<string> Throws)? MethodSignature(string signature, bool simple = false)
+        => MethodSignature(signature, name => ClassName(name, simple));
+
+    /// <summary>A method's generic signature, each class named by <paramref name="className"/> from its internal name.</summary>
+    public static (string TypeParameters, IReadOnlyList<string> Parameters, string Return, IReadOnlyList<string> Throws)? MethodSignature(string signature, Func<string, string> className)
     {
-        var parser = new SignatureParser(signature, simple);
+        var parser = new SignatureParser(signature, className);
         string? typeParameters = parser.TypeParameters();
         if (typeParameters is null || !parser.Take('('))
         {
@@ -213,8 +221,12 @@ public static class Descriptors
 
     /// <summary>A class's generic signature: its type parameters, superclass and interfaces. Null when malformed.</summary>
     public static (string TypeParameters, string Super, IReadOnlyList<string> Interfaces)? ClassSignature(string signature, bool simple = false)
+        => ClassSignature(signature, name => ClassName(name, simple));
+
+    /// <summary>A class's generic signature, each class named by <paramref name="className"/> from its internal name.</summary>
+    public static (string TypeParameters, string Super, IReadOnlyList<string> Interfaces)? ClassSignature(string signature, Func<string, string> className)
     {
-        var parser = new SignatureParser(signature, simple);
+        var parser = new SignatureParser(signature, className);
         string? typeParameters = parser.TypeParameters();
         if (typeParameters is null || parser.ReferenceType() is not { } super)
         {
@@ -236,7 +248,7 @@ public static class Descriptors
     }
 
     /// <summary>A recursive-descent reader of JVMS §4.7.9.1 signatures, bounded so a crafted one cannot recurse without end.</summary>
-    private sealed class SignatureParser(string text, bool simple)
+    private sealed class SignatureParser(string text, Func<string, string> className)
     {
         private const int MaxDepth = 64;
         private int _at;
@@ -367,7 +379,7 @@ public static class Descriptors
                 _at++;
             }
 
-            sb.Append(Descriptors.ClassName(text[start.._at], simple));
+            sb.Append(className(text[start.._at]));
             while (!AtEnd)
             {
                 if (Take(';'))
@@ -429,6 +441,6 @@ public static class Descriptors
             return ReferenceType();
         }
 
-        private string? TypeNameAt(ref int at) => ReadType(text, ref at, simple);
+        private string? TypeNameAt(ref int at) => ReadType(text, ref at, simple: true);
     }
 }
