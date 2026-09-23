@@ -69,6 +69,8 @@ public sealed record JvmField(JvmAccess Access, string Name, string Descriptor)
 
     /// <summary>Every attribute it carries, by name, known or not.</summary>
     public IReadOnlyList<string> Attributes { get; init; } = [];
+
+    public IReadOnlyList<JvmAnnotation> Annotations { get; init; } = [];
 }
 
 public sealed record JvmMethod(JvmAccess Access, string Name, string Descriptor)
@@ -85,6 +87,14 @@ public sealed record JvmMethod(JvmAccess Access, string Name, string Descriptor)
     public IReadOnlyList<string?> ParameterNames { get; init; } = [];
 
     public IReadOnlyList<string> Attributes { get; init; } = [];
+
+    public IReadOnlyList<JvmAnnotation> Annotations { get; init; } = [];
+
+    /// <summary>Each parameter's annotations, in order; empty when none has any.</summary>
+    public IReadOnlyList<IReadOnlyList<JvmAnnotation>> ParameterAnnotations { get; init; } = [];
+
+    /// <summary>An annotation interface element's default value (<c>int weight() default 1</c>), or null.</summary>
+    public JvmElementValue? AnnotationDefault { get; init; }
 
     public bool IsConstructor => Name == "<init>";
 
@@ -148,6 +158,8 @@ public sealed class ClassFile
     public IReadOnlyList<BootstrapMethod> BootstrapMethods { get; private set; } = [];
 
     public bool IsDeprecated { get; private set; }
+
+    public IReadOnlyList<JvmAnnotation> Annotations { get; private set; } = [];
 
     public IReadOnlyList<string> Attributes { get; private set; } = [];
 
@@ -242,6 +254,7 @@ public sealed class ClassFile
             string? signature = null;
             int constant = 0;
             var names = new List<string>();
+            var annotations = new List<JvmAnnotation>();
             ForEachAttribute(ref reader, data, pool, names, warnings, $"field {name}", (string attribute, ref ClassReader body, int _) =>
             {
                 switch (attribute)
@@ -252,10 +265,13 @@ public sealed class ClassFile
                     case "ConstantValue":
                         constant = body.U2();
                         break;
+                    case "RuntimeVisibleAnnotations" or "RuntimeInvisibleAnnotations":
+                        annotations.AddRange(AnnotationReader.Annotations(ref body, pool, attribute == "RuntimeVisibleAnnotations"));
+                        break;
                 }
             });
 
-            fields[i] = new JvmField(access, name, descriptor) { Signature = signature, ConstantValue = constant, Attributes = names };
+            fields[i] = new JvmField(access, name, descriptor) { Signature = signature, ConstantValue = constant, Attributes = names, Annotations = annotations };
         }
 
         return fields;
@@ -275,10 +291,32 @@ public sealed class ClassFile
             IReadOnlyList<string> exceptions = [];
             IReadOnlyList<string?> parameters = [];
             var names = new List<string>();
+            var annotations = new List<JvmAnnotation>();
+            var parameterAnnotations = new List<List<JvmAnnotation>>();
+            JvmElementValue? annotationDefault = null;
             ForEachAttribute(ref reader, data, pool, names, warnings, $"method {name}", (string attribute, ref ClassReader body, int start) =>
             {
                 switch (attribute)
                 {
+                    case "RuntimeVisibleAnnotations" or "RuntimeInvisibleAnnotations":
+                        annotations.AddRange(AnnotationReader.Annotations(ref body, pool, attribute == "RuntimeVisibleAnnotations"));
+                        break;
+                    case "RuntimeVisibleParameterAnnotations" or "RuntimeInvisibleParameterAnnotations":
+                        var perParameter = AnnotationReader.ParameterAnnotations(ref body, pool, attribute == "RuntimeVisibleParameterAnnotations");
+                        for (int index = 0; index < perParameter.Count; index++)
+                        {
+                            while (parameterAnnotations.Count <= index)
+                            {
+                                parameterAnnotations.Add([]);
+                            }
+
+                            parameterAnnotations[index].AddRange(perParameter[index]);
+                        }
+
+                        break;
+                    case "AnnotationDefault":
+                        annotationDefault = AnnotationReader.Value(ref body, pool);
+                        break;
                     case "Signature":
                         signature = pool.Utf8(body.U2());
                         break;
@@ -316,6 +354,9 @@ public sealed class ClassFile
                 Exceptions = exceptions,
                 ParameterNames = parameters,
                 Attributes = names,
+                Annotations = annotations,
+                ParameterAnnotations = parameterAnnotations,
+                AnnotationDefault = annotationDefault,
             };
         }
 
@@ -418,6 +459,9 @@ public sealed class ClassFile
                     break;
                 case "Deprecated":
                     IsDeprecated = true;
+                    break;
+                case "RuntimeVisibleAnnotations" or "RuntimeInvisibleAnnotations":
+                    Annotations = [.. Annotations, .. AnnotationReader.Annotations(ref body, pool, attribute == "RuntimeVisibleAnnotations")];
                     break;
                 case "NestHost":
                     NestHost = pool.ClassName(body.U2());

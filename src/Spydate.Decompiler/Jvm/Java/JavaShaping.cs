@@ -19,18 +19,23 @@ internal static class JavaShaping
     /// <summary>A folded conditional is kept below this height, like every tree the lifter builds.</summary>
     private const int MaxConditionalDepth = 48;
 
-    public static CStmt Run(CStmt body, Func<string, bool> untabled)
+    /// <param name="untabled">Whether a local is one the compiler made up (see <see cref="LocalNamer.IsUntabled"/>).</param>
+    /// <param name="generic">Whether an expression's type is known to carry type arguments, which a typed for-each needs.</param>
+    public static CStmt Run(CStmt body, Func<string, bool> untabled, Func<IrExpr, bool>? generic = null)
     {
+        generic ??= _ => false;
         for (int round = 0; round < Rounds; round++)
         {
             body = Jumps(body);
-            body = JavaTree.Rewrite(body, Shape);
+            var counts = JavaTree.CountLocals(body);
+            body = JavaTree.Rewrite(body, s => Shape(s, counts, untabled, generic));
         }
 
         // Temporaries fold back once the structure has put them next to their uses; what that leaves may shape further.
         body = JavaInliner.RunOnTree(body, untabled);
         body = Jumps(body);
-        body = JavaTree.Rewrite(body, Shape);
+        var last = JavaTree.CountLocals(body);
+        body = JavaTree.Rewrite(body, s => Shape(s, last, untabled, generic));
         return Jumps(body);
     }
 
@@ -95,9 +100,18 @@ internal static class JavaShaping
                         next++;
                     }
 
+                    // Before a jump, falling off goes where the jump goes — and, when the jump itself is redundant
+                    // and will go, where falling off the sequence goes. A jump that stays is the only way on.
                     var fall = next == items.Count ? place.Fall
-                        : items[next] is JBreak or JContinue ? place.ClassOf(items[next]).Union(Fall(items, next, place)) : [];
+                        : items[next] is JBreak or JContinue ? NextJump(items, next, place) : [];
                     result.Add(Jumps(items[i], place with { Fall = fall }));
+
+                    // What follows a statement that never runs on is unreachable — a block's code after its label
+                    // went with the last jump to it — and Java rejects unreachable code.
+                    if (JavaTree.NeverFallsThrough(result[^1]) && !items.Skip(i + 1).Any(item => item is CLabel))
+                    {
+                        break;
+                    }
                 }
 
                 return JavaTree.Sequence(result);
@@ -152,6 +166,13 @@ internal static class JavaShaping
         }
     }
 
+    private static ImmutableHashSet<long> NextJump(IReadOnlyList<CStmt> items, int index, Place place)
+    {
+        var keys = place.ClassOf(items[index]);
+        var after = Fall(items, index, place);
+        return keys.Overlaps(after) ? keys.Union(after) : keys;
+    }
+
     /// <summary>What falling off the jump at <paramref name="index"/> would mean, were it removed: the same as where the sequence goes next.</summary>
     private static ImmutableHashSet<long> Fall(IReadOnlyList<CStmt> items, int index, Place place)
     {
@@ -169,10 +190,10 @@ internal static class JavaShaping
     // --- shapes -----------------------------------------------------------------------------------
 
     /// <summary>One statement, its children already shaped.</summary>
-    private static CStmt Shape(CStmt statement) => statement switch
+    private static CStmt Shape(CStmt statement, IReadOnlyDictionary<string, int> counts, Func<string, bool> untabled, Func<IrExpr, bool> generic) => statement switch
     {
-        CSeq seq => Sequence(seq),
-        CIf conditional => Sequence(new CSeq([conditional])),
+        CSeq seq => Sequence(seq, counts, untabled, generic),
+        CIf conditional => Sequence(new CSeq([conditional]), counts, untabled, generic),
         JLoop loop => Loop(loop),
         JSwitch dispatch => Switch(dispatch),
         _ => statement,
@@ -204,7 +225,7 @@ internal static class JavaShaping
         return cases.Count == 0 && !HasEffect(dispatch.Value) ? CSeq.Empty : dispatch with { Cases = cases };
     }
 
-    private static CStmt Sequence(CSeq seq)
+    private static CStmt Sequence(CSeq seq, IReadOnlyDictionary<string, int> counts, Func<string, bool> untabled, Func<IrExpr, bool> generic)
     {
         var items = new List<CStmt>(seq.Items.Count);
         foreach (var item in seq.Items)
@@ -221,9 +242,14 @@ internal static class JavaShaping
 
         JavaSugar.Synchronized(items);
         JavaSugar.Finally(items);
+        JavaSugar.TryWithResources(items);
+        JavaShortcuts.Assert(items);
+        JavaShortcuts.StringSwitch(items, counts, untabled);
+        JavaShortcuts.SwitchExpression(items, counts);
         Conditionals(items);
         ReturnsInPlace(items);
         ForInitialisers(items);
+        JavaShortcuts.ForEach(items, counts, untabled, generic);
         return JavaTree.Sequence(items);
     }
 
@@ -316,12 +342,28 @@ internal static class JavaShaping
     /// </summary>
     private static CStmt Loop(JLoop loop)
     {
+        if (JavaShortcuts.AssignedInTest(loop) is { } tested)
+        {
+            loop = tested;
+        }
+
         if (loop.Kind == CLoopKind.Forever)
         {
             var items = JavaTree.Items(loop.Body);
             if (items.Count > 0 && items[0] is CIf { Then: JBreak { } first, Else: null } head && first.Label == loop.Label)
             {
                 loop = loop with { Kind = CLoopKind.While, Condition = Not(head.Condition), Body = JavaTree.Sequence(items.Skip(1)), Va = head.Va };
+            }
+            else if (items is [CIf { Else: null } guard, JBreak { } leave] && leave.Label == loop.Label && JavaTree.NeverFallsThrough(guard.Then))
+            {
+                // while (true) { if (c) { …; continue; } break; } is while (c) { … }: the arm never runs on to the break.
+                var body = JavaTree.Items(guard.Then).ToList();
+                if (body.Count > 0 && body[^1] is JContinue again && again.Label == loop.Label)
+                {
+                    body.RemoveAt(body.Count - 1);
+                }
+
+                loop = loop with { Kind = CLoopKind.While, Condition = guard.Condition, Body = JavaTree.Sequence(body), Va = guard.Va };
             }
             else if (items.Count > 0 && items[^1] is CIf { Then: JBreak { } last, Else: null } tail && last.Label == loop.Label
                      && !JavaTree.Descendants(loop.Body).Any(d => d is JContinue c && c.Label == loop.Label))

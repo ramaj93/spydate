@@ -21,10 +21,16 @@ internal sealed class LocalNamer
     private readonly HashSet<string> _untabledNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _signatures = new(StringComparer.Ordinal);
 
-    public LocalNamer(ClassFile file, JvmMethod method, CodeAttribute code)
+    public LocalNamer(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlySet<string>? reserved = null)
     {
         _method = method;
         _code = code;
+
+        // Names taken outside — a lambda's enclosing method's locals — are held by placeholders nothing prints.
+        foreach (string name in reserved ?? (IReadOnlySet<string>)new HashSet<string>())
+        {
+            _byName[name] = new JLocal(name, null, JLocalKind.This);
+        }
 
         int slot = 0;
         if ((method.Access & JvmAccess.Static) == 0)

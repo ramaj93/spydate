@@ -16,6 +16,9 @@ namespace Spydate.Decompiler.Jvm.Java;
 /// </summary>
 internal sealed class JavaDeclarations
 {
+    /// <summary>How a local class's declaration is named among the variables to place.</summary>
+    public const string LocalClassPrefix = "class:";
+
     private readonly Dictionary<CSeq, Dictionary<int, List<string>>> _before = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<IrStmt> _folded = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<JLoop> _forDeclared = new(ReferenceEqualityComparer.Instance);
@@ -118,7 +121,7 @@ internal sealed class JavaDeclarations
         {
             if (ForLoops(name, paths) is { } loops)
             {
-                foreach (var loop in loops)
+                foreach (var loop in loops.OfType<JLoop>())
                 {
                     declarations._forDeclared.Add(loop);
                 }
@@ -166,17 +169,25 @@ internal sealed class JavaDeclarations
     /// The loops whose initialisers can declare the name: when every mention is inside, or in the header of, a
     /// <c>for</c> that assigns the name first thing.
     /// </summary>
-    private static List<JLoop>? ForLoops(string name, List<(CSeq Seq, int Index)[]> paths)
+    private static List<CStmt>? ForLoops(string name, List<(CSeq Seq, int Index)[]> paths)
     {
-        var loops = new List<JLoop>();
+        var loops = new List<CStmt>();
         foreach (var path in paths)
         {
-            JLoop? owner = null;
+            CStmt? owner = null;
             foreach (var (seq, index) in path)
             {
-                if (seq.Items[index] is JLoop { Init: IrAssign { Dst: JLocal counter } } loop && counter.Name == name)
+                if (seq.Items[index] is JLoop loop
+                    && ((loop.Init is IrAssign { Dst: JLocal counter } && counter.Name == name) || loop.ForEach?.Variable.Name == name))
                 {
                     owner = loop;
+                    break;
+                }
+
+                // A try's resource is declared by the try, and lives only in it.
+                if (seq.Items[index] is JTry attempt && attempt.Resources.Any(r => r.Variable.Name == name))
+                {
+                    owner = attempt;
                     break;
                 }
             }
@@ -203,6 +214,9 @@ internal sealed class JavaDeclarations
         CIf i => Names(i.Condition),
         CLoop { Condition: { } c } => Names(c),
         CSwitch s => Names(s.Value),
+        JLoop { ForEach: { } each } l => Names(each.Source).Append(each.Variable.Name),
+        JTry { Resources.Count: > 0 } t => t.Resources.SelectMany(r => Names(r.Init).Append(r.Variable.Name)),
+        JAssert a => Names(a.Condition).Concat(a.Message is null ? [] : Names(a.Message)),
         JLoop l => (l.Condition is null ? [] : Names(l.Condition))
             .Concat(l.Init is IrAssign init ? Names(init.Dst).Concat(Names(init.Src)) : [])
             .Concat(l.Update is IrAssign update ? Names(update.Dst).Concat(Names(update.Src)) : []),
@@ -211,7 +225,20 @@ internal sealed class JavaDeclarations
         _ => [],
     };
 
-    private static IEnumerable<string> Names(IrExpr expression) => JavaRewrite.PostOrder(expression).OfType<JLocal>().Select(l => l.Name).Distinct();
+    /// <summary>
+    /// Locals by name, and — as <see cref="LocalClassPrefix"/> and the class's internal name — every class created,
+    /// so a local class is declared, like a variable, just before the first statement that uses it.
+    /// </summary>
+    private static IEnumerable<string> Names(IrExpr expression) => JavaRewrite.PostOrder(expression)
+        .Select(e => e switch
+        {
+            JLocal l => l.Name,
+            JAssignExpr { Target: JLocal target } => target.Name,
+            JNew n => LocalClassPrefix + n.Owner,
+            _ => null,
+        })
+        .OfType<string>()
+        .Distinct();
 
     private static bool Mentions(IrExpr expression, string name) => Names(expression).Contains(name);
 }

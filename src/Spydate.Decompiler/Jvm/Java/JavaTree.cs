@@ -68,6 +68,10 @@ internal static class JavaTree
                 return parts;
             case CRaw { Statement: JRegion region }:
                 return [region.Body];
+
+            // The arms of a switch expression are statements too, inside the expression.
+            case CRaw { Statement: var held } when JavaRewrite.Evaluated(held).SelectMany(JavaRewrite.PostOrder).OfType<JSwitchExpr>().ToList() is { Count: > 0 } switches:
+                return switches.SelectMany(e => e.Arms.Select(a => (CStmt)a.Body));
             case JBlock block:
                 return [block.Body];
             case JLoop loop:
@@ -150,11 +154,63 @@ internal static class JavaTree
             Condition = loop.Condition is null ? null : JavaRewrite.Replace(loop.Condition, replace),
             Init = loop.Init is null ? null : JavaRewrite.Replace(loop.Init, replace),
             Update = loop.Update is null ? null : JavaRewrite.Replace(loop.Update, replace),
+            ForEach = loop.ForEach is { } each ? (each.Variable, JavaRewrite.Replace(each.Source, replace)) : null,
         },
+        JTry { Resources.Count: > 0 } attempt => attempt with { Resources = attempt.Resources.Select(r => (r.Variable, JavaRewrite.Replace(r.Init, replace))).ToList() },
+        JAssert assertion => assertion with { Condition = JavaRewrite.Replace(assertion.Condition, replace), Message = assertion.Message is null ? null : (JExpr)JavaRewrite.Replace(assertion.Message, replace) },
         JSwitch dispatch => dispatch with { Value = JavaRewrite.Replace(dispatch.Value, replace) },
         JSynchronized locked => locked with { Lock = (JExpr)JavaRewrite.Replace(locked.Lock, replace) },
         _ => statement,
     });
+
+    /// <summary>The expressions a statement itself holds — not those of the statements inside it — stores' targets included.</summary>
+    public static IEnumerable<IrExpr> Expressions(CStmt statement) => statement switch
+    {
+        CRaw { Statement: IrAssign a } => [a.Dst, a.Src],
+        CRaw { Statement: JRegion } => [],
+        CRaw { Statement: var s } => JavaRewrite.Evaluated(s),
+        CIf i => [i.Condition],
+        CLoop { Condition: { } c } => [c],
+        CSwitch s => [s.Value],
+        JLoop l => new IrExpr?[]
+        {
+            l.Condition, (l.Init as IrAssign)?.Dst, (l.Init as IrAssign)?.Src, (l.Update as IrAssign)?.Dst, (l.Update as IrAssign)?.Src,
+            l.ForEach?.Variable, l.ForEach?.Source,
+        }.OfType<IrExpr>(),
+        JSwitch s => [s.Value],
+        JSynchronized l => [l.Lock],
+        JTry t => t.Resources.SelectMany(r => new IrExpr[] { r.Variable, r.Init }),
+        JAssert a => a.Message is null ? [a.Condition] : [a.Condition, a.Message],
+        _ => [],
+    };
+
+    /// <summary>How many times each local is mentioned anywhere in the tree, read or written.</summary>
+    public static Dictionary<string, int> CountLocals(CStmt root)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var node in Descendants(root))
+        {
+            foreach (var expression in Expressions(node))
+            {
+                foreach (var e in JavaRewrite.PostOrder(expression))
+                {
+                    string? name = e switch
+                    {
+                        JLocal l => l.Name,
+                        JAssignExpr { Target: JLocal target } => target.Name,
+                        _ => null,
+                    };
+
+                    if (name is not null)
+                    {
+                        counts[name] = counts.GetValueOrDefault(name) + 1;
+                    }
+                }
+            }
+        }
+
+        return counts;
+    }
 
     /// <summary>Every <c>break</c> and <c>continue</c> in the tree, by label.</summary>
     public static HashSet<int> JumpTargets(CStmt root)

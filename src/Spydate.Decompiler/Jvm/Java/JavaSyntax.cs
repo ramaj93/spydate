@@ -104,7 +104,8 @@ public sealed record JField(JExpr? Instance, string Owner, string Name, string F
 
 public sealed record JArrayElement(JExpr Array, JExpr Index, string? ElementType) : JExpr
 {
-    public override string? Type => ElementType;
+    /// <summary>The array's element type when the array's type is known — it follows a local retyped after lifting — else the one the load said.</summary>
+    public override string? Type => Array.Type is ['[', .. var element] && element.Length > 0 ? element : ElementType;
 
     public override int Depth => 1 + Math.Max(Array.Depth, Index.Depth);
 
@@ -174,9 +175,49 @@ public sealed record JNewArray(string ArrayType, IReadOnlyList<JExpr> Dimensions
 {
     public override string? Type => ArrayType;
 
-    public override int Depth => 1 + DepthOf(Dimensions);
+    public override int Depth => 1 + Math.Max(DepthOf(Dimensions), Elements is null ? 0 : DepthOf(Elements));
 
-    public override IEnumerable<IrExpr> Children => Dimensions;
+    public override IEnumerable<IrExpr> Children => Elements is null ? Dimensions : Elements;
+
+    /// <summary><c>new int[] {1, 2}</c>: the elements, rebuilt from the stores javac follows the allocation with.</summary>
+    public IReadOnlyList<JExpr>? Elements { get; init; }
+}
+
+/// <summary>
+/// <c>switch (k) { case 1, 2 -&gt; 10; case 3 -&gt; { …; yield v; } default -&gt; -1; }</c> as a value: javac's switch whose
+/// every arm leaves one value on the stack for the code after it, or throws.
+/// </summary>
+public sealed record JSwitchExpr(IrExpr Value, IReadOnlyList<JSwitchArm> Arms, ulong Va) : JExpr
+{
+    public override string? Type => Arms.Select(a => a.Body.Items.LastOrDefault() is CRaw { Statement: JYield y } ? y.Value.Type : null).FirstOrDefault(t => t is not null);
+
+    public override int Depth => 1 + DepthOf(Value);
+
+    /// <summary>Only the switched value: each arm's statements, its yielded value among them, are statements of their own.</summary>
+    public override IEnumerable<IrExpr> Children => [Value];
+
+    /// <summary>Each case value's label, for a switch on a string or an enum.</summary>
+    public IReadOnlyDictionary<int, string>? Names { get; init; }
+}
+
+/// <summary>One arm of a switch expression: its case indices and its statements, ending in a <see cref="JYield"/> or a throw.</summary>
+public sealed record JSwitchArm(IReadOnlyList<int> Labels, CSeq Body);
+
+/// <summary><c>yield value;</c> — the value a switch expression's arm gives.</summary>
+public sealed record JYield(JExpr Value) : IrStmt;
+
+/// <summary>
+/// <c>x = value</c> as an expression, whose value is what was stored: <c>while ((line = r.readLine()) != null)</c>, or a
+/// field set through the accessor javac wrote for an inner class, <c>Outer.this.count = n</c>.
+/// </summary>
+public sealed record JAssignExpr(JExpr Target, JExpr Value) : JExpr
+{
+    public override string? Type => Target.Type;
+
+    public override int Depth => 1 + Math.Max(Target.Depth, Value.Depth);
+
+    /// <summary>What is evaluated: a field's or element's object and index, then the value; a local target is only written.</summary>
+    public override IEnumerable<IrExpr> Children => Target is JLocal ? [Value] : Target.Children.Append(Value);
 }
 
 /// <summary>A binary operator, written as Java writes it: <c>+</c>, <c>&gt;&gt;&gt;</c>, <c>&amp;</c>.</summary>
@@ -258,6 +299,12 @@ public sealed record JDynamic(string Name, string Descriptor, IReadOnlyList<JExp
     /// <summary>For a lambda or method reference: the method that implements it, as owner, name and descriptor.</summary>
     public (string Owner, string Name, string Descriptor)? Target { get; init; }
 
+    /// <summary>
+    /// The target's method handle kind (JVMS §5.4.3.5): 5 virtual, 6 static, 7 special, 8 a constructor, 9 interface.
+    /// A virtual or interface target with a captured receiver is <c>receiver::name</c>, without one <c>Type::name</c>.
+    /// </summary>
+    public int TargetKind { get; init; }
+
     /// <summary>The bootstrap method, for a call site that is neither: <c>SwitchBootstraps.typeSwitch</c>.</summary>
     public string? Bootstrap { get; init; }
 }
@@ -319,6 +366,9 @@ public sealed record JRegion(CStmt Body) : IrStmt;
 public sealed record JTry(CStmt Body, IReadOnlyList<JCatch> Catches) : CStmt
 {
     public CStmt? Finally { get; init; }
+
+    /// <summary><c>try (R r = init; …)</c>: the resources, rebuilt from the close calls javac writes out.</summary>
+    public IReadOnlyList<(JLocal Variable, IrExpr Init)> Resources { get; init; } = [];
 }
 
 /// <summary>One handler: what it catches (null for any — a <c>finally</c>), what the exception is called, and its body.</summary>
@@ -344,10 +394,20 @@ public sealed record JLoop(int Label, CLoopKind Kind, IrExpr? Condition, CStmt B
 
     /// <summary>A <c>for</c>'s update, run after the body and after every <c>continue</c>.</summary>
     public IrStmt? Update { get; init; }
+
+    /// <summary><c>for (T x : source)</c>: the loop variable and the array or iterable, when the loop is one.</summary>
+    public (JLocal Variable, IrExpr Source)? ForEach { get; init; }
 }
 
+/// <summary><c>assert condition : message;</c>, rebuilt from the test of <c>$assertionsDisabled</c> javac makes of it.</summary>
+public sealed record JAssert(IrExpr Condition, JExpr? Message) : CStmt;
+
 /// <summary>A switch statement; <c>break</c> in an arm leaves it, an arm that runs off its end falls into the next.</summary>
-public sealed record JSwitch(int Label, IrExpr Value, IReadOnlyList<CCase> Cases, ulong Va = 0) : CStmt;
+public sealed record JSwitch(int Label, IrExpr Value, IReadOnlyList<CCase> Cases, ulong Va = 0) : CStmt
+{
+    /// <summary>For a switch on a string or an enum rebuilt from what javac made of it: each case value's label text.</summary>
+    public IReadOnlyDictionary<int, string>? Names { get; init; }
+}
 
 /// <summary><c>break label</c>: to just after the labelled block, loop or switch. Printed without the label when it names the innermost loop or switch.</summary>
 public sealed record JBreak(int Label) : CStmt;

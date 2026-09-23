@@ -7,102 +7,12 @@ using Spydate.Decompiler.Native.Structuring;
 namespace Spydate.Decompiler.Jvm.Java;
 
 /// <summary>
-/// How the Java printer names things: the class being printed (for its package and to call its own members
-/// without qualification), and the names the project has given classes and members, by annotation key.
-/// </summary>
-internal sealed class JavaNaming
-{
-    private readonly Func<string, string?> _given;
-    private readonly Func<string, ClassFile?> _find;
-
-    public JavaNaming(ClassFile file, Func<string, string?> given, Func<string, ClassFile?>? find = null)
-    {
-        Class = file;
-        _given = given;
-        _find = find ?? (_ => null);
-        Package = file.PackageName;
-    }
-
-    /// <summary>A class of the same JAR by internal name, or null for one it does not hold — the JDK's, a library's.</summary>
-    public ClassFile? FindClass(string internalName) => internalName == Class.Name ? Class : _find(internalName);
-
-    public ClassFile Class { get; }
-
-    public string Package { get; }
-
-    public string? GivenClassName(string internalName) => _given(internalName);
-
-    public string MethodName(string owner, string name, string descriptor) => _given($"{owner}.{name}{descriptor}") ?? name;
-
-    public string FieldName(string owner, string name, string descriptor) => _given($"{owner}.{name}:{descriptor}") ?? name;
-
-    /// <summary>
-    /// A descriptor as Java writes the type: <c>int</c>, <c>String</c>, <c>java.util.List</c>, <c>byte[][]</c>.
-    /// Classes in <c>java.lang</c> and in the class's own package go by their simple name; a nested class by
-    /// <c>Outer.Inner</c>; a class the project renamed, by its new name.
-    /// </summary>
-    public string Type(string? descriptor)
-    {
-        if (descriptor is null or "")
-        {
-            return "Object";
-        }
-
-        int dims = 0;
-        while (dims < descriptor.Length && descriptor[dims] == '[')
-        {
-            dims++;
-        }
-
-        string element = descriptor[dims..] switch
-        {
-            "Z" => "boolean",
-            "B" => "byte",
-            "C" => "char",
-            "S" => "short",
-            "I" => "int",
-            "J" => "long",
-            "F" => "float",
-            "D" => "double",
-            "V" => "void",
-            ['L', .. var name, ';'] => ClassName(name),
-            var other => other,
-        };
-
-        return dims == 0 ? element : element + string.Concat(Enumerable.Repeat("[]", dims));
-    }
-
-    /// <summary>An internal class name as the printed class name.</summary>
-    public string ClassName(string internalName)
-    {
-        if (_given(internalName) is { } given)
-        {
-            return given;
-        }
-
-        int slash = internalName.LastIndexOf('/');
-        string package = slash < 0 ? string.Empty : internalName[..slash];
-        string simple = slash < 0 ? internalName : internalName[(slash + 1)..];
-
-        // Outer$Inner reads Outer.Inner; Outer$1, an anonymous class, keeps its binary name.
-        var nested = new StringBuilder(simple.Length);
-        for (int i = 0; i < simple.Length; i++)
-        {
-            nested.Append(simple[i] == '$' && i + 1 < simple.Length && !char.IsDigit(simple[i + 1]) && i > 0 ? '.' : simple[i]);
-        }
-
-        string shortName = nested.ToString();
-        return package == "java/lang" || package == Package ? shortName : $"{package.Replace('/', '.')}.{shortName}";
-    }
-}
-
-/// <summary>
 /// Prints a structured method body — and a whole class around such bodies — as Java-shaped pseudo-code: real
 /// Java syntax for everything the structure expressed, <c>goto L0012;</c> and a label for the edges it did not,
 /// and the compiler's own shapes (a <c>finally</c> copied onto each exit, a switch on a string's hash) left as
 /// they are rather than guessed back into sugar.
 /// </summary>
-internal sealed class JavaEmitter
+internal sealed partial class JavaEmitter
 {
     private const string Indent = "    ";
 
@@ -116,6 +26,9 @@ internal sealed class JavaEmitter
     private readonly Dictionary<int, string> _labelNames = [];
     private JavaDeclarations? _declarations;
     private int _breakable;
+
+    /// <summary>The indentation level of the statement being printed: where a lambda's or anonymous class's lines go.</summary>
+    private int _level;
     private int _loop;
     private LiftedMethod? _lifted;
     private JvmMethod? _method;
@@ -158,8 +71,18 @@ internal sealed class JavaEmitter
         if (structured)
         {
             // Each local where it is used: see JavaDeclarations.
+            body = CatchVariables(body, lifted);
             body = JavaDeclarations.Blocked(body);
             var names = lifted.Locals.Declared.Keys.Where(n => !lifted.Locals.IsCaught(n)).ToHashSet(StringComparer.Ordinal);
+
+            // A local class is declared like a variable: just before the first statement that creates it.
+            foreach (var created in Descendants(body).OfType<CRaw>().SelectMany(r => JavaRewrite.Evaluated(r.Statement)).SelectMany(JavaRewrite.PostOrder).OfType<JNew>())
+            {
+                if (_naming.Scope?.IsLocalClass(created.Owner) == true)
+                {
+                    names.Add(JavaDeclarations.LocalClassPrefix + created.Owner);
+                }
+            }
             _declarations = JavaDeclarations.Place(body as CSeq ?? new CSeq([body]), names);
         }
         else
@@ -191,6 +114,20 @@ internal sealed class JavaEmitter
 
     private void Write(CStmt statement, int level, bool topLevel = false)
     {
+        int outer = _level;
+        _level = level;
+        try
+        {
+            WriteAt(statement, level, topLevel);
+        }
+        finally
+        {
+            _level = outer;
+        }
+    }
+
+    private void WriteAt(CStmt statement, int level, bool topLevel)
+    {
         switch (statement)
         {
             case CSeq seq:
@@ -200,6 +137,16 @@ internal sealed class JavaEmitter
                     {
                         foreach (string name in _declarations.Before(seq, i))
                         {
+                            if (name.StartsWith(JavaDeclarations.LocalClassPrefix, StringComparison.Ordinal))
+                            {
+                                if (_naming.Scope?.LocalClass(name[JavaDeclarations.LocalClassPrefix.Length..], level) is { } declaration)
+                                {
+                                    _sb.Append(declaration);
+                                }
+
+                                continue;
+                            }
+
                             Line(level, $"{DeclaredType(name, null)} {name};");
                         }
                     }
@@ -262,6 +209,11 @@ internal sealed class JavaEmitter
                 break;
             case JExit exit:
                 Line(level, $"goto {LabelName(exit.Target)}; // leaves a region that could not be placed");
+                break;
+            case JAssert assertion:
+                Line(level, assertion.Message is null
+                    ? $"assert {Condition(assertion.Condition)};"
+                    : $"assert {Condition(assertion.Condition)} : {Expr(assertion.Message)};");
                 break;
             case JSynchronized locked:
                 Line(level, $"synchronized ({Expr(locked.Lock)}) {{");
@@ -338,6 +290,11 @@ internal sealed class JavaEmitter
         string prefix = LabelPrefix(loop.Label);
         switch (loop.Kind)
         {
+            case CLoopKind.While when loop.ForEach is { } each:
+                Line(level, $"{prefix}for ({ForEachVariable(loop, each.Variable)} : {Expr(each.Source)}) {{");
+                Write(loop.Body, level + 1);
+                Line(level, "}");
+                break;
             case CLoopKind.While when loop.Update is not null:
                 string init = loop.Init is IrAssign assign ? ForInit(loop, assign) : string.Empty;
                 string update = loop.Update is IrAssign step ? Assignment(step, topLevel: false) : string.Empty;
@@ -365,6 +322,16 @@ internal sealed class JavaEmitter
         (_breakable, _loop) = (breakable, inner);
     }
 
+    /// <summary>
+    /// A for-each loop's variable, declared by the loop — or, when the method uses the name outside the loop too, a
+    /// variable of its own that the body copies into the method's one first.
+    /// </summary>
+    private string ForEachVariable(JLoop loop, JLocal variable)
+    {
+        string type = DeclaredType(variable.Name, variable.Type);
+        return _declarations?.Declares(loop) != false ? $"{type} {variable.Name}" : $"{type} {variable.Name}";
+    }
+
     /// <summary>A <c>for</c>'s initialiser, with the declaration when the variable lives only in the loop.</summary>
     private string ForInit(JLoop loop, IrAssign init)
     {
@@ -381,10 +348,18 @@ internal sealed class JavaEmitter
         var breakable = _breakable;
         _breakable = dispatch.Label;
         var values = _lifted?.SwitchValues.GetValueOrDefault(dispatch.Va);
-        Line(level, $"{LabelPrefix(dispatch.Label)}switch ({Expr(dispatch.Value)}) {{");
+        var switched = dispatch.Value;
+        var names = dispatch.Names;
+        if (names is null && _naming.Scope?.EnumSwitch(dispatch.Value) is { } enumSwitch)
+        {
+            switched = enumSwitch.Value;
+            names = enumSwitch.Names;
+        }
+
+        Line(level, $"{LabelPrefix(dispatch.Label)}switch ({Expr(switched)}) {{");
         foreach (var arm in dispatch.Cases)
         {
-            foreach (string label in CaseLabels(arm, values))
+            foreach (string label in CaseLabels(arm, values, names))
             {
                 Line(level + 1, label);
             }
@@ -407,8 +382,74 @@ internal sealed class JavaEmitter
         _breakable = breakable;
     }
 
+    /// <summary>
+    /// A switch expression, its arms at the statement's level + 1: <c>case 1, 2 -&gt; 10;</c> for an arm that is only its
+    /// value, <c>default -&gt; throw …;</c> for one that only throws, a block ending in <c>yield</c> otherwise.
+    /// </summary>
+    private string SwitchExpressionText(JSwitchExpr expression)
+    {
+        int level = _level;
+        var values = _lifted?.SwitchValues.GetValueOrDefault(expression.Va);
+        var switched = expression.Value;
+        var names = expression.Names;
+        if (names is null && _naming.Scope?.EnumSwitch(expression.Value) is { } enumSwitch)
+        {
+            switched = enumSwitch.Value;
+            names = enumSwitch.Names;
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("switch (").Append(Expr(switched)).Append(") {\n");
+        foreach (var arm in expression.Arms)
+        {
+            var labels = CaseLabels(new CCase(arm.Labels, CSeq.Empty), values, names).ToList();
+            string label = labels is ["default:"] ? "default" : "case " + string.Join(", ", labels.Select(l => l["case ".Length..^1]));
+            Pad(sb, level + 1).Append(label).Append(" -> ");
+            var body = arm.Body.Items.Where(i => !JavaTree.IsEmpty(i)).ToList();
+            if (body is [CRaw { Statement: JYield only }])
+            {
+                sb.Append(Expr(Fit(Typed(only.Value, expression.Type), expression.Type))).Append(";\n");
+            }
+            else if (body is [CRaw { Statement: JThrow thrown }])
+            {
+                sb.Append("throw ").Append(Expr(thrown.Exception)).Append(";\n");
+            }
+            else
+            {
+                sb.Append("{\n");
+                sb.Append(Captured(() => Write(arm.Body, level + 2)));
+                Pad(sb, level + 1).Append("}\n");
+            }
+        }
+
+        Pad(sb, level).Append('}');
+        return sb.ToString();
+    }
+
+    /// <summary>What writing does to the output, taken back out of it as text — for statements inside an expression.</summary>
+    private string Captured(Action write)
+    {
+        int start = _sb.Length;
+        int level = _level;
+        write();
+        _level = level;
+        string text = _sb.ToString(start, _sb.Length - start);
+        _sb.Length = start;
+        return text;
+    }
+
+    private static StringBuilder Pad(StringBuilder sb, int level)
+    {
+        for (int i = 0; i < level; i++)
+        {
+            sb.Append(Indent);
+        }
+
+        return sb;
+    }
+
     /// <summary>An arm's labels by value; the arm that has <c>default</c> needs no others — they go there anyway.</summary>
-    private static IEnumerable<string> CaseLabels(CCase arm, int?[]? values)
+    private static IEnumerable<string> CaseLabels(CCase arm, int?[]? values, IReadOnlyDictionary<int, string>? names = null)
     {
         var resolved = arm.Labels.Select(i => values is not null && i < values.Length ? values[i] : i).ToList();
         if (values is not null && resolved.Contains(null))
@@ -416,7 +457,10 @@ internal sealed class JavaEmitter
             return ["default:"];
         }
 
-        return resolved.OrderBy(v => v).Select(v => $"case {v!.Value.ToString(CultureInfo.InvariantCulture)}:");
+        // A case the names do not cover can never match what the switch is really on (a string's hash that no literal had).
+        return resolved.OrderBy(v => v)
+            .Where(v => names is null || names.ContainsKey(v!.Value))
+            .Select(v => $"case {(names is not null ? names[v!.Value] : v!.Value.ToString(CultureInfo.InvariantCulture))}:");
     }
 
     private void WriteIf(CIf conditional, int level, string keyword)
@@ -487,7 +531,16 @@ internal sealed class JavaEmitter
 
     private void WriteTry(JTry attempt, int level)
     {
-        Line(level, "try {");
+        if (attempt.Resources.Count > 0)
+        {
+            var resources = attempt.Resources.Select(r => $"{DeclaredType(r.Variable.Name, r.Variable.Type)} {r.Variable.Name} = {Value(r.Init, r.Variable)}");
+            Line(level, $"try ({string.Join("; ", resources)}) {{");
+        }
+        else
+        {
+            Line(level, "try {");
+        }
+
         Write(attempt.Body, level + 1);
         foreach (var handler in attempt.Catches)
         {
@@ -532,6 +585,9 @@ internal sealed class JavaEmitter
                 return;
             case JThrow thrown:
                 Line(level, $"throw {Expr(thrown.Exception)};");
+                return;
+            case JYield yielded:
+                Line(level, $"yield {Expr(yielded.Value)};");
                 return;
             case JMonitor monitor:
                 Line(level, monitor.Enter
@@ -597,7 +653,15 @@ internal sealed class JavaEmitter
             return generic;
         }
 
-        return _naming.Type(_lifted.Locals.Declared.GetValueOrDefault(name) ?? fallback);
+        string? descriptor = _lifted.Locals.Declared.GetValueOrDefault(name) ?? fallback;
+
+        // A variable holding an anonymous class is declared as what the class extends or implements.
+        if (descriptor is ['L', .. var internalName, ';'] && _naming.Scope?.AnonymousType(internalName) is { } supertype)
+        {
+            return supertype;
+        }
+
+        return _naming.Type(descriptor);
     }
 
     /// <summary>
@@ -614,18 +678,71 @@ internal sealed class JavaEmitter
     /// <summary><c>new T(…)</c>, or <c>new T&lt;&gt;(…)</c> when the value goes somewhere of a parameterized type and T is generic.</summary>
     private string Created(JNew created, string? targetGeneric)
     {
+        if (_naming.Scope?.Anonymous(created, a => Arguments(a.Args, a.Descriptor, a.Owner, "<init>"), _level) is { } anonymous)
+        {
+            return anonymous;
+        }
+
+        var (outer, args, descriptor) = _naming.Scope?.Constructed(created) ?? (null, created.Args, created.Descriptor);
         bool diamond = targetGeneric is not null && JavaGenerics.IsParameterized(targetGeneric) && JavaGenerics.IsGenericClass(created.Owner, _naming.FindClass);
-        return $"new {_naming.ClassName(created.Owner)}{(diamond ? "<>" : string.Empty)}({Arguments(created.Args, created.Descriptor, created.Owner, "<init>")})";
+        string prefix = outer is null or JLocal { Kind: JLocalKind.This } ? string.Empty : $"{Expr(outer, Precedence.Primary)}.";
+        string type = outer is null or JLocal { Kind: JLocalKind.This } ? _naming.ClassName(created.Owner) : SimpleClassName(created.Owner);
+        return $"{prefix}new {type}{(diamond ? "<>" : string.Empty)}({Arguments(args, descriptor, created.Owner, "<init>")})";
+    }
+
+    /// <summary>A member class's own simple name, as <c>outer.new Inner()</c> writes it.</summary>
+    private string SimpleClassName(string internalName)
+    {
+        if (_naming.GivenClassName(internalName) is { } given)
+        {
+            return given.Split('.')[^1];
+        }
+
+        int dollar = internalName.LastIndexOf('$');
+        int slash = internalName.LastIndexOf('/');
+        return internalName[(Math.Max(dollar, slash) + 1)..];
+    }
+
+    /// <summary>
+    /// A lambda for the class writer: the synthetic method's body with its captured parameters already replaced,
+    /// written as <c>x -&gt; value</c> when all it does is return a value or evaluate one expression, and as
+    /// <c>(a, b) -&gt; { … }</c> otherwise, its lines at <paramref name="level"/> + 1.
+    /// </summary>
+    public string Lambda(JvmMethod method, LiftedMethod lifted, CStmt body, int level, IReadOnlyList<string> parameters)
+    {
+        _method = method;
+        _lifted = lifted;
+        _returnType = JCall.ReturnType(method.Descriptor);
+        _level = level;
+        string head = parameters.Count == 1 ? parameters[0] : $"({string.Join(", ", parameters)})";
+        var items = JavaTree.Items(body).Where(i => !JavaTree.IsEmpty(i) && i is not CRaw { Statement: IrReturn { Value: null } }).ToList();
+        switch (items)
+        {
+            case [CRaw { Statement: IrReturn { Value: { } value } }]:
+                return $"{head} -> {ReturnValue(value)}";
+            case [CRaw { Statement: JExprStmt expression }] when _returnType == "V":
+                return $"{head} -> {ExpressionStatement(expression.Expression)}";
+        }
+
+        Body(method, lifted, body, level, returns: null, structured: true);
+        return $"{head} -> {{\n{_sb.ToString().TrimEnd('\n')}";
+    }
+
+    /// <summary>
+    /// An expression as a statement at <paramref name="level"/> would print it, for the class writer — a field's
+    /// initialiser, taken from the constructor or static initialiser it was compiled into.
+    /// </summary>
+    public string Initializer(JvmMethod method, LiftedMethod lifted, IrExpr value, string? type, string? generic, int level)
+    {
+        _method = method;
+        _lifted = lifted;
+        _level = level;
+        var fitted = Fit(Typed(value, type), type);
+        return fitted is JNew created ? Created(created, generic) : Expr(fitted);
     }
 
     /// <summary>The generic type of what an expression reads, when the class file says: a local's, a parameter's, a field's of this JAR.</summary>
-    private string? GenericOf(JExpr expression) => expression switch
-    {
-        JLocal local => _lifted?.Locals.Signatures.GetValueOrDefault(local.Name),
-        JField field => _naming.FindClass(field.Owner)?.Fields.FirstOrDefault(f => f.Name == field.Name && f.Descriptor == field.FieldType)?.Signature is { } s
-                        && JavaGenerics.IsParameterized(s) ? s : null,
-        _ => null,
-    };
+    private string? GenericOf(JExpr expression) => _lifted is null ? null : JavaGenerics.GenericOf(expression, _lifted, _naming.FindClass);
 
     private static readonly Dictionary<string, (string Primitive, string Unbox)> Boxes = new(StringComparer.Ordinal)
     {
@@ -684,10 +801,24 @@ internal sealed class JavaEmitter
     /// <summary>A constructor call on <c>this</c> is <c>super(...)</c> or <c>this(...)</c>; anything else prints as an expression.</summary>
     private string ExpressionStatement(JExpr expression)
     {
+        // An accessor's assignment as a statement needs no parentheses around it.
+        if (expression is JCall accessor && _naming.Scope?.Accessor(accessor) is { } accessed)
+        {
+            return Expr(accessed);
+        }
+
         if (expression is JCall { Name: "<init>", Receiver: JLocal { Kind: JLocalKind.This } } chained)
         {
             string keyword = chained.Owner == _naming.Class.Name ? "this" : "super";
-            return $"{keyword}({Arguments(chained.Args, chained.Descriptor, chained.Owner, "<init>")})";
+
+            // The outer instance and captured values the compiler passes along are implicit here too; only an outer
+            // instance that is not this class's own is written, as outer.super(...).
+            var (outer, args, descriptor) = _naming.Scope?.Constructed(new JNew(chained.Owner, chained.Descriptor, chained.Args))
+                                            ?? (null, chained.Args, chained.Descriptor);
+            string prefix = keyword == "super" && outer is not (null or JLocal or JField { Instance: JLocal { Kind: JLocalKind.This } })
+                ? Expr(outer, Precedence.Primary) + "."
+                : string.Empty;
+            return $"{prefix}{keyword}({Arguments(args, descriptor, chained.Owner, "<init>")})";
         }
 
         return Expr(expression);
@@ -750,11 +881,13 @@ internal sealed class JavaEmitter
         JBinary binary => BinaryText(binary),
         JNegate negate => ($"-{Expr(negate.Operand, Precedence.Unary)}", Precedence.Unary),
         JCast { Operand: JCall call } cast when JavaGenerics.CastIsRedundant(cast.CastType, call, GenericOf, _naming.FindClass) => Print(call),
-        JCast cast => ($"({_naming.Type(cast.CastType)}) {Expr(cast.Operand, Precedence.Unary)}", Precedence.Cast),
+        JCast cast => ($"({CastTypeText(cast.CastType)}) {Expr(cast.Operand, Precedence.Unary)}", Precedence.Cast),
         JInstanceOf test => ($"{Expr(test.Operand, Precedence.Relational)} instanceof {_naming.Type(test.TestedType)}", Precedence.Relational),
         JCompare compare => ($"{CompareOwner(compare)}.compare({Expr(compare.Left)}, {Expr(compare.Right)})", Precedence.Primary),
         JCaught caught => ($"/* caught {_naming.Type(caught.Type)} */", Precedence.Primary),
         JDynamic dynamic => DynamicText(dynamic),
+        JAssignExpr assign => ($"{Expr(assign.Target, Precedence.Primary)} = {Expr(Fit(Typed(assign.Value, assign.Target.Type), assign.Target.Type), Precedence.Assignment)}", Precedence.Assignment),
+        JSwitchExpr switchExpression => (SwitchExpressionText(switchExpression), Precedence.Assignment),
         JConditional conditional => ($"{Expr(conditional.Condition, Precedence.OrElse)} ? {Expr(conditional.Then, Precedence.Conditional + 1)} : {Expr(conditional.Else, Precedence.Conditional + 1)}", Precedence.Conditional),
         JUnknown unknown => ($"/* {unknown.Description} */", Precedence.Primary),
         IrCondition condition => ConditionText(condition),
@@ -794,6 +927,16 @@ internal sealed class JavaEmitter
         var precedence = op is "==" or "!=" ? Precedence.Equality : Precedence.Relational;
         var leftText = right is not null && left is JConst ? Typed(left, right.Type) : condition.Left;
         var rightText = left is not null && right is JConst ? Typed(right, left.Type) : condition.Right;
+
+        // A boolean compared with a value the bytecode kept as an int — (a && b ? 1 : 0) != flag — compares booleans.
+        if (right?.Type == "Z" && left is { Type: not "Z" } && AsBoolean(left) is { } leftTruth)
+        {
+            leftText = leftTruth;
+        }
+        else if (left?.Type == "Z" && right is { Type: not "Z" } && AsBoolean(right) is { } rightTruth)
+        {
+            rightText = rightTruth;
+        }
 
         // x.intValue() < y reads x < y; on == and != only when the other side is a primitive, or it would compare references.
         bool relational = precedence == Precedence.Relational;
@@ -857,14 +1000,24 @@ internal sealed class JavaEmitter
 
     private string FieldText(JField field)
     {
+        if (_naming.Scope?.SyntheticField(field) is { } synthetic)
+        {
+            return synthetic;
+        }
+
         string name = _naming.FieldName(field.Owner, field.Name, field.FieldType);
         return field.Instance is null
-            ? field.Owner == _naming.Class.Name ? name : $"{_naming.ClassName(field.Owner)}.{name}"
+            ? field.Owner == _naming.Class.Name && _naming.ForwardStatics?.Contains(field.Name) != true ? name : $"{_naming.ClassName(field.Owner)}.{name}"
             : $"{Expr(field.Instance, Precedence.Primary)}.{name}";
     }
 
     private string CallText(JCall call)
     {
+        if (_naming.Scope?.Accessor(call) is { } accessed)
+        {
+            return Expr(accessed, Precedence.Primary);
+        }
+
         string name = _naming.MethodName(call.Owner, call.Name, call.Descriptor);
         string args = Arguments(call.Args, call.Descriptor, call.Owner, call.Name);
         switch (call)
@@ -875,6 +1028,9 @@ internal sealed class JavaEmitter
                 return $"super.{name}({args})";
             case { Receiver: JLocal { Kind: JLocalKind.This } }:
                 return $"this.{name}({args})";
+            // A lambda or method reference called in place has no type to take but the one a cast gives it.
+            case { Receiver: JDynamic { Target: not null } function }:
+                return $"(({_naming.Type(function.Type)}) {Expr(function, Precedence.Cast)}).{name}({args})";
             default:
                 return $"{Expr(call.Receiver!, Precedence.Primary)}.{name}({args})";
         }
@@ -884,10 +1040,40 @@ internal sealed class JavaEmitter
     private string Arguments(IReadOnlyList<JExpr> args, string descriptor, string owner, string name)
     {
         var parameters = Descriptors.ParameterDescriptors(descriptor);
+
+        // A varargs call given nothing for its varargs: javac passes an empty array, the source passed nothing — unless
+        // a method without that last parameter would then be the one called.
+        if (args.Count > 0 && args.Count == parameters.Count && args[^1] is JNewArray { Elements: null, Dimensions: [JConst { Value: 0 }] } empty
+            && empty.ArrayType.Count(c => c == '[') == 1 && IsVarargs(owner, name, descriptor)
+            && _naming.FindClass(owner)?.Methods.Any(m => m.Name == name && m.Descriptor.StartsWith($"({string.Concat(parameters.Take(parameters.Count - 1))})", StringComparison.Ordinal)) != true)
+        {
+            return Arguments(args.Take(args.Count - 1).ToList(), $"({string.Concat(parameters.Take(parameters.Count - 1))})V", owner, name);
+        }
+
+        // A varargs call javac packed into an array: the array's elements are the arguments.
+        if (args.Count > 0 && args.Count == parameters.Count && args[^1] is JNewArray { Elements: { Count: > 0 } elements } packed
+            && !(elements.Count == 1 && (elements[0] is JConst { Value: null } || elements[0].Type is ['[', ..]))
+            && IsVarargs(owner, name, descriptor))
+        {
+            string head = args.Count > 1 ? Arguments(args.Take(args.Count - 1).ToList(), $"({string.Concat(parameters.Take(parameters.Count - 1))})V", owner, name) + ", " : string.Empty;
+            string elementType = packed.ArrayType[1..];
+            return head + string.Join(", ", elements.Select(e => Expr(Fit(Typed(e, elementType), elementType), Precedence.Assignment + 1)));
+        }
+
+        var rivals = Rivals(owner, name, descriptor, parameters);
         return string.Join(", ", args.Select((a, i) =>
         {
             string? parameter = i < parameters.Count ? parameters[i] : null;
             var argument = Argument(a, parameter);
+
+            // null or a lambda another overload could take as well says which it is for, as the source had to. A
+            // lambda's cast needs the full generic type, or its parameters lose theirs; without one it goes uncast.
+            if (parameter is ['L' or '[', ..] && a is JConst { Value: null } or JDynamic { Target: not null }
+                && rivals.Any(r => r[i] != parameter && r[i] is ['L' or '[', ..])
+                && (a is JConst ? parameter : ParameterSignature(owner, name, descriptor, i)) is { } castType)
+            {
+                return $"({CastTypeText(castType)}) {Expr(a, Precedence.Unary)}";
+            }
             if (argument is JCast { CastType: "I" or "J" or "F" or "D", Operand.Type: "C" } cast && !CharOverloaded(owner, name, parameters.Count, i))
             {
                 argument = cast.Operand;
@@ -900,6 +1086,76 @@ internal sealed class JavaEmitter
 
             return Expr(argument, Precedence.Assignment + 1);
         }));
+    }
+
+    /// <summary>
+    /// The other methods of this JAR a call could be taken for: the same name and number of parameters, and each
+    /// parameter the same primitive or, for a reference, any reference — so that null or a lambda fits both.
+    /// </summary>
+    private List<IReadOnlyList<string>> Rivals(string owner, string name, string descriptor, IReadOnlyList<string> parameters)
+    {
+        if (_naming.FindClass(owner) is not { } file)
+        {
+            return [];
+        }
+
+        var rivals = new List<IReadOnlyList<string>>();
+        foreach (var method in file.Methods)
+        {
+            if (method.Name != name || method.Descriptor == descriptor || (method.Access & (JvmAccess.Synthetic | JvmAccess.VolatileOrBridge)) != 0)
+            {
+                continue;
+            }
+
+            var others = Descriptors.ParameterDescriptors(method.Descriptor);
+            if (others.Count == parameters.Count && others.Select((p, i) => p == parameters[i] || (p is ['L' or '[', ..] && parameters[i] is ['L' or '[', ..])).All(b => b))
+            {
+                rivals.Add(others);
+            }
+        }
+
+        return rivals;
+    }
+
+    /// <summary>A parameter's generic type from the method's signature, when it names no type variable the caller cannot see.</summary>
+    private string? ParameterSignature(string owner, string name, string descriptor, int index)
+    {
+        if (_naming.FindClass(owner)?.Methods.FirstOrDefault(m => m.Name == name && m.Descriptor == descriptor) is not { Signature: { } signature }
+            || JavaGenerics.ParameterSignatures(signature) is not { } generic || index >= generic.Count)
+        {
+            return null;
+        }
+
+        return TypeVariable().IsMatch(generic[index]) ? null : generic[index];
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"(^|[<;\[+\-*])T[^;<>]+;")]
+    private static partial System.Text.RegularExpressions.Regex TypeVariable();
+
+    /// <summary>A cast's type: a descriptor, or a generic signature when the cast says which overload a lambda is for.</summary>
+    private string CastTypeText(string type)
+        => type.Contains('<', StringComparison.Ordinal) && Descriptors.FieldSignature(type, _naming.ClassName) is { } generic ? generic : _naming.Type(type);
+
+    /// <summary>JDK methods declared with varargs, which the JAR cannot say: their arrays are written out as arguments.</summary>
+    private static readonly HashSet<(string Owner, string Name)> JdkVarargs =
+    [
+        ("java/util/Arrays", "asList"), ("java/util/List", "of"), ("java/util/Set", "of"), ("java/util/stream/Stream", "of"),
+        ("java/util/stream/IntStream", "of"), ("java/lang/String", "format"), ("java/lang/String", "join"), ("java/lang/String", "formatted"),
+        ("java/lang/Class", "getMethod"), ("java/lang/Class", "getDeclaredMethod"), ("java/lang/Class", "getConstructor"),
+        ("java/lang/Class", "getDeclaredConstructor"), ("java/lang/reflect/Method", "invoke"), ("java/lang/reflect/Constructor", "newInstance"),
+        ("java/util/Objects", "hash"), ("java/util/EnumSet", "of"), ("java/util/Collections", "addAll"), ("java/text/MessageFormat", "format"),
+        ("java/io/PrintStream", "printf"), ("java/io/PrintStream", "format"), ("java/io/PrintWriter", "printf"), ("java/io/PrintWriter", "format"),
+        ("java/nio/file/Paths", "get"), ("java/nio/file/Path", "of"),
+    ];
+
+    private bool IsVarargs(string owner, string name, string descriptor)
+    {
+        if (_naming.FindClass(owner) is { } file)
+        {
+            return file.Methods.Any(m => m.Name == name && m.Descriptor == descriptor && (m.Access & JvmAccess.TransientOrVarargs) != 0);
+        }
+
+        return JdkVarargs.Contains((owner, name));
     }
 
     /// <summary>JDK classes with methods taking a char beside one taking an int, where the cast picks the overload.</summary>
@@ -936,6 +1192,13 @@ internal sealed class JavaEmitter
     private static IrExpr Argument(JExpr argument, string? parameter)
     {
         var typed = Typed(argument, parameter);
+
+        // A constant only narrows by itself where it is assigned: as an argument, a byte or short one is cast.
+        if (typed is JConst { Type: "B" or "S" } narrow && parameter is "B" or "S")
+        {
+            return new JCast(parameter, narrow with { ConstType = "I" });
+        }
+
         return typed is JExpr { Type: "C" } character && typed is not (JConst or JCast) && parameter is "I" or "J" or "F" or "D"
             ? new JCast(parameter, character)
             : typed;
@@ -952,6 +1215,13 @@ internal sealed class JavaEmitter
 
         string type = _naming.Type(element[dims..]);
         var sb = new StringBuilder($"new {type}");
+        if (array.Elements is { } elements)
+        {
+            string elementType = array.ArrayType[1..];
+            sb.Append(string.Concat(Enumerable.Repeat("[]", dims)));
+            return sb.Append(" {").Append(string.Join(", ", elements.Select(e => Expr(Fit(Typed(e, elementType), elementType), Precedence.Assignment + 1)))).Append('}').ToString();
+        }
+
         for (int i = 0; i < dims; i++)
         {
             sb.Append(i < array.Dimensions.Count ? $"[{Expr(array.Dimensions[i])}]" : "[]");
@@ -960,18 +1230,28 @@ internal sealed class JavaEmitter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Newer javac turns an object into a string before it concatenates — <c>String.valueOf(x) + " "</c> — which the
+    /// source wrote as <c>x + " "</c>. Kept first in line when nothing next to it is a string, where it makes the sum one.
+    /// </summary>
+    private static JExpr Stringified(JExpr argument, bool first)
+        => !first && argument is JCall { Kind: JCallKind.Static, Owner: "java/lang/String", Name: "valueOf", Descriptor: "(Ljava/lang/Object;)Ljava/lang/String;", Args: [{ Type: ['L' or '[', ..] } value] }
+            && value is not JConst
+            ? value
+            : argument;
+
     private (string, Precedence) DynamicText(JDynamic dynamic)
     {
         if (dynamic.Concat is { } parts)
         {
             var pieces = new List<string>();
             bool startsWithString = parts.Count > 0 && parts[0] is string;
-            foreach (var part in parts)
+            for (int p = 0; p < parts.Count; p++)
             {
-                pieces.Add(part switch
+                pieces.Add(parts[p] switch
                 {
                     string text => Quote(text),
-                    int index when index < dynamic.Args.Count => Expr(dynamic.Args[index], Precedence.Additive + 1),
+                    int index when index < dynamic.Args.Count => Expr(Stringified(dynamic.Args[index], p == 0 && !(parts.Count > 1 && parts[1] is string)), Precedence.Additive + 1),
                     _ => "?",
                 });
             }
@@ -986,10 +1266,27 @@ internal sealed class JavaEmitter
 
         if (dynamic.Target is { } target)
         {
-            string owner = target.Owner == _naming.Class.Name ? _naming.ClassName(target.Owner) : _naming.ClassName(target.Owner);
-            string reference = $"{owner}::{(target.Name == "<init>" ? "new" : _naming.MethodName(target.Owner, target.Name, target.Descriptor))}";
-            string capture = dynamic.Args.Count == 0 ? string.Empty : $" /* captures {string.Join(", ", dynamic.Args.Select(a => Expr(a)))} */";
-            return ($"({_naming.Type(dynamic.Type)}) {reference}{capture}", Precedence.Cast);
+            if (_naming.Scope?.Lambda(dynamic, _level) is { } lambda)
+            {
+                return (lambda, Precedence.Primary);
+            }
+
+            string method = target.Name == "<init>" ? "new" : _naming.MethodName(target.Owner, target.Name, target.Descriptor);
+
+            // A virtual or interface method with its receiver captured is bound to it: receiver::name.
+            if (dynamic.TargetKind is 5 or 7 or 9 && dynamic.Args.Count == 1)
+            {
+                return ($"{Expr(dynamic.Args[0], Precedence.Primary)}::{method}", Precedence.Primary);
+            }
+
+            if (dynamic.Args.Count == 0)
+            {
+                return ($"{_naming.ClassName(target.Owner)}::{method}", Precedence.Primary);
+            }
+
+            string owner = _naming.ClassName(target.Owner);
+            string capture = $" /* captures {string.Join(", ", dynamic.Args.Select(a => Expr(a)))} */";
+            return ($"({_naming.Type(dynamic.Type)}) {owner}::{method}{capture}", Precedence.Cast);
         }
 
         string bootstrap = dynamic.Bootstrap is null ? string.Empty : $" /* {dynamic.Bootstrap.Replace('/', '.')} */";
@@ -1091,12 +1388,12 @@ internal sealed class JavaEmitter
         return (text, text.StartsWith('-') ? Precedence.Unary : Precedence.Primary);
     }
 
-    private static string FloatText(float f) => float.IsNaN(f) ? "Float.NaN"
+    internal static string FloatText(float f) => float.IsNaN(f) ? "Float.NaN"
         : float.IsPositiveInfinity(f) ? "Float.POSITIVE_INFINITY"
         : float.IsNegativeInfinity(f) ? "Float.NEGATIVE_INFINITY"
         : f.ToString("R", CultureInfo.InvariantCulture) + "f";
 
-    private static string DoubleText(double d)
+    internal static string DoubleText(double d)
     {
         if (double.IsNaN(d))
         {
@@ -1111,6 +1408,8 @@ internal sealed class JavaEmitter
         string text = d.ToString("R", CultureInfo.InvariantCulture);
         return text.Contains('.', StringComparison.Ordinal) || text.Contains('E', StringComparison.Ordinal) ? text : text + ".0";
     }
+
+    internal static string CharText(int value) => CharLiteral(value);
 
     private static string CharLiteral(int value) => value switch
     {
@@ -1136,7 +1435,8 @@ internal sealed class JavaEmitter
                 '\n' => "\\n",
                 '\r' => "\\r",
                 '\t' => "\\t",
-                < ' ' or (>= '\u007F' and < ' ') => $"\\u{(int)c:X4}",
+                // Control characters, and each half of a surrogate pair (javac joins the escapes back), as escapes.
+                < ' ' or (>= '\u007F' and < '\u00A0') or (>= '\uD800' and <= '\uDFFF') => $"\\u{(int)c:X4}",
                 _ => c.ToString(),
             });
         }
@@ -1245,12 +1545,68 @@ internal sealed class JavaEmitter
 
         int first = items.FindIndex(i => i is CRaw);
         if (method.IsConstructor && first >= 0
-            && items[first] is CRaw { Statement: JExprStmt { Expression: JCall { Name: "<init>", Owner: "java/lang/Object", Args.Count: 0, Receiver: JLocal { Kind: JLocalKind.This } } } })
+            && items[first] is CRaw { Statement: JExprStmt { Expression: JCall { Name: "<init>", Args.Count: 0, Receiver: JLocal { Kind: JLocalKind.This } } call } }
+            && call.Owner != _naming.Class.Name)
         {
             items.RemoveAt(first);
         }
 
         return new CSeq(items);
+    }
+
+    /// <summary>
+    /// <c>catch (Throwable ex2) { t = ex2; … }</c> is <c>catch (Throwable t) { … }</c> when <c>t</c> lives only in
+    /// such handlers: javac gave several clauses' variables one slot and one name, so no handler's own could be
+    /// the slot, yet each handler sets it before reading it, and nothing outside them reads it at all.
+    /// </summary>
+    private static CStmt CatchVariables(CStmt body, LiftedMethod lifted)
+    {
+        var total = JavaTree.CountLocals(body);
+        // By the handler's own variable, which names it: the rewrite below rebuilds the handlers it walks.
+        var candidates = new Dictionary<string, (JCatch Handler, string Name)>(StringComparer.Ordinal);
+        foreach (var handler in JavaTree.Descendants(body).OfType<JTry>().SelectMany(t => t.Catches))
+        {
+            if (handler is { Variable: { } caught, CatchType: var catchType }
+                && JavaTree.Items(handler.Body).FirstOrDefault() is CRaw { Statement: IrAssign { Dst: JLocal target, Src: JLocal source } }
+                && source.Name == caught && target.Name != caught && total.GetValueOrDefault(caught) == 1
+                && target.Type == (catchType is null ? "Ljava/lang/Throwable;" : $"L{catchType};"))
+            {
+                candidates[caught] = (handler, target.Name);
+            }
+        }
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in candidates.Values.GroupBy(c => c.Name, StringComparer.Ordinal))
+        {
+            // Handlers that already call their variable so keep their mentions to themselves as well.
+            int own = JavaTree.Descendants(body).OfType<JTry>().SelectMany(t => t.Catches).Where(c => c.Variable == group.Key)
+                .Sum(c => JavaTree.CountLocals(c.Body).GetValueOrDefault(group.Key));
+            if (own + group.Sum(c => JavaTree.CountLocals(c.Handler.Body).GetValueOrDefault(group.Key)) == total.GetValueOrDefault(group.Key))
+            {
+                names.Add(group.Key);
+                lifted.Locals.Caught(group.Key);
+            }
+        }
+
+        if (names.Count == 0)
+        {
+            return body;
+        }
+
+        bool Renamed(JCatch c, out string name)
+        {
+            name = c.Variable is { } v && candidates.TryGetValue(v, out var found) && names.Contains(found.Name) ? found.Name : string.Empty;
+            return name.Length > 0;
+        }
+
+        return JavaTree.Rewrite(body, statement => statement is JTry attempt && attempt.Catches.Any(c => Renamed(c, out _))
+            ? attempt with
+            {
+                Catches = attempt.Catches.Select(c => Renamed(c, out string name)
+                    ? c with { Variable = name, Body = JavaTree.Sequence(JavaTree.Items(c.Body).Skip(1)) }
+                    : c).ToList(),
+            }
+            : statement);
     }
 
     /// <summary>

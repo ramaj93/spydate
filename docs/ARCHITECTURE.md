@@ -384,11 +384,18 @@ See `DECOMPILER-DESIGN.md`. Summary:
   `JavaStructurer` (dominator-tree, labelled blocks, no `goto`) structures the
   method; `JavaShaping` removes redundant jumps and shapes loops, ifs and
   conditionals, with `JavaSugar` for `synchronized`/`finally`; `JavaDeclarations`
-  places each local's declaration; `JavaEmitter` prints Java, with `JavaGenerics`
-  for generic types and casts. An irreducible method falls back to the native
-  `Structurer`. `JavaDecompiler` runs it on a large-stack thread. See DECISIONS,
-  "Java is decompiled in-house on the native IR" and "Java is structured without
-  goto, and its types are recovered".
+  places each local's declaration; `JavaShortcuts` rebuilds for-each, string
+  switches, switch expressions and `assert`; `JavaEmitter` prints Java, with
+  `JavaGenerics` for generic types and casts and `JavaNaming` for names. An
+  irreducible method falls back to the native `Structurer`. `JavaClassWriter`
+  decompiles a class's methods first, then writes the class as a whole: enum
+  constants, field initialisers, records, and nested, anonymous and local classes
+  and lambdas in place through `IJavaScope`; `JavaImports` resolves the class-name
+  tokens into imports once the text is done. Annotations come from
+  `Core/Jvm/JvmAnnotations`. `JavaDecompiler` runs it on a large-stack thread. See
+  DECISIONS, "Java is decompiled in-house on the native IR", "Java is structured
+  without goto, and its types are recovered" and "Java's shortcuts and nested
+  classes are written the way the source wrote them".
 
 ## 5b. User annotations and the project file
 

@@ -1245,3 +1245,61 @@ minutes the old pipeline took. 6,308 of their methods are still shown with gotos
 state machines — a resume path that re-enters a try at code that can throw (a Java try cannot have two ways in
 without duplicating its handler), or an irreducible loop. A single JAR costs about 1.5× what it did (jd-gui
 6 s → 10 s): more passes, for Java that compiles. The fixture round-trips with and without debug information.
+
+## Java's shortcuts and nested classes are written the way the source wrote them
+
+Stages 3 and 4 of the fidelity work. javac compiles the language's shortcuts into plain code and its nested classes
+into classes of their own; the Java view now puts both back. The measure is still the compiler: the fixtures
+`Sugar.java` (Java 21) and `Legacy.java` (`--release 8`, before nestmates) round-trip beside `Shapes.java`, with and
+without debug information, and every top-level class of commons-lang3 is decompiled and compiled again together.
+
+**The class is decompiled as a whole before any of it is printed** (`JavaClassWriter`). Every method is lifted
+and structured first, because what a member looks like depends on the others: `<clinit>` holds the enum
+constants and the static field initialisers (a prefix of it that only stores to this class's fields), every
+constructor holds the instance initialisers (the prefix after `super(...)` they all share), a record's canonical
+constructor and accessors are the ones the compiler would write, and a synthetic method is either a lambda body, an
+accessor, or a bridge. Methods the compiler made are not printed: synthetic, bridge, an enum's `values` and
+`valueOf`, a record's generated members, a lambda body written in place. Whatever could not be written in place —
+a lambda that captures something other than locals, an accessor whose parameters are not each used once — is
+printed after all, so the text still compiles.
+
+**Nested classes are written where the source had them.** A constructor's parameters are classified once: the
+outer instance (the one stored to `this$0`), the captured locals (stored to `val$x`), an enum's name and
+ordinal, and javac 8's access-constructor marker (a trailing parameter of an anonymous or compiler-made class,
+always passed `null`). None of them is printed, at `new`, `super(...)` or `this(...)`; `this$0.x` reads
+`Outer.this.x`, `val$x` reads `x`. An anonymous class is written at its `new`, its constructor as an instance
+initialiser; a local class is declared before the first statement that creates it; an inner class created with
+an explicit outer is `outer.new Inner()`, with the null check javac puts in front of it gone. javac 8's accessors
+(`access$000`) are inlined as the read, write or call they wrap. An enum switch through a `$SwitchMap$` class is
+read back through that class's `<clinit>`, and the class is not printed.
+
+**Class names are tokens until the class is done** (`JavaImports`). The emitter writes each class as a token;
+when the whole text exists, each resolves to a simple name — this class and its members, `java.lang`, the package,
+then one import per simple name — or its qualified name. A member class named in its own outer class's header
+(`extends Base<Outer.Item>`) goes through the outer name, since the header is not in the body's scope.
+
+**Shortcuts are recognised on the structured tree** (`JavaShortcuts`, `JavaSugar`): for-each over an array (the
+three compiler variables, each used exactly as javac uses them) and over an `Iterable` (only when the element's
+cast shows a type argument the printed iterable has too); string switches (the `hashCode` switch and the index
+switch after it); switch expressions (javac's arms storing to one variable, `yield` for multi-statement arms);
+try-with-resources in javac 7, 9 and 11 shapes; `assert`; `x -> new T[x]` as `T[]::new`; lambdas and method
+references with the functional type the call site needs, folded only into argument, assignment or return
+positions; array initialisers; annotations from the class file, with their defaults.
+
+**Where the source had to be explicit, so is the text.** A `null` or a lambda passed to a method with another
+overload of the same arity that could take it is cast to the parameter's type (a lambda only with the full
+generic type from the signature, or its parameters would lose theirs). A `byte` or `short` constant argument is
+cast. An empty varargs array is dropped unless a shorter overload would then be called. A static field read in
+an initialiser of a field declared before it is qualified with the class, which Java requires even inside a
+lambda. A `?:` of 0 and 1 compared with a boolean compares booleans. Statements after one that never falls
+through are dropped, since Java rejects unreachable code.
+
+**Fixed on the way.** A jump before a trailing jump that stays was treated as redundant when it was not: a
+`continue` inside a try whose `goto` javac leaves outside the protected range was removed, and the loop went on
+to return. Handlers that javac gives one slot and one name (`catch (Throwable t)` three times) each declare it
+again. A caught exception nothing reads is its own variable, not the next store's, and `x = x.iterator()` in a
+slot a shrinker reused is two variables, not an update of one.
+
+**Measured.** commons-lang3: 194 of 231 top-level classes compile again as decompiled; the 96 errors in the other
+37 are all generic type inference — `Object` where the source had `T`, `Object[]` for `T[]` — which is stage 5.
+jd-gui cannot be measured this way: its obfuscated names overload by return type and clash with packages.

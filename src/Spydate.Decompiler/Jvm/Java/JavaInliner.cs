@@ -31,7 +31,9 @@ internal static class JavaRewrite
         JArrayLength l => l with { Array = R(l.Array, replace) },
         JCall c => c with { Receiver = c.Receiver is null ? null : R(c.Receiver, replace), Args = c.Args.Select(x => R(x, replace)).ToList() },
         JNew n => n with { Args = n.Args.Select(x => R(x, replace)).ToList() },
-        JNewArray n => n with { Dimensions = n.Dimensions.Select(x => R(x, replace)).ToList() },
+        JNewArray n => n with { Dimensions = n.Dimensions.Select(x => R(x, replace)).ToList(), Elements = n.Elements?.Select(x => R(x, replace)).ToList() },
+        JAssignExpr { Target: JLocal } a => a with { Value = R(a.Value, replace) },
+        JAssignExpr a => a with { Target = R(a.Target, replace), Value = R(a.Value, replace) },
         JBinary b => b with { Left = R(b.Left, replace), Right = R(b.Right, replace) },
         JNegate n => n with { Operand = R(n.Operand, replace) },
         JCast c => c with { Operand = R(c.Operand, replace) },
@@ -55,6 +57,7 @@ internal static class JavaRewrite
         JExprStmt e => e with { Expression = R(e.Expression, replace) },
         IrReturn { Value: { } v } r => r with { Value = Replace(v, replace) },
         JThrow t => t with { Exception = R(t.Exception, replace) },
+        JYield y => y with { Value = R(y.Value, replace) },
         JMonitor m => m with { Lock = R(m.Lock, replace) },
         IrBranch b => b with { Condition = Replace(b.Condition, replace) },
         IrSwitch s => s with { Value = Replace(s.Value, replace) },
@@ -74,6 +77,7 @@ internal static class JavaRewrite
         JExprStmt e => [e.Expression],
         IrReturn { Value: { } v } => [v],
         JThrow t => [t.Exception],
+        JYield y => [y.Value],
         JMonitor m => [m.Lock],
         IrBranch b => [b.Condition],
         IrSwitch s => [s.Value],
@@ -190,13 +194,20 @@ internal static class JavaInliner
         CIf conditional => [new IrBranch(conditional.Condition, 0, 0)],
         JSwitch dispatch => [new IrSwitch(dispatch.Value, [])],
         JSynchronized locked => [new JMonitor(true, locked.Lock)],
-        JLoop loop => new IrStmt?[] { loop.Init, loop.Condition is null ? null : new IrBranch(loop.Condition, 0, 0), loop.Update }.OfType<IrStmt>(),
+        JLoop loop => new IrStmt?[]
+        {
+            loop.Init, loop.Condition is null ? null : new IrBranch(loop.Condition, 0, 0), loop.Update,
+            loop.ForEach is { } each ? new IrSwitch(each.Source, []) : null,
+        }.OfType<IrStmt>(),
+        JTry attempt => attempt.Resources.Select(r => (IrStmt)new IrAssign(r.Variable, r.Init)),
+        JAssert assertion => assertion.Message is null ? [new IrBranch(assertion.Condition, 0, 0)] : [new IrBranch(assertion.Condition, 0, 0), new JExprStmt(assertion.Message)],
         _ => [],
     };
 
     private static CStmt Sequence(CSeq seq, Dictionary<string, int> uses, Func<JLocal, bool> foldable)
     {
         var items = seq.Items.ToList();
+        ArrayInitializers(items, uses);
         CopyForward(items, uses);
         var views = items.Select(View).ToList();
         for (int i = 0; i < views.Count; i++)
@@ -279,6 +290,106 @@ internal static class JavaInliner
         }
     }
 
+    /// <summary>
+    /// <c>t = new int[3]; t[0] = a; t[1] = b; t[2] = c; use(t)</c> — javac's <c>new int[] {a, b, c}</c>, the array kept on
+    /// the stack while each element is stored — is that expression again, in the one statement that uses it. The
+    /// stores must follow each other with rising indices (javac skips none, but a gap reads as the default), and
+    /// nothing that statement evaluates before the array may have an effect the elements could see.
+    /// </summary>
+    private static void ArrayInitializers(List<CStmt> items, Dictionary<string, int> uses)
+    {
+        for (int i = items.Count - 1; i >= 0; i--)
+        {
+            if (items[i] is not CRaw { Statement: IrAssign { Dst: JLocal { Kind: JLocalKind.Temp } array, Src: JNewArray { Dimensions: [JConst { Value: int length }], Elements: null } created } }
+                || length < 0 || length > MaxElements)
+            {
+                continue;
+            }
+
+            // Between the allocation and the first store, anything not about the array — moving an allocation later changes nothing.
+            int first = i + 1;
+            while (first < items.Count && Reads(items[first], array.Name) == 0)
+            {
+                first++;
+            }
+
+            var values = new List<JExpr>();
+            int next = first;
+            int index = 0;
+            while (next < items.Count && items[next] is CRaw { Statement: IrAssign { Dst: JArrayElement { Array: JLocal target, Index: JConst { Value: int at } }, Src: JExpr value } }
+                   && target.Name == array.Name && at >= index && at < length && Reads(items[next], array.Name) == 1)
+            {
+                string elementType = created.ArrayType[1..];
+                while (index < at)
+                {
+                    values.Add(DefaultValue(elementType));
+                    index++;
+                }
+
+                values.Add(value);
+                index++;
+                next++;
+            }
+
+            if (next >= items.Count || next == first || Reads(items[next], array.Name) != 1 || uses.GetValueOrDefault(array.Name) != values.Count(v => v is not JConst { ConstType: "default" }) + 1)
+            {
+                continue;
+            }
+
+            while (index < length)
+            {
+                values.Add(DefaultValue(created.ArrayType[1..]));
+                index++;
+            }
+
+            bool effects = values.Any(v => JavaRewrite.PostOrder(v).Any(e => e is JCall or JNew or JDynamic));
+            if (effects && EffectBefore(items[next], array.Name))
+            {
+                continue;
+            }
+
+            var initialised = created with { Elements = values.Select(v => v is JConst { ConstType: "default" } d ? d with { ConstType = created.ArrayType[1..] } : v).ToList() };
+            if (initialised.Depth > MaxDepth)
+            {
+                continue;
+            }
+
+            items[next] = JavaTree.ReplaceLocals(items[next], l => l.Name == array.Name ? initialised : null);
+            items.RemoveRange(first, next - first);
+            items.RemoveAt(i);
+            uses[array.Name] = 0;
+        }
+    }
+
+    private const int MaxElements = 4096;
+
+    /// <summary>The value an element nobody stored keeps; marked so it is not counted as a store.</summary>
+    private static JConst DefaultValue(string type) => type switch
+    {
+        ['L' or '[', ..] => JConst.Null with { ConstType = "default" },
+        "J" => new JConst(0L, "default"),
+        "F" => new JConst(0f, "default"),
+        "D" => new JConst(0d, "default"),
+        _ => new JConst(0, "default"),
+    };
+
+    /// <summary>Whether the statement evaluates a call before it reads the local.</summary>
+    private static bool EffectBefore(CStmt statement, string name)
+    {
+        foreach (var node in JavaTree.Expressions(statement).SelectMany(JavaRewrite.PostOrder))
+        {
+            switch (node)
+            {
+                case JLocal l when l.Name == name:
+                    return false;
+                case JCall or JNew or JDynamic:
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>How many times a statement, and everything in it, reads a local.</summary>
     private static int Reads(CStmt statement, string name)
         => JavaTree.Descendants(statement).SelectMany(Evaluated).SelectMany(JavaRewrite.Evaluated).SelectMany(JavaRewrite.PostOrder)
@@ -295,6 +406,10 @@ internal static class JavaInliner
         CIf conditional => new IrBranch(conditional.Condition, 0, 0),
         JSwitch dispatch => new IrSwitch(dispatch.Value, []),
         JSynchronized locked => new JMonitor(true, locked.Lock),
+
+        // A for-each's source is evaluated once, before the loop: a value folds into it like into any statement.
+        JLoop { ForEach: { } each } => new IrSwitch(each.Source, []),
+        JTry { Resources: [var only] } => new IrAssign(only.Variable, only.Init),
         _ => new IrComment("barrier"),
     };
 
@@ -304,6 +419,8 @@ internal static class JavaInliner
         (CIf conditional, IrBranch branch) => conditional with { Condition = branch.Condition },
         (JSwitch dispatch, IrSwitch value) => dispatch with { Value = value.Value },
         (JSynchronized locked, JMonitor monitor) => locked with { Lock = monitor.Lock },
+        (JLoop { ForEach: { } each } loop, IrSwitch source) => loop with { ForEach = (each.Variable, source.Value) },
+        (JTry { Resources: [var only] } attempt, IrAssign resource) => attempt with { Resources = [(only.Variable, resource.Src)] },
         _ => item,
     };
 
@@ -382,7 +499,8 @@ internal static class JavaInliner
         for (int j = index - 1; j >= 0; j--)
         {
             if (statements[j] is IrAssign { Dst: JLocal temp, Src: JExpr value } && foldable(temp)
-                && uses.GetValueOrDefault(temp.Name) == 1 && order.Contains(temp.Name) && !afterEffect.Contains(temp.Name))
+                && uses.GetValueOrDefault(temp.Name) == 1 && order.Contains(temp.Name) && !afterEffect.Contains(temp.Name)
+                && (value is not JDynamic { Target: not null } || TargetTyped(user, temp.Name)))
             {
                 run.Insert(0, (j, temp, value));
                 continue;
@@ -418,6 +536,26 @@ internal static class JavaInliner
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Whether a local is read where Java lets a lambda or method reference stand: stored, returned, or passed as an
+    /// argument — places a type is expected. <c>f.apply(x)</c> cannot become <c>(x -&gt; y).apply(x)</c>.
+    /// </summary>
+    private static bool TargetTyped(IrStmt user, string name)
+    {
+        bool IsIt(IrExpr e) => e is JLocal l && l.Name == name;
+        if (user is IrAssign { Src: var src } && IsIt(src) || user is IrReturn { Value: { } value } && IsIt(value))
+        {
+            return true;
+        }
+
+        return JavaRewrite.Evaluated(user).SelectMany(JavaRewrite.PostOrder).Any(e => e switch
+        {
+            JCall call => call.Args.Any(IsIt),
+            JNew created => created.Args.Any(IsIt),
+            _ => false,
+        });
     }
 
     /// <summary>A temporary nothing reads is dropped, or kept as a statement when evaluating it did something.</summary>

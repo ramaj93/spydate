@@ -69,7 +69,7 @@ internal sealed class JvmLifter
     private IrBlock _block = null!;
     private int _pc;
 
-    private JvmLifter(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlyDictionary<(int, int), JExpr>? carried)
+    private JvmLifter(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlyDictionary<(int, int), JExpr>? carried, IReadOnlySet<string>? reserved)
     {
         _carried = carried;
         _class = file;
@@ -77,16 +77,17 @@ internal sealed class JvmLifter
         _code = code;
         _pool = file.Pool;
         _instructions = Bytecode.Decode(code.Code.Span);
-        _locals = new LocalNamer(file, method, code);
+        _locals = new LocalNamer(file, method, code, reserved);
         _function = new IrFunction(0, method.Name, 32);
     }
 
-    public static LiftedMethod Lift(ClassFile file, JvmMethod method, CodeAttribute code)
+    /// <param name="reserved">Names the method's locals must not take — a lambda's, those of the method it is written in.</param>
+    public static LiftedMethod Lift(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlySet<string>? reserved = null)
     {
         // Again while a join is handed values: each pass learns which slots every path fills with the same local or
         // constant, and the next carries those as they are instead of through a variable per path — which can make
         // the paths into a later join agree too.
-        var lifter = new JvmLifter(file, method, code, carried: null);
+        var lifter = new JvmLifter(file, method, code, carried: null, reserved);
         lifter.Run();
         for (int pass = 0; pass < MaxPasses; pass++)
         {
@@ -96,7 +97,7 @@ internal sealed class JvmLifter
                 break;
             }
 
-            lifter = new JvmLifter(file, method, code, carried);
+            lifter = new JvmLifter(file, method, code, carried, reserved);
             lifter.Run();
         }
 
@@ -1084,9 +1085,9 @@ internal sealed class JvmLifter
             }
             else if (bootstrapOwner is "java/lang/invoke/LambdaMetafactory.metafactory" or "java/lang/invoke/LambdaMetafactory.altMetafactory"
                      && bootstrap.Arguments.Count > 1
-                     && _pool.Get(bootstrap.Arguments[1]) is { Tag: ConstantTag.MethodHandle, B: var body } && _pool.Member(body) is { } implementation)
+                     && _pool.Get(bootstrap.Arguments[1]) is { Tag: ConstantTag.MethodHandle, A: var kind, B: var body } && _pool.Member(body) is { } implementation)
             {
-                dynamic = dynamic with { Target = (implementation.Owner, implementation.Name, implementation.Descriptor) };
+                dynamic = dynamic with { Target = (implementation.Owner, implementation.Name, implementation.Descriptor), TargetKind = kind };
             }
             else
             {

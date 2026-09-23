@@ -30,7 +30,66 @@ internal static class JavaLocals
             SplitWebs(lifted, graph, name);
         }
 
+        Retype(lifted);
         SmallInts(lifted, JCall.ReturnType(method.Descriptor));
+    }
+
+    /// <summary>
+    /// Untabled reference locals typed again from what is stored in them, now that every web has its own name and
+    /// type: a web split off late may have been typed from an array read whose array had not been split yet.
+    /// </summary>
+    private static void Retype(LiftedMethod lifted)
+    {
+        for (int round = 0; round < 3; round++)
+        {
+            var stores = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            var current = new Dictionary<string, JLocal>(StringComparer.Ordinal);
+            foreach (var statement in lifted.Function.AllStatements)
+            {
+                if (statement is IrAssign { Dst: JLocal { Kind: JLocalKind.Local, Type: ['L' or '[', ..] } local, Src: JExpr value } && lifted.Locals.IsUntabled(local.Name))
+                {
+                    current[local.Name] = local;
+                    if (!stores.TryGetValue(local.Name, out var types))
+                    {
+                        types = [];
+                        stores[local.Name] = types;
+                    }
+
+                    if (value is not JConst { Value: null } && value.Type is { } type)
+                    {
+                        types.Add(type);
+                    }
+                }
+            }
+
+            var retyped = new Dictionary<string, JLocal>(StringComparer.Ordinal);
+            foreach (var (name, types) in stores)
+            {
+                if (types.Count == 1 && types.First() is ['L' or '[', ..] only && only != current[name].Type)
+                {
+                    retyped[name] = lifted.Locals.Retype(current[name], only);
+                }
+            }
+
+            if (retyped.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var block in lifted.Function.Blocks)
+            {
+                for (int s = 0; s < block.Statements.Count; s++)
+                {
+                    var statement = JavaRewrite.Replace(block.Statements[s], l => retyped.GetValueOrDefault(l.Name));
+                    if (statement is IrAssign { Dst: JLocal target } assign && retyped.TryGetValue(target.Name, out var local))
+                    {
+                        statement = assign with { Dst = local };
+                    }
+
+                    block.Statements[s] = statement;
+                }
+            }
+        }
     }
 
     // --- webs ------------------------------------------------------------------------------------
@@ -122,6 +181,12 @@ internal static class JavaLocals
             return names;
         }
     }
+
+    /// <summary>A store to a reference local of a value of another type than the one it reads from it.</summary>
+    private static bool Retyped(IrStmt statement, string name)
+        => statement is IrAssign { Dst: JLocal { Type: ['L' or '[', ..] }, Src: JExpr { Type: ['L' or '[', ..] and var stored } value }
+           && JavaRewrite.PostOrder(value).OfType<JLocal>().FirstOrDefault(l => l.Name == name) is { Type: ['L' or '[', ..] and var read }
+           && read != stored && read != "Ljava/lang/Object;";
 
     private static void SplitWebs(LiftedMethod lifted, Graph graph, string name)
     {
@@ -262,8 +327,9 @@ internal static class JavaLocals
 
             if (graph.Defined[b][s] == name)
             {
-                // x = x + 2 updates one variable: the store joins the variable it read.
-                if (readWeb.TryGetValue((b, s), out int updated))
+                // x = x + 2 updates one variable: the store joins the variable it read — unless what it stores is
+                // another kind of thing, x = x.iterator() in a slot a shrinker reused.
+                if (readWeb.TryGetValue((b, s), out int updated) && !Retyped(blocks[b].Statements[s], name))
                 {
                     parent[Find(siteIndex[(b, s)])] = Find(updated);
                 }
@@ -273,10 +339,16 @@ internal static class JavaLocals
         }
 
         // A store nothing reads (javac's `int r = 0` before every path assigns r again) is the same variable as the
-        // next store of the same kind, not a variable of its own.
+        // next store of the same kind, not a variable of its own — unless it stores a caught exception: that is a
+        // catch clause's variable, which nothing after the handler can see.
         var order = Enumerable.Range(0, sites.Count).OrderBy(d => blocks[sites[d].Block].StartVa).ThenBy(d => sites[d].Index).ToList();
         foreach (var dead in Enumerable.Range(0, total).GroupBy(Find).Where(w => !w.Any(read.Contains) && !w.Contains(entryDef)).ToList())
         {
+            if (dead.Any(d => blocks[sites[d].Block].Statements[sites[d].Index] is IrAssign { Src: JCaught }))
+            {
+                continue;
+            }
+
             int last = dead.Max(d => order.IndexOf(d));
             var kind = Category(blocks[sites[dead.First()].Block].Statements[sites[dead.First()].Index]);
             int next = order.Skip(last + 1).FirstOrDefault(d => read.Contains(d) && Category(blocks[sites[d].Block].Statements[sites[d].Index]) == kind, -1);

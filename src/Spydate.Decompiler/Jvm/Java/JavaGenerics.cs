@@ -133,6 +133,36 @@ internal static class JavaGenerics
         ["java/lang/ref/SoftReference"] = ["java/lang/ref/Reference"],
     };
 
+    /// <summary>
+    /// The generic type of what an expression reads, as far as the class files say: a local's or parameter's, a field
+    /// of this JAR's, a method of this JAR's that returns a concrete one, and a map's entry, key and value views.
+    /// </summary>
+    public static string? GenericOf(JExpr expression, LiftedMethod lifted, Func<string, ClassFile?> findClass)
+    {
+        switch (expression)
+        {
+            case JLocal local:
+                return lifted.Locals.Signatures.GetValueOrDefault(local.Name);
+            case JField field:
+                return findClass(field.Owner)?.Fields.FirstOrDefault(f => f.Name == field.Name && f.Descriptor == field.FieldType)?.Signature is { } s
+                       && IsParameterized(s) ? s : null;
+            case JCall { Receiver: { } receiver, Args.Count: 0, Name: "entrySet" or "keySet" or "values" } call
+                when GenericOf(receiver, lifted, findClass) is { } map && TypeArguments(map) is [var key, var value]
+                     && ClassOf(map) is { } mapClass && (mapClass == "java/util/Map" || Supertypes.GetValueOrDefault(mapClass)?.Contains("java/util/Map") == true):
+                return call.Name switch
+                {
+                    "entrySet" => $"Ljava/util/Set<Ljava/util/Map$Entry<{key}{value}>;>;",
+                    "keySet" => $"Ljava/util/Set<{key}>;",
+                    _ => $"Ljava/util/Collection<{value}>;",
+                };
+            case JCall call when findClass(call.Owner)?.Methods.FirstOrDefault(m => m.Name == call.Name && m.Descriptor == call.Descriptor)?.Signature is { } signature
+                                 && ReturnSignature(signature) is { } returned && IsParameterized(returned) && !returned.Contains(";T", StringComparison.Ordinal) && !returned.Contains("<T", StringComparison.Ordinal):
+                return returned;
+            default:
+                return null;
+        }
+    }
+
     public static bool IsGenericClass(string internalName, Func<string, ClassFile?> findClass)
         => GenericClasses.Contains(internalName)
            || (findClass(internalName)?.Signature is { } signature && signature.StartsWith('<'));

@@ -328,6 +328,45 @@ public class Shapes {
         return r;
     }
 
+    // A continue from inside a try: javac leaves the jump out of the protected range, so the try has two ways out.
+    public static int firstParsed(String[] texts, boolean skipNegative) {
+        for (int i = 0; i < texts.length; i++) {
+            try {
+                int value = Integer.parseInt(texts[i]);
+                if (value < 0) {
+                    if (skipNegative) {
+                        continue;
+                    }
+                    value = -value;
+                }
+                return value;
+            } catch (NumberFormatException ignored) {
+                // next
+            }
+        }
+        return -1;
+    }
+
+    // Handlers that all call their exception t, one of them copied to a variable outside it.
+    public static String firstFailure(Runnable first, Runnable[] rest) {
+        Throwable seen = null;
+        try {
+            first.run();
+        } catch (RuntimeException t) {
+            seen = t;
+        }
+        for (Runnable r : rest) {
+            try {
+                r.run();
+            } catch (RuntimeException t) {
+                if (seen == null) {
+                    seen = t;
+                }
+            }
+        }
+        return seen == null ? "none" : seen.getMessage();
+    }
+
     public static List<Integer> evens(int n) {
         List<Integer> out = new ArrayList<>();
         for (int i = 0; i < n; i++) {
@@ -371,6 +410,13 @@ public class Shapes {
         out.append(joinWords(words)).append(histogram("mississippi")).append('\n');
         out.append(mixedWidths(7, 1L << 40, 2.75)).append(' ').append(whileWithAndOr(new int[] {1, 2, 9, 10, 11}, 5)).append('\n');
         out.append(nestedFinally(2)).append(nestedFinally(0)).append(evens(7)).append('\n');
+        out.append(firstParsed(new String[] {"x", "-4", "9"}, true)).append(' ').append(firstParsed(new String[] {"-4", "9"}, false))
+            .append(' ').append(firstParsed(new String[] {"y"}, true)).append('\n');
+        Runnable fine = () -> { };
+        Runnable bad = () -> {
+            throw new IllegalStateException("bad");
+        };
+        out.append(firstFailure(fine, new Runnable[] {fine, bad})).append(' ').append(firstFailure(fine, new Runnable[0])).append('\n');
         System.out.print(out);
     }
 }

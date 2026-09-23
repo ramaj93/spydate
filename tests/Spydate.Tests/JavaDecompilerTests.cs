@@ -136,8 +136,9 @@ public sealed class JavaDecompilerTests
 
         Assert.Contains("return new StringBuilder().append(\"Hello, \").append(who).toString();", java, StringComparison.Ordinal);
         Assert.Contains("System.out.println(new Greeter(\"world\").greet(\"you\"));", java, StringComparison.Ordinal);
-        Assert.Contains("((Runnable) Greeter::lambda$main$0).run();", java, StringComparison.Ordinal);
-        Assert.Contains("Runtime.getRuntime().exec(\"calc.exe\");", java, StringComparison.Ordinal);
+        // The lambda's body is written where it is created, cast to its interface where it is called in place.
+        Assert.Contains("((Runnable) () -> Runtime.getRuntime().exec(\"calc.exe\")).run();", java, StringComparison.Ordinal);
+        Assert.DoesNotContain("lambda$main$0", java, StringComparison.Ordinal);
         Assert.Contains("case 0:", java, StringComparison.Ordinal);
         Assert.Contains("return 2;", java, StringComparison.Ordinal);
     }
@@ -151,7 +152,8 @@ public sealed class JavaDecompilerTests
         var reading = Reading(names, ("com/example/Greeter.class", JarTests.Greeter()));
         string java = Java(reading, "com/example/Greeter");
 
-        Assert.Contains("Greeter::launchCalculator", java, StringComparison.Ordinal);
+        // A lambda the project named stays the method it named, referenced by that name.
+        Assert.Contains("((Runnable) Greeter::launchCalculator).run();", java, StringComparison.Ordinal);
         Assert.Contains(".salute(\"you\")", java, StringComparison.Ordinal);
         Assert.Contains("public String salute(String who) {", java, StringComparison.Ordinal);
         Assert.Contains("// renamed: salute", java, StringComparison.Ordinal);
