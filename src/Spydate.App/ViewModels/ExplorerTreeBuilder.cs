@@ -225,14 +225,26 @@ public static class ExplorerTreeBuilder
         // what a node opens depends on which reading it is.
         if (binary.Bytecode is { } reading)
         {
-            var namespaces = root.Add(new ExplorerNodeViewModel("Namespaces", SymbolRegular.Braces24, reading is DotNetReading ? new ManagedAssemblyTarget() : null, reading.Namespaces.Count.ToString()));
+            // A launcher's appended JAR is the program the launcher starts: its packages, and its main, sit here too.
+            bool embeddedJar = reading is JvmReading;
+            if (reading is JvmReading { MainType: { } mainType, EntryPoint: { } main })
+            {
+                root.Add(new ExplorerNodeViewModel("Java main", SymbolRegular.Play24, new ReadingTarget(mainType, main), $"{mainType.FullName}.{main.Name}"));
+            }
+
+            var namespaces = root.Add(new ExplorerNodeViewModel(
+                embeddedJar ? "Java packages" : "Namespaces",
+                SymbolRegular.Braces24,
+                reading is DotNetReading ? new ManagedAssemblyTarget() : null,
+                embeddedJar ? $"{reading.Namespaces.Count} · embedded JAR" : reading.Namespaces.Count.ToString()));
             namespaces.IsExpanded = true;
             var targets = TargetsFor(reading);
+            var names = NamesFor(binary);
             foreach (var ns in reading.Namespaces)
             {
                 var n = ns;
                 var nsNode = namespaces.Add(new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString()));
-                nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets));
+                nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets, names));
             }
         }
 

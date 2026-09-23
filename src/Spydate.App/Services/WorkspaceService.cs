@@ -235,7 +235,8 @@ public sealed class WorkspaceService : IDisposable
         analysis.Annotations.Clear();
         binary.Patches.Clear();
         binary.Notes.Clear();
-        return SpydateProject.LoadFor(binary.Image, analysis.Annotations, binary.Patches, notes: binary.Notes);
+        binary.MemberAnnotations?.Clear();
+        return SpydateProject.LoadFor(binary.Image, analysis.Annotations, binary.Patches, notes: binary.Notes, members: binary.MemberAnnotations);
     }
 
     private void Watch(OpenedBinary opened)
@@ -306,6 +307,12 @@ public sealed class WorkspaceService : IDisposable
         BinaryAnalysis? analysis = image.Architecture is Architecture.X86 or Architecture.X64 ? new BinaryAnalysis(image) : null;
         analysis?.LoadPdbSymbols();
 
+        // A launcher with the application's JAR appended (launch4j and the like) is two files in one: the PE only
+        // starts the JVM, and the program is the archive. It gets the JVM reading beside the native one, with its
+        // member names kept in the same project file.
+        var embedded = image is PeImage { IsManaged: false } ? JarImage.Embedded(image) : null;
+        var embeddedMembers = embedded is null ? null : new MemberAnnotationStore();
+
         // Before discovery, so a renamed function is discovered under the name the user gave it.
         var patches = new PatchStore();
         var breakpoints = new BreakpointStore();
@@ -313,13 +320,13 @@ public sealed class WorkspaceService : IDisposable
         ProjectLoadResult? project;
         if (analysis is not null)
         {
-            project = SpydateProject.LoadFor(image, analysis.Annotations, patches, breakpoints, notes);
+            project = SpydateProject.LoadFor(image, analysis.Annotations, patches, breakpoints, notes, embeddedMembers);
         }
         else
         {
             // No analysis to carry annotations, but a managed-only assembly can still have notes an
             // agent wrote against it; load them over a throwaway store so they reappear in the window.
-            SpydateProject.LoadFor(image, new AnnotationStore(), notes: notes);
+            SpydateProject.LoadFor(image, new AnnotationStore(), notes: notes, members: embeddedMembers);
             project = null;
         }
 
@@ -339,6 +346,13 @@ public sealed class WorkspaceService : IDisposable
             }
         }
 
-        return new OpenedBinary(image, analysis, managed, managedError, project, patches, breakpoints, notes);
+        JvmReading? embeddedReading = null;
+        if (embedded is not null)
+        {
+            embeddedReading = new JvmReading(embedded, embeddedMembers);
+            _ = Task.Run(() => embeddedReading.References);
+        }
+
+        return new OpenedBinary(image, analysis, managed, managedError, project, patches, breakpoints, notes, embeddedReading, embeddedMembers);
     }
 }

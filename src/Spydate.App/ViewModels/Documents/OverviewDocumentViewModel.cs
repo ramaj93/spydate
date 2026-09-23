@@ -243,6 +243,20 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 Managed.Add(new PropertyRow("Decompiler", $"failed to load: {err}"));
             }
         }
+        else if (binary.Bytecode is Decompiler.Jvm.JvmReading { Jar: var embedded } java)
+        {
+            // A launcher: the native code only starts a JVM, and the program is the JAR appended to it.
+            Kind = $"Java application in a native launcher ({ArchitectureName(pe)})";
+            ManagedTitle = "Java (the embedded JAR)";
+            Managed = new List<PropertyRow>
+            {
+                new("Launcher", "this PE starts a JVM on the JAR appended to it", "the native code is the launcher; the program is under Java packages"),
+                new("Archive", java.FullName),
+                new("Needs", java.Platform, $"the newest class file is version {java.FormatVersion}"),
+                new("Classes", embedded.Classes.Count.ToString(CultureInfo.InvariantCulture), $"{java.Namespaces.Count} packages"),
+                new("Main-Class", embedded.Manifest?["Main-Class"] ?? "(none)", java.EntryPoint?.Signature),
+            };
+        }
 
         if (binary.Analysis?.Pdb is { } pdb)
         {

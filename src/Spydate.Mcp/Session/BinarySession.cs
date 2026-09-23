@@ -294,23 +294,29 @@ public sealed class BinarySession : IDisposable
             return new BinarySession(full, image, null, jarProject, DiscoveryState.None, notes: jarNotes, bytecode: reading, members: members);
         }
 
+        // A native launcher with the application's JAR appended: the JVM reading goes beside the native one, and
+        // its member names live in the same project file.
+        var embedded = managed is null ? JarImage.Embedded(image) : null;
+        var embeddedMembers = embedded is null ? null : new MemberAnnotationStore { Source = AnnotationSource.Agent };
+        var embeddedReading = embedded is null ? null : new JvmReading(embedded, embeddedMembers);
+
         if (image.Architecture is not (Architecture.X86 or Architecture.X64))
         {
-            return new BinarySession(full, image, null, null, DiscoveryState.None, managed: managed, managedLoadError: managedError);
+            return new BinarySession(full, image, null, null, DiscoveryState.None, managed: managed, managedLoadError: managedError, bytecode: embeddedReading, members: embeddedMembers);
         }
 
         var analysis = new BinaryAnalysis(image) { ResolveImportSignatures = true };
         analysis.Annotations.Source = AnnotationSource.Agent;
         analysis.LoadPdbSymbols();
         var notes = new NoteStore { Source = AnnotationSource.Agent };
-        var project = SpydateProject.LoadFor(image, analysis.Annotations, notes: notes);
+        var project = SpydateProject.LoadFor(image, analysis.Annotations, notes: notes, members: embeddedMembers);
 
         var clock = Stopwatch.StartNew();
         var found = analysis.DiscoverAll(options.MaxFunctions, progress: null, cancellationToken);
         clock.Stop();
 
         var discovery = new DiscoveryState(found.Count, found.Count < options.MaxFunctions, clock.Elapsed);
-        return new BinarySession(full, image, analysis, project, discovery, notes: notes, managed: managed, managedLoadError: managedError);
+        return new BinarySession(full, image, analysis, project, discovery, notes: notes, managed: managed, managedLoadError: managedError, bytecode: embeddedReading, members: embeddedMembers);
     }
 
     /// <summary>

@@ -29,7 +29,7 @@ public sealed class JarImage : IBinaryImage
     private readonly List<string> _warnings = [];
     private readonly Lazy<ClassSet> _classes;
 
-    private JarImage(string? path, byte[] data, ZipArchiveFile archive)
+    private JarImage(string? path, ReadOnlyMemory<byte> data, ZipArchiveFile archive)
     {
         Path = path;
         FileName = path is null ? "(memory)" : System.IO.Path.GetFileName(path);
@@ -67,6 +67,36 @@ public sealed class JarImage : IBinaryImage
         }
 
         return new JarImage(path, bytes, ZipArchiveFile.Open(bytes));
+    }
+
+    /// <summary>
+    /// The Java archive inside another file, when there is one: a Windows launcher (launch4j, jpackage's stub) is a
+    /// PE with the application's JAR appended, so the file is both at once — the PE is only what starts the JVM,
+    /// and the program is the archive. Recognised by a zip directory at the end that lists class files. Null for
+    /// any file that is not such a pair, which costs a scan of its last 64 KB.
+    /// </summary>
+    public static JarImage? Embedded(IBinaryImage image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (image is JarImage || image.Data.Length < 22)
+        {
+            return null;
+        }
+
+        try
+        {
+            var archive = ZipArchiveFile.Open(image.Data);
+            if (!archive.Entries.Any(e => e.Name.EndsWith(".class", StringComparison.OrdinalIgnoreCase)))
+            {
+                return null;
+            }
+
+            return new JarImage(image.Path, image.Data, archive);
+        }
+        catch (ArchiveException)
+        {
+            return null;   // no zip at the end, or not a readable one: an ordinary binary
+        }
     }
 
     /// <summary>A JAR held in memory, as tests build them.</summary>

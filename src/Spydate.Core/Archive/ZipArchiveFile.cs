@@ -150,6 +150,9 @@ public sealed class ZipArchiveFile : IArchive
         long size = BinaryPrimitives.ReadUInt32LittleEndian(span[(int)(end + 12)..]);
         long offset = BinaryPrimitives.ReadUInt32LittleEndian(span[(int)(end + 16)..]);
 
+        // Where the directory must end: just before the end record, or before the zip64 end record when there is one.
+        long directoryEnd = end;
+
         // A zip64 archive says so by saturating a field, and keeps the real values in a record before this one.
         if ((count == 0xFFFF || size == 0xFFFFFFFF || offset == 0xFFFFFFFF) && end >= 20
             && BinaryPrimitives.ReadUInt32LittleEndian(span[(int)(end - 20)..]) == Zip64LocatorSignature)
@@ -160,23 +163,33 @@ public sealed class ZipArchiveFile : IArchive
                 count = Clamp(BinaryPrimitives.ReadUInt64LittleEndian(span[(int)(record + 32)..]));
                 size = Clamp(BinaryPrimitives.ReadUInt64LittleEndian(span[(int)(record + 40)..]));
                 offset = Clamp(BinaryPrimitives.ReadUInt64LittleEndian(span[(int)(record + 48)..]));
+                directoryEnd = (long)record;
             }
         }
 
-        if (offset > span.Length || size > span.Length - offset)
-        {
-            // A self-extractor or a zip with junk prepended: the directory really does sit just before the end record.
-            long shifted = end - size;
-            if (shifted < 0 || size > span.Length)
-            {
-                throw new ArchiveException($"The zip directory claims {size} bytes at offset 0x{offset:X}, beyond the file's {span.Length} bytes.");
-            }
-
-            offset = shifted;
-        }
-
+        // The offsets a zip records count from where the zip starts. With something prepended — a launcher, a
+        // self-extractor stub, a script — that is not where the file starts, and every recorded offset is short by
+        // the same amount. The directory really sits just before the end record, so that says by how much: the
+        // shift is applied to the directory and to every entry's local header, exactly as java.util.zip does.
         var warnings = new List<string>();
-        var entries = ReadDirectory(span.Slice((int)offset, (int)size), (int)Math.Min(count, int.MaxValue), warnings);
+        long shift = 0;
+        if (!IsDirectoryAt(span, offset, size))
+        {
+            long expected = directoryEnd - size;
+            if (!IsDirectoryAt(span, expected, size))
+            {
+                throw new ArchiveException($"The zip directory is not at offset 0x{offset:X}, where the end record says, nor just before the end record.");
+            }
+
+            shift = expected - offset;
+            offset = expected;
+            if (shift > 0)
+            {
+                warnings.Add($"{shift:N0} bytes precede the zip (a launcher or self-extractor stub); its offsets are read {shift:N0} bytes further on, as the JVM reads them.");
+            }
+        }
+
+        var entries = ReadDirectory(span.Slice((int)offset, (int)size), (int)Math.Min(count, int.MaxValue), shift, warnings);
         return new ZipArchiveFile(data, entries, offset, size, warnings);
     }
 
@@ -269,7 +282,12 @@ public sealed class ZipArchiveFile : IArchive
         return -1;
     }
 
-    private static List<ArchiveEntry> ReadDirectory(ReadOnlySpan<byte> directory, int declared, List<string> warnings)
+    /// <summary>Whether a central directory of <paramref name="size"/> bytes starts at <paramref name="at"/>: in the file, and with its first entry's signature.</summary>
+    private static bool IsDirectoryAt(ReadOnlySpan<byte> span, long at, long size)
+        => at >= 0 && size >= 0 && at <= span.Length - size
+           && (size == 0 || (size >= 4 && BinaryPrimitives.ReadUInt32LittleEndian(span[(int)at..]) == DirectoryEntrySignature));
+
+    private static List<ArchiveEntry> ReadDirectory(ReadOnlySpan<byte> directory, int declared, long shift, List<string> warnings)
     {
         // Never trust the declared count for an allocation: each entry takes at least 46 bytes.
         var entries = new List<ArchiveEntry>(Math.Min(declared, directory.Length / 46));
@@ -310,7 +328,7 @@ public sealed class ZipArchiveFile : IArchive
             var extra = directory.Slice(at + 46 + nameLength, extraLength);
             ReadZip64(extra, ref size, ref compressed, ref local);
 
-            entries.Add(new ArchiveEntry(entries.Count, name, size, compressed, crc, method, DosTime(date, time), (flags & 1) != 0, local));
+            entries.Add(new ArchiveEntry(entries.Count, name, size, compressed, crc, method, DosTime(date, time), (flags & 1) != 0, local + shift));
             at = next;
         }
 

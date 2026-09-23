@@ -49,7 +49,8 @@ public sealed class AnnotationTools
             return "give a name, a comment, or both";
         }
 
-        if (open.MemberAnnotations is { } members)
+        // A member when the file has only members, or when the name is one — a launcher has both kinds.
+        if (open.MemberAnnotations is { } members && (open.Analysis is null || BytecodeTargets.Resolve(open, target).Found))
         {
             return AnnotateMember(open, members, target, name, comment);
         }
@@ -129,7 +130,7 @@ public sealed class AnnotationTools
             return ReadOnlyRefusal;
         }
 
-        if (_store.Current is { MemberAnnotations: not null })
+        if (_store.Current is { MemberAnnotations: not null, Analysis: null })
         {
             return "a JAR's local variables keep the names its class files give them; name the method or field itself with annotate";
         }
@@ -171,7 +172,7 @@ public sealed class AnnotationTools
         [Description("Rows to skip, for paging.")] int offset = 0,
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
     {
-        if (_store.Current is { MemberAnnotations: { } members } jar)
+        if (_store.Current is { MemberAnnotations: { } members, Analysis: null } jar)
         {
             return ListMembers(jar, members, source, query, offset, limit);
         }
@@ -214,8 +215,15 @@ public sealed class AnnotationTools
 
         return Budget.Clip(table.Render(needle is null ? "nothing has been named yet" : $"nothing matches \"{needle}\"") + '\n'
                            + TextTable.Meta(returned, matching.Count, all.Count, "annotations", next, filters)
-                           + Where(session));
+                           + Where(session)
+                           + EmbeddedMembers(session, source, query, limit));
     }
+
+    /// <summary>A launcher's other names: the members of the JAR it carries, listed after its addresses.</summary>
+    private static string EmbeddedMembers(BinarySession session, string source, string? query, int limit)
+        => session.MemberAnnotations is { Count: > 0 } members
+            ? "\n\nmembers of the embedded JAR:\n" + ListMembers(session, members, source, query, 0, limit)
+            : string.Empty;
 
     /// <summary>Whether an annotation's text contains the needle, case-insensitively — name, comment, or a slot name.</summary>
     private static bool Matches(ulong va, Annotation annotation, string needle)
@@ -245,7 +253,7 @@ public sealed class AnnotationTools
     public string ReadAnnotation(
         [Description("Address, sub_XXXX, an existing name, or a .NET Type::Method.")] string target)
     {
-        if (_store.Current is { MemberAnnotations: { } members } jar)
+        if (_store.Current is { MemberAnnotations: { } members } jar && (jar.Analysis is null || BytecodeTargets.Resolve(jar, target).Found))
         {
             return ReadMember(jar, members, target);
         }
