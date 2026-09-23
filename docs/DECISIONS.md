@@ -1086,8 +1086,11 @@ as the address store, and the project file carries them as annotation entries wi
 merges everything else, comparing keys exactly because Java names are case-sensitive, and a caller that knows
 nothing of members (a native save) leaves them in the file. The listing shows a member's name and comment
 above it; the MCP `annotate`, `read_annotation` and `list_annotations` work on members, and the window's
-assistant can annotate a JAR. Editing member names from the window's own menus is not done yet, and a rename
-shows in the listing, not yet in the explorer's tree.
+assistant can annotate a JAR. In the window, Rename (F2) and Comment (Ctrl+;) act on the member whose name is
+under the caret in a listing — its own name or the one it was given — or else on what the listing is of. The
+explorer's nodes show a given name with the file's own beside it in grey, relabelled in place on every change
+(a rename here, the assistant, a project reload) rather than by rebuilding the tree; a node with a fixed label,
+such as Main, keeps it. A reading document renders again on reload, so the listing and the tab title follow too.
 
 **The MCP surface gained no tool.** `open_binary` opens a JAR; `read_file` reads one entry of the open
 archive as `app.jar!/path` — the JVM's own spelling — and lists them with `app.jar!/`. The manifest budget

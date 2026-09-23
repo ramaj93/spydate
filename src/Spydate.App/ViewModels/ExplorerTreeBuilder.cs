@@ -109,7 +109,7 @@ public static class ExplorerTreeBuilder
             {
                 var n = ns;
                 var node = packages.Add(new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString(CultureInfo.InvariantCulture)));
-                node.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets));
+                node.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets, NamesFor(binary)));
             }
         }
 
@@ -309,14 +309,58 @@ public static class ExplorerTreeBuilder
                 : new ManagedTypeTarget((ManagedType)type, external)
             : (type, member) => new ReadingTarget(type, member);
 
-    private static ExplorerNodeViewModel TypeNode(IBytecodeType type, Func<IBytecodeType, IBytecodeMember?, NodeTarget?> targets)
+    /// <param name="names">
+    /// The name a type or member has been given, for a reading annotated by member (a JAR); null for .NET, whose
+    /// names live at addresses. A node built with one follows renames (<see cref="Relabel"/>).
+    /// </param>
+    private static ExplorerNodeViewModel TypeNode(IBytecodeType type, Func<IBytecodeType, IBytecodeMember?, NodeTarget?> targets, Func<IBytecodeType, IBytecodeMember?, string?>? names = null)
     {
-        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), targets(type, null), type.KindName);
+        var (title, subtitle) = Label(type, null, names);
+        var node = new ExplorerNodeViewModel(title, IconFor(type.Kind), targets(type, null), subtitle) { FollowsNames = names is not null };
         node.ChildrenFactory = () =>
-            type.NestedTypes.Select(n => TypeNode(n, targets))
-                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), targets(type, m))));
+            type.NestedTypes.Select(n => TypeNode(n, targets, names))
+                .Concat(type.Members.Select(m =>
+                {
+                    var (memberTitle, memberSubtitle) = Label(type, m, names);
+                    return new ExplorerNodeViewModel(memberTitle, IconFor(m.Kind), targets(type, m), memberSubtitle) { FollowsNames = names is not null };
+                }));
         return node;
     }
+
+    /// <summary>
+    /// How a type or member reads in the tree: its given name when it has one, with what the file calls it
+    /// beside it in grey, so the original is never out of sight; otherwise the file's own name.
+    /// </summary>
+    public static (string Title, string? Subtitle) Label(IBytecodeType type, IBytecodeMember? member, Func<IBytecodeType, IBytecodeMember?, string?>? names)
+    {
+        string? given = names?.Invoke(type, member);
+        return member is null
+            ? given is null ? (type.Name, type.KindName) : (given, $"{type.KindName} · {type.Name}")
+            : given is null ? (member.Signature, null) : (given, member.Signature);
+    }
+
+    /// <summary>
+    /// Brings every loaded node that shows a bytecode name up to date with the names given since it was built. Nodes
+    /// not loaded yet need nothing: they are built with the current names when first expanded.
+    /// </summary>
+    public static void Relabel(IEnumerable<ExplorerNodeViewModel> nodes, Func<IBytecodeType, IBytecodeMember?, string?> names)
+    {
+        foreach (var node in nodes)
+        {
+            if (node.FollowsNames && node.Target is ReadingTarget target)
+            {
+                (node.Title, node.Subtitle) = Label(target.Type, target.Member, names);
+            }
+
+            Relabel(node.Children, names);
+        }
+    }
+
+    /// <summary>The name a JAR's member annotations give a type or member, or null.</summary>
+    public static Func<IBytecodeType, IBytecodeMember?, string?>? NamesFor(OpenedBinary binary)
+        => binary is { MemberAnnotations: { } members, Bytecode: { } reading }
+            ? (type, member) => reading.AnnotationKey(type, member) is { } key ? members.Get(key)?.Name : null
+            : null;
 
     private static SymbolRegular IconFor(BytecodeTypeKind kind) => kind switch
     {

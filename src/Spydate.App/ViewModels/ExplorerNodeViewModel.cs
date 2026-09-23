@@ -37,7 +37,7 @@ public sealed record ManagedMemberTarget(Spydate.Decompiler.Managed.ManagedType 
 /// A type or member of a bytecode reading that is not .NET: it opens as that reading's own rendering, in the first of
 /// its views. .NET keeps its richer targets above, with addresses and a debugger behind them.
 /// </summary>
-public sealed record ReadingTarget(Spydate.Core.Readings.IBytecodeType Type, Spydate.Core.Readings.IBytecodeMember? Member) : NodeTarget;
+public sealed record ReadingTarget(Spydate.Core.Readings.IBytecodeType Type, Spydate.Core.Readings.IBytecodeMember? Member, string? View = null) : NodeTarget;
 
 /// <summary>An archive's table of files.</summary>
 public sealed record EntriesTarget : NodeTarget;
@@ -60,9 +60,28 @@ public sealed partial class ExplorerNodeViewModel : ObservableObject
         Children = new ObservableCollection<ExplorerNodeViewModel>();
     }
 
-    public string Title { get; }
+    /// <summary>Settable so a node that shows a name can follow a rename without the tree being rebuilt.</summary>
+    public string Title
+    {
+        get => _title;
+        set => SetProperty(ref _title, value);
+    }
 
-    public string? Subtitle { get; }
+    private string _title = string.Empty;
+
+    public string? Subtitle
+    {
+        get => _subtitle;
+        set => SetProperty(ref _subtitle, value);
+    }
+
+    private string? _subtitle;
+
+    /// <summary>
+    /// Whether this node shows a bytecode type's or member's own name, which a member annotation renames — as
+    /// opposed to a node that merely opens one under a fixed label, such as "Main".
+    /// </summary>
+    public bool FollowsNames { get; init; }
 
     public SymbolRegular Icon { get; }
 

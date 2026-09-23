@@ -254,7 +254,7 @@
                 <Border DockPanel.Dock="Left" Style="{StaticResource ToolSeparator}" />
 
                 <Button DockPanel.Dock="Left" Style="{StaticResource ToolButton}" Command="{Binding Active.OpenEntryPointCommand}" AutomationProperties.Name="Go to entry point"
-                        IsEnabled="{Binding HasBinary}" ToolTip="Disassemble the entry point">
+                        IsEnabled="{Binding HasBinary}" ToolTip="Go to the entry point: the native entry, or a JAR's main">
                     <StackPanel Orientation="Horizontal">
                         <ui:SymbolIcon Symbol="Play24" FontSize="13" Margin="0,0,4,0" />
                         <TextBlock Text="Entry point" VerticalAlignment="Center" />

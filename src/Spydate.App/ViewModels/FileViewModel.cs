@@ -145,6 +145,20 @@ public sealed partial class FileViewModel : ObservableObject
         }
 
         Binary.Patches.Changed += (_, _) => NotifyDirty();
+
+        // A JAR's names are keyed by member, in their own store; a rename there — from the menu, the assistant
+        // or a project reload — shows in the tree without rebuilding it.
+        if (Binary.MemberAnnotations is { } members)
+        {
+            members.Changed += (_, _) =>
+            {
+                NotifyDirty();
+                if (ExplorerTreeBuilder.NamesFor(Binary) is { } names)
+                {
+                    Application.Current?.Dispatcher.Invoke(() => ExplorerTreeBuilder.Relabel(Explorer, names));
+                }
+            };
+        }
     }
 
     /// <summary>The image, its analyses, its patches and its breakpoints. A file view model is one of these.</summary>
@@ -1285,14 +1299,92 @@ public sealed partial class FileViewModel : ObservableObject
     /// is a worse outcome than it being greyed out.
     /// </summary>
     private bool CanRenameSymbol()
-        => Binary.Analysis is not null && CurrentTarget().Kind is CaretTargetKind.Address or CaretTargetKind.StackSlot;
+        => (Binary.Analysis is not null && CurrentTarget().Kind is CaretTargetKind.Address or CaretTargetKind.StackSlot)
+           || ReadingCaretTarget() is not null;
 
-    /// <summary>A comment belongs to an address, which a stack slot still sits on.</summary>
-    private bool CanEditComment() => Binary.Analysis is not null && CurrentTarget().Kind != CaretTargetKind.None;
+    /// <summary>A comment belongs to an address, which a stack slot still sits on — or, in a JAR, to a member.</summary>
+    private bool CanEditComment() => (Binary.Analysis is not null && CurrentTarget().Kind != CaretTargetKind.None) || ReadingCaretTarget() is not null;
+
+    /// <summary>
+    /// What a naming command acts on in a listing of a reading annotated by member (a JAR): the member of the
+    /// listed type whose name is under the caret — its own name, or the one it has been given — or else what the
+    /// listing is of. Null when the active document is not such a listing.
+    /// </summary>
+    private (IBytecodeType Type, IBytecodeMember? Member, string Key)? ReadingCaretTarget()
+    {
+        if (Binary is not { MemberAnnotations: not null, Bytecode: { } reading }
+            || ActiveDocument is not CodeDocumentViewModel code
+            || !_readingTargets.TryGetValue(code.Key, out var target))
+        {
+            return null;
+        }
+
+        var type = target.Type;
+        var member = target.Member;
+        var names = ExplorerTreeBuilder.NamesFor(Binary);
+        if (code.CaretWord is { Length: > 0 } word)
+        {
+            var named = type.Members.Where(m => m.Name == word || names?.Invoke(type, m) == word).ToList();
+            if (named.Count > 0)
+            {
+                member = member is not null && named.Contains(member) ? member : named[0];
+            }
+            else if (word == type.Name || names?.Invoke(type, null) == word)
+            {
+                member = null;
+            }
+        }
+
+        return reading.AnnotationKey(type, member) is { } key ? (type, member, key) : null;
+    }
+
+    /// <summary>Renames a JAR's class, method or field, keyed by member; the listing and the tree follow.</summary>
+    private async Task RenameMemberAsync(MemberAnnotationStore members, (IBytecodeType Type, IBytecodeMember? Member, string Key) target)
+    {
+        string what = target.Member is { } m ? $"{target.Type.FullName}::{m.Signature}" : target.Type.FullName;
+        string original = target.Member?.Name ?? target.Type.Name;
+        string? entered = _dialogs.AskForText(
+            "Rename",
+            $"Name for {what}",
+            $"Leave it empty to go back to {original}.",
+            members.Get(target.Key)?.Name ?? original);
+        if (entered is null)
+        {
+            return;
+        }
+
+        string? applied = members.SetName(target.Key, entered);
+        Log(applied is null ? $"{what} has its own name back." : $"{what} is now called {applied}.");
+        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+    }
+
+    private async Task CommentMemberAsync(MemberAnnotationStore members, (IBytecodeType Type, IBytecodeMember? Member, string Key) target)
+    {
+        string what = target.Member is { } m ? $"{target.Type.FullName}::{m.Signature}" : target.Type.FullName;
+        string? entered = _dialogs.AskForText(
+            "Comment",
+            $"Comment for {what}",
+            "Leave it empty to remove the comment.",
+            members.Get(target.Key)?.Comment);
+        if (entered is null)
+        {
+            return;
+        }
+
+        string? applied = members.SetComment(target.Key, entered);
+        Log(applied is null ? $"Removed the comment on {what}." : $"Commented {what}.");
+        await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+    }
 
     [RelayCommand(CanExecute = nameof(CanRenameSymbol))]
     private async Task RenameSymbolAsync()
     {
+        if (Binary.MemberAnnotations is { } members && ReadingCaretTarget() is { } member)
+        {
+            await RenameMemberAsync(members, member).ConfigureAwait(true);
+            return;
+        }
+
         if (Binary.Analysis is not { } analysis)
         {
             return;
@@ -1351,6 +1443,12 @@ public sealed partial class FileViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanEditComment))]
     private async Task EditCommentAsync()
     {
+        if (Binary.MemberAnnotations is { } members && ReadingCaretTarget() is { } member)
+        {
+            await CommentMemberAsync(members, member).ConfigureAwait(true);
+            return;
+        }
+
         if (Binary.Analysis is not { } analysis)
         {
             return;
@@ -1387,7 +1485,8 @@ public sealed partial class FileViewModel : ObservableObject
     [RelayCommand]
     private void SaveProject()
     {
-        if (Binary.Annotations is null)
+        int? count = Binary.Annotations?.Count ?? Binary.MemberAnnotations?.Count;
+        if (count is null)
         {
             return;
         }
@@ -1395,7 +1494,7 @@ public sealed partial class FileViewModel : ObservableObject
         try
         {
             string? path = Binary.SaveProject();
-            Log(path is null ? "Nothing to save: no names or comments yet." : $"Saved {Binary.Annotations.Count} annotation(s) to {path}");
+            Log(path is null ? "Nothing to save: no names or comments yet." : $"Saved {count} annotation(s) to {path}");
             StatusText = path is null ? "Nothing to save" : "Project saved";
             NotifyDirty();
         }
@@ -1417,6 +1516,23 @@ public sealed partial class FileViewModel : ObservableObject
     public async Task ReloadProjectAsync(Func<ProjectLoadResult?> reload)
     {
         ArgumentNullException.ThrowIfNull(reload);
+
+        if (Binary.MemberAnnotations is { } members)
+        {
+            if (members.IsDirty)
+            {
+                Log("The project file changed on disk, but there are unsaved changes here, so it was not reloaded. Saving (Ctrl+S) merges both.");
+                return;
+            }
+
+            if (reload() is { Loaded: true } reloaded)
+            {
+                Log($"The project file changed on disk; reloaded {reloaded.Applied} annotations.");
+                await RefreshAnnotatedDocumentsAsync().ConfigureAwait(true);
+            }
+
+            return;
+        }
 
         if (Binary.Analysis is not { } analysis)
         {
@@ -1446,6 +1562,19 @@ public sealed partial class FileViewModel : ObservableObject
     /// </summary>
     private async Task RefreshAnnotatedDocumentsAsync()
     {
+        // A JAR's listings show the names given to its members, and are titled by them.
+        if (Binary.MemberAnnotations is not null)
+        {
+            foreach (var code in Documents.OfType<CodeDocumentViewModel>().ToList())
+            {
+                if (_readingTargets.TryGetValue(code.Key, out var target))
+                {
+                    code.Title = ReadingTitle(target);
+                    await code.ReloadAsync().ConfigureAwait(true);
+                }
+            }
+        }
+
         if (Binary.Analysis is not { } analysis)
         {
             return;
@@ -1495,35 +1624,69 @@ public sealed partial class FileViewModel : ObservableObject
         }
     }
 
-    private static string ReadingKey(ReadingTarget target)
-        => $"reading:{target.Type.FullName}::{target.Member?.Signature}";
+    /// <summary>A reading's document key: one per type or member and per view, so each view is its own tab.</summary>
+    private static string ReadingKey(IBytecodeReading reading, ReadingTarget target)
+        => $"reading:{target.View ?? reading.Views[0]}:{target.Type.FullName}::{target.Member?.Signature}";
+
+    /// <summary>What each open reading document shows, by key: what a naming command acts on, and what a rename re-renders.</summary>
+    private readonly Dictionary<string, ReadingTarget> _readingTargets = new(StringComparer.Ordinal);
+
+    /// <summary>A reading document's tab title, under the names given to the type and member when there are any.</summary>
+    private string ReadingTitle(ReadingTarget target)
+    {
+        var names = ExplorerTreeBuilder.NamesFor(Binary);
+        string type = names?.Invoke(target.Type, null) ?? target.Type.Name;
+        string title = target.Member is { } member ? $"{type}.{names?.Invoke(target.Type, member) ?? member.Name}" : type;
+        return target.View is { } view && Binary.Bytecode is { } reading && view != reading.Views[0] ? $"{title} ({view})" : title;
+    }
 
     /// <summary>
-    /// A type or member of a bytecode reading that is not .NET, rendered by the reading itself in its first view
-    /// — the listing every reading can give, before any format has a document of its own.
+    /// A type or member of a bytecode reading that is not .NET, rendered by the reading itself in one of its views
+    /// (its first, unless the target names another). Rendered again on reload, so a rename shows; and with a button
+    /// for each of the reading's other views.
     /// </summary>
-    private static DocumentViewModel OpenReading(IBytecodeReading reading, ReadingTarget target)
+    private DocumentViewModel OpenReading(IBytecodeReading reading, ReadingTarget target)
     {
-        string title = target.Member is { } member ? $"{target.Type.Name}.{member.Name}" : target.Type.Name;
-        string text;
-        try
-        {
-            text = reading.Render(target.Type, target.Member, reading.Views[0]);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
-        {
-            text = $"// {target.Type.FullName} could not be read as {reading.Views[0]}: {ex.Message}";
-        }
+        string view = target.View ?? reading.Views[0];
+        string key = ReadingKey(reading, target);
+        _readingTargets[key] = target;
 
         // Coloured by the view it was rendered in; a view nothing has a definition for stays plain.
-        string highlighting = reading.Views[0] switch
+        string highlighting = view switch
         {
             JvmReading.BytecodeView => HighlightingService.JvmBytecode,
             _ => HighlightingService.Plain,
         };
 
-        return CodeDocumentViewModel.ForText(ReadingKey(target), title, SymbolRegular.Code24, highlighting, text);
+        var actions = reading.Views
+            .Where(v => v != view)
+            .Select(v => new CodeAction(ViewLabel(v), v == JvmReading.BytecodeView ? SymbolRegular.Code24 : SymbolRegular.Braces24, () => OpenTarget(target with { View = v })))
+            .ToArray();
+
+        return new CodeDocumentViewModel(
+            key,
+            ReadingTitle(target),
+            view == JvmReading.BytecodeView ? SymbolRegular.Code24 : SymbolRegular.Braces24,
+            highlighting,
+            cancellationToken =>
+            {
+                try
+                {
+                    return new CodeContent(reading.Render(target.Type, target.Member, view, cancellationToken), Array.Empty<string>());
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
+                {
+                    return new CodeContent($"// {target.Type.FullName} could not be read as {view}: {ex.Message}", Array.Empty<string>());
+                }
+            },
+            actions);
     }
+
+    private static string ViewLabel(string view) => view switch
+    {
+        JvmReading.BytecodeView => "Bytecode",
+        _ => view,
+    };
 
     /// <summary>
     /// Opens a file from inside the archive: a class file as the class it declares, anything else as its contents.
@@ -1611,7 +1774,7 @@ public sealed partial class FileViewModel : ObservableObject
             HexTarget h => OpenHex(h.Offset),
             DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
-            ReadingTarget rt when b.Bytecode is { } reading => Find(ReadingKey(rt)) ?? OpenReading(reading, rt),
+            ReadingTarget rt when b.Bytecode is { } reading => Find(ReadingKey(reading, rt)) ?? OpenReading(reading, rt),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
 
             // The target may name a resolved reference to decompile through rather than this
