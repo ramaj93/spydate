@@ -51,8 +51,33 @@ internal static class JavaLocals
             Entry = index.GetValueOrDefault(lifted.Function.EntryVa);
             Successors = new List<int>[Blocks.Count];
             Handlers = new List<int>[Blocks.Count];
+            ReadNames = new HashSet<string>[Blocks.Count][];
+            Defined = new string?[Blocks.Count][];
             for (int i = 0; i < Blocks.Count; i++)
             {
+                var statements = Blocks[i].Statements;
+                ReadNames[i] = new HashSet<string>[statements.Count];
+                Defined[i] = new string?[statements.Count];
+                for (int s = 0; s < statements.Count; s++)
+                {
+                    var read = JavaRewrite.Evaluated(statements[s]).SelectMany(JavaRewrite.PostOrder).OfType<JLocal>().Select(l => l.Name).ToHashSet(StringComparer.Ordinal);
+                    ReadNames[i][s] = read.Count == 0 ? NoNames : read;
+                    Defined[i][s] = statements[s] is IrAssign { Dst: JLocal defined } ? defined.Name : null;
+                    foreach (string name in Defined[i][s] is { } stored ? read.Append(stored) : read)
+                    {
+                        if (!Positions.TryGetValue(name, out var at))
+                        {
+                            at = [];
+                            Positions[name] = at;
+                        }
+
+                        if (at.Count == 0 || at[^1] != (i, s))
+                        {
+                            at.Add((i, s));
+                        }
+                    }
+                }
+
                 Successors[i] = Blocks[i].Successors.Where(index.ContainsKey).Select(s => index[s]).Distinct().ToList();
                 Handlers[i] = lifted.Handlers
                     .Where(h => (int)Blocks[i].StartVa >= h.StartPc && (int)Blocks[i].StartVa < h.EndPc && index.ContainsKey((ulong)h.HandlerPc))
@@ -71,6 +96,17 @@ internal static class JavaLocals
         /// <summary>Handlers each block's code can throw to.</summary>
         public List<int>[] Handlers { get; }
 
+        /// <summary>The locals each statement reads, by block and position: worked out once, not once per name.</summary>
+        public HashSet<string>[][] ReadNames { get; }
+
+        /// <summary>The local each statement stores to, if any.</summary>
+        public string?[][] Defined { get; }
+
+        /// <summary>Where each name is read or stored, in block and statement order.</summary>
+        public Dictionary<string, List<(int Block, int Index)>> Positions { get; } = new(StringComparer.Ordinal);
+
+        private static readonly HashSet<string> NoNames = new(StringComparer.Ordinal);
+
         /// <summary>The untabled locals and parameters the method stores to.</summary>
         public IEnumerable<string> Names()
         {
@@ -87,9 +123,6 @@ internal static class JavaLocals
         }
     }
 
-    private static bool Reads(IrStmt statement, string name)
-        => JavaRewrite.Evaluated(statement).SelectMany(JavaRewrite.PostOrder).Any(e => e is JLocal l && l.Name == name);
-
     private static void SplitWebs(LiftedMethod lifted, Graph graph, string name)
     {
         var blocks = graph.Blocks;
@@ -98,16 +131,14 @@ internal static class JavaLocals
         var sites = new List<(int Block, int Index)>();
         JLocal? original = null;
         bool parameter = false;
-        for (int b = 0; b < blocks.Count; b++)
+        var positions = graph.Positions.GetValueOrDefault(name) ?? [];
+        foreach (var (b, s) in positions)
         {
-            for (int s = 0; s < blocks[b].Statements.Count; s++)
+            if (graph.Defined[b][s] == name && blocks[b].Statements[s] is IrAssign { Dst: JLocal local })
             {
-                if (blocks[b].Statements[s] is IrAssign { Dst: JLocal local } && local.Name == name)
-                {
-                    sites.Add((b, s));
-                    original ??= local;
-                    parameter |= local.Kind == JLocalKind.Parameter;
-                }
+                sites.Add((b, s));
+                original ??= local;
+                parameter |= local.Kind == JLocalKind.Parameter;
             }
         }
 
@@ -129,47 +160,45 @@ internal static class JavaLocals
             return;
         }
 
-        // Reaching definitions, to a fixed point.
-        var into = new HashSet<int>[blocks.Count];
-        var outOf = new HashSet<int>[blocks.Count];
-        var all = new HashSet<int>[blocks.Count];
-        for (int b = 0; b < blocks.Count; b++)
-        {
-            into[b] = [];
-            outOf[b] = [];
-            all[b] = [];
-        }
-
+        // Reaching definitions, to a fixed point, as bitsets over the definitions. A block hands on its last store
+        // when it has one and what reached it otherwise, so only the blocks' edges are walked, not their statements.
+        int words = (total + 63) / 64;
+        var into = new ulong[blocks.Count * words];
+        var all = new ulong[blocks.Count * words];
+        var lastStore = new int[blocks.Count];
+        Array.Fill(lastStore, -1);
         for (int d = 0; d < sites.Count; d++)
         {
-            all[sites[d].Block].Add(d);
+            all[(sites[d].Block * words) + (d / 64)] |= 1UL << (d % 64);
+            lastStore[sites[d].Block] = Math.Max(lastStore[sites[d].Block], d);
         }
 
         if (parameter)
         {
-            into[graph.Entry].Add(entryDef);
+            into[(graph.Entry * words) + (entryDef / 64)] |= 1UL << (entryDef % 64);
         }
 
         var work = new Queue<int>(Enumerable.Range(0, blocks.Count));
         var queued = new bool[blocks.Count];
         Array.Fill(queued, true);
+        var outgoing = new ulong[words];
         while (work.Count > 0)
         {
             int b = work.Dequeue();
             queued[b] = false;
-            var current = new HashSet<int>(into[b]);
-            for (int s = 0; s < blocks[b].Statements.Count; s++)
+            if (lastStore[b] >= 0)
             {
-                if (blocks[b].Statements[s] is IrAssign { Dst: JLocal local } && local.Name == name)
-                {
-                    current = [siteIndex[(b, s)]];
-                }
+                Array.Clear(outgoing);
+                outgoing[lastStore[b] / 64] = 1UL << (lastStore[b] % 64);
+            }
+            else
+            {
+                Array.Copy(into, b * words, outgoing, 0, words);
             }
 
-            outOf[b] = current;
             foreach (int next in graph.Successors[b])
             {
-                if (Grow(into[next], current) && !queued[next])
+                if (Grow(into, next * words, outgoing, 0, words) && !queued[next])
                 {
                     work.Enqueue(next);
                     queued[next] = true;
@@ -179,7 +208,7 @@ internal static class JavaLocals
             // Anything in the block can throw, so a handler sees what reached the block and every store in it.
             foreach (int handler in graph.Handlers[b])
             {
-                if ((Grow(into[handler], into[b]) | Grow(into[handler], all[b])) && !queued[handler])
+                if ((Grow(into, handler * words, into, b * words, words) | Grow(into, handler * words, all, b * words, words)) && !queued[handler])
                 {
                     work.Enqueue(handler);
                     queued[handler] = true;
@@ -202,34 +231,44 @@ internal static class JavaLocals
 
         var readWeb = new Dictionary<(int, int), int>();
         var read = new HashSet<int>();
-        for (int b = 0; b < blocks.Count; b++)
+        HashSet<int>? current = null;
+        int currentBlock = -1;
+        foreach (var (b, s) in positions)
         {
-            var current = new HashSet<int>(into[b]);
-            for (int s = 0; s < blocks[b].Statements.Count; s++)
+            if (b != currentBlock)
             {
-                var statement = blocks[b].Statements[s];
-                if (current.Count > 0 && Reads(statement, name))
+                currentBlock = b;
+                current = [];
+                for (int d = 0; d < total; d++)
                 {
-                    int first = current.First();
-                    foreach (int d in current)
+                    if ((into[(b * words) + (d / 64)] & (1UL << (d % 64))) != 0)
                     {
-                        parent[Find(d)] = Find(first);
-                        read.Add(d);
+                        current.Add(d);
                     }
+                }
+            }
 
-                    readWeb[(b, s)] = first;
+            if (current!.Count > 0 && graph.ReadNames[b][s].Contains(name))
+            {
+                int first = current.First();
+                foreach (int d in current)
+                {
+                    parent[Find(d)] = Find(first);
+                    read.Add(d);
                 }
 
-                if (statement is IrAssign { Dst: JLocal local } && local.Name == name)
-                {
-                    // x = x + 2 updates one variable: the store joins the variable it read.
-                    if (readWeb.TryGetValue((b, s), out int updated))
-                    {
-                        parent[Find(siteIndex[(b, s)])] = Find(updated);
-                    }
+                readWeb[(b, s)] = first;
+            }
 
-                    current = [siteIndex[(b, s)]];
+            if (graph.Defined[b][s] == name)
+            {
+                // x = x + 2 updates one variable: the store joins the variable it read.
+                if (readWeb.TryGetValue((b, s), out int updated))
+                {
+                    parent[Find(siteIndex[(b, s)])] = Find(updated);
                 }
+
+                current = [siteIndex[(b, s)]];
             }
         }
 
@@ -273,25 +312,21 @@ internal static class JavaLocals
             localOf[web.Key] = local;
         }
 
-        for (int b = 0; b < blocks.Count; b++)
+        foreach (var (b, s) in positions)
         {
-            var statements = blocks[b].Statements;
-            for (int s = 0; s < statements.Count; s++)
+            var statement = blocks[b].Statements[s];
+            if (readWeb.TryGetValue((b, s), out int reached))
             {
-                var statement = statements[s];
-                if (readWeb.TryGetValue((b, s), out int reached))
-                {
-                    var reader = localOf[Find(reached)];
-                    statement = JavaRewrite.Replace(statement, l => l.Name == name ? reader : null);
-                }
-
-                if (statement is IrAssign { Dst: JLocal local } assign && local.Name == name)
-                {
-                    statement = assign with { Dst = localOf[Find(siteIndex[(b, s)])] };
-                }
-
-                statements[s] = statement;
+                var reader = localOf[Find(reached)];
+                statement = JavaRewrite.Replace(statement, l => l.Name == name ? reader : null);
             }
+
+            if (statement is IrAssign { Dst: JLocal local } assign && local.Name == name)
+            {
+                statement = assign with { Dst = localOf[Find(siteIndex[(b, s)])] };
+            }
+
+            blocks[b].Statements[s] = statement;
         }
     }
 
@@ -305,11 +340,22 @@ internal static class JavaLocals
         }
         : '?';
 
-    private static bool Grow(HashSet<int> target, HashSet<int> source)
+    /// <summary>ORs <paramref name="words"/> words of a bitset into another; true when that added anything.</summary>
+    private static bool Grow(ulong[] target, int targetAt, ulong[] source, int sourceAt, int words)
     {
-        int before = target.Count;
-        target.UnionWith(source);
-        return target.Count != before;
+        bool grew = false;
+        for (int w = 0; w < words; w++)
+        {
+            ulong before = target[targetAt + w];
+            ulong after = before | source[sourceAt + w];
+            if (after != before)
+            {
+                target[targetAt + w] = after;
+                grew = true;
+            }
+        }
+
+        return grew;
     }
 
     /// <summary>

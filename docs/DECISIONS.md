@@ -1240,6 +1240,8 @@ arithmetic, relational comparison, and arguments of collection methods with no p
 (`List.remove` excepted).
 
 **Measured.** commons-lang3: `goto`s 256 → 0. jd-gui: 1,486 → 1 (an irreducible loop in obfuscated code). All
-535,752 classes of Android Studio's 921 JARs decompile with no crash and no failed method, in 19.6 minutes against
-25.9 before; the methods still shown with gotos are almost all Kotlin coroutine state machines. The fixture
-round-trips with and without debug information.
+535,752 classes of Android Studio's 921 JARs decompile with no crash and no failed method, in about the 26
+minutes the old pipeline took. 6,308 of their methods are still shown with gotos, nearly all Kotlin coroutine
+state machines — a resume path that re-enters a try at code that can throw (a Java try cannot have two ways in
+without duplicating its handler), or an irreducible loop. A single JAR costs about 1.5× what it did (jd-gui
+6 s → 10 s): more passes, for Java that compiles. The fixture round-trips with and without debug information.
