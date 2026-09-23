@@ -73,7 +73,7 @@ public sealed class FileDialogService : IFileDialogService
             Title = "Open executable",
             // A Linux program usually has no extension at all, so "All files" is how most ELF executables are found;
             // the ELF filter catches the libraries and objects that do have one.
-            Filter = "PE files (*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui)|*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui|ELF files (*.so;*.so.*;*.o;*.elf)|*.so;*.so.*;*.o;*.elf|All files (*.*)|*.*",
+            Filter = "PE files (*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui)|*.exe;*.dll;*.sys;*.ocx;*.scr;*.drv;*.efi;*.mui|ELF files (*.so;*.so.*;*.o;*.elf)|*.so;*.so.*;*.o;*.elf|Java archives (*.jar)|*.jar|All files (*.*)|*.*",
             CheckFileExists = true,
             Multiselect = false,
         };

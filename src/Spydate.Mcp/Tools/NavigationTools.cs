@@ -6,6 +6,7 @@ using Spydate.Core.Binary;
 using Spydate.Core.Elf;
 using Spydate.Core.Readings;
 using Spydate.Core.Symbols;
+using Spydate.Decompiler.Jvm;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using Spydate.Mcp.Rendering;
@@ -39,9 +40,14 @@ public sealed class NavigationTools
         [Description("Continue after this address (from the previous page's next: line). Address order only.")] string? afterVa = null,
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
     {
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } open)
         {
             return SessionTools.NothingOpen;
+        }
+
+        if (open is not { Analysis: { } analysis } session)
+        {
+            return $"there are no functions to list: {SessionTools.WhyNoNative(open)}";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -112,7 +118,7 @@ public sealed class NavigationTools
 
         if (open.Analysis is not { } analysis)
         {
-            return $"there is no symbol table: {open.MachineName} is not a machine this disassembles";
+            return $"there is no symbol table: {SessionTools.WhyNoNative(open)}";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -162,9 +168,14 @@ public sealed class NavigationTools
             return ManagedImports(open, module, filter, sort, Math.Max(0, offset), Math.Clamp(limit, 1, MaxLimit));
         }
 
+        if (open.Bytecode is JvmReading jvm)
+        {
+            return JvmAnswers.Imports(jvm, module, filter, sort, Math.Max(0, offset), Math.Clamp(limit, 1, MaxLimit));
+        }
+
         if (open is not { Analysis: { } analysis } session)
         {
-            return $"there is no import table to read: {open.MachineName} is not a machine this disassembles";
+            return $"there is no import table to read: {SessionTools.WhyNoNative(open)}";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -242,6 +253,16 @@ public sealed class NavigationTools
         // expensive thing in this server, and a mixed-mode assembly can be asked about an address -
         // for which the answer is native and the walk would have bought nothing.
         var managed = BytecodeTargets.Resolve(open, target);
+
+        // A JAR's references are read out of its own bytecode, and a name outside it — java.lang.Runtime::exec —
+        // is as fair a question as one inside.
+        if (open.Bytecode is JvmReading jvm)
+        {
+            return JvmAnswers.Xrefs(jvm, managed, target, direction, offset, Math.Clamp(limit, 1, MaxLimit))
+                   ?? managed.Problem
+                   ?? $"'{target}' is not a class or member in this archive, and nothing in it refers to one by that name";
+        }
+
         if (managed.Found)
         {
             // References are read out of .NET IL. Another reading is browsed and read through the seam, but
@@ -257,7 +278,7 @@ public sealed class NavigationTools
             // no analysis to fall through, and "who calls File.Delete" is still a fair question.
             return open.References?.Import(target) is { } only
                 ? Outside(open, only, offset, Math.Clamp(limit, 1, MaxLimit))
-                : managed.Problem ?? $"there is nothing to cross-reference: {open.MachineName} is not a machine this disassembles";
+                : managed.Problem ?? $"there is nothing to cross-reference: {SessionTools.WhyNoNative(open)}";
         }
 
         var resolved = Targets.Resolve(session, target);
@@ -517,7 +538,7 @@ public sealed class NavigationTools
 
         return Budget.Clip(table.Render($"nothing is called anything like '{query}'") + '\n'
                            + TextTable.Meta(Math.Min(limit, ordered.Count), ordered.Count,
-                               index.Types.Count + index.MemberCount, "names", null, "managed metadata"));
+                               index.Types.Count + index.MemberCount, "names", null, index.Reading.Kind == Spydate.Core.Readings.BytecodeKind.DotNet ? "managed metadata" : $"{index.Noun} classes"));
     }
 
     private static bool Matches(Function function, string named, int minRefs, string? nameContains, BinaryAnalysis analysis)

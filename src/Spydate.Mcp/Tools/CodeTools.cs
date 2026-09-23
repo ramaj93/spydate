@@ -57,7 +57,7 @@ public sealed class CodeTools
                 var views = session.Bytecode!.Views;
                 if (view is "pseudo_c" or "asm")
                 {
-                    return $"{found.Describe()} is managed code; \"{view}\" is for native code. "
+                    return $"{found.Describe()} is {(session.Managed is null ? "bytecode" : "managed code")}; \"{view}\" is for native code. "
                            + $"Use {string.Join(" or ", views.Select(v => $"view=\"{v}\""))}.";
                 }
 
@@ -84,7 +84,7 @@ public sealed class CodeTools
 
         if (session.Analysis is not { } analysis)
         {
-            return managedProblem ?? $"there is nothing to read: {session.MachineName} is not a machine this disassembles";
+            return managedProblem ?? $"there is nothing to read: {SessionTools.WhyNoNative(session)}";
         }
 
         var (resolved, function, inside) = Targets.ResolveFunction(session, target);
@@ -132,9 +132,14 @@ public sealed class CodeTools
         [Description("Address to start at.")] string address,
         [Description("Instructions to decode, at most 256.")] int instructions = 48)
     {
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } open)
         {
             return SessionTools.NothingOpen;
+        }
+
+        if (open is not { Analysis: { } analysis } session)
+        {
+            return $"there is nothing to disassemble: {SessionTools.WhyNoNative(open)}";
         }
 
         var resolved = Targets.Resolve(session, address);
@@ -183,6 +188,11 @@ public sealed class CodeTools
         if (_store.Current is not { } session)
         {
             return SessionTools.NothingOpen;
+        }
+
+        if (session.Image.Sections.Count == 0)
+        {
+            return $"there are no addresses to read: {SessionTools.WhyNoNative(session)}";
         }
 
         var resolved = Targets.Resolve(session, address);

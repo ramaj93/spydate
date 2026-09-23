@@ -121,7 +121,7 @@ public static class SpydateProject
     /// Writes the annotations to the first path that accepts them. Returns where they went, or null when
     /// there was nothing to write and no file to update.
     /// </summary>
-    public static string? Save(IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static string? Save(IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, MemberAnnotationStore? members = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(annotations);
@@ -129,7 +129,7 @@ public static class SpydateProject
         var candidates = CandidatePaths(image);
         // Keep updating a file that already exists rather than starting a second one elsewhere.
         string? existing = candidates.FirstOrDefault(File.Exists);
-        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0 && (breakpoints?.Count ?? 0) == 0 && (notes?.Count ?? 0) == 0)
+        if (existing is null && annotations.Count == 0 && (patches?.Count ?? 0) == 0 && (breakpoints?.Count ?? 0) == 0 && (notes?.Count ?? 0) == 0 && (members?.Count ?? 0) == 0)
         {
             return null;
         }
@@ -140,7 +140,7 @@ public static class SpydateProject
         {
             try
             {
-                SaveTo(path, image, annotations, patches, breakpoints, notes);
+                SaveTo(path, image, annotations, patches, breakpoints, notes, members);
                 annotations.MarkSaved();
                 return path;
             }
@@ -164,7 +164,7 @@ public static class SpydateProject
     /// (a cleared one being removed). Entries collide only when both sides edited the same address,
     /// which is rare and resolves in favour of the writer, since that is the more recent decision.
     /// </summary>
-    public static void SaveTo(string path, IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static void SaveTo(string path, IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, MemberAnnotationStore? members = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -184,7 +184,7 @@ public static class SpydateProject
         // With nothing to merge into — no file, or one belonging to another build — the store is the
         // only account of this binary there is, so all of it goes down. Only when there is a file
         // worth keeping does the change set matter, and then it is the whole point.
-        var existing = ExistingEntries(path, identity);
+        var existing = ExistingEntries(path, identity, out var existingMembers);
         var entries = existing ?? new Dictionary<string, AnnotationDto>(StringComparer.OrdinalIgnoreCase);
         var overlay = existing is null ? mine.Keys : annotations.ChangedAddresses;
 
@@ -214,6 +214,8 @@ public static class SpydateProject
             }
         }
 
+        var memberEntries = MergeMembers(existingMembers, members);
+
         var file = new ProjectFile
         {
             Format = FormatVersion,
@@ -228,7 +230,9 @@ public static class SpydateProject
                 Fingerprint = image is PeImage ? null : identity.Fingerprint,
                 ImageBase = Hex(image.ImageBase),
             },
-            Annotations = entries.Values.OrderBy(e => ParseHex32(e.Rva)).ToList(),
+            Annotations = entries.Values.OrderBy(e => ParseHex32(e.Rva))
+                .Concat(memberEntries.OrderBy(e => e.Key, StringComparer.Ordinal).Select(e => e.Value))
+                .ToList(),
             Patches = MergePatches(path, identity, patches),
             Breakpoints = MergeBreakpoints(path, identity, breakpoints),
             Notes = MergeNotes(path, identity, notes),
@@ -248,6 +252,44 @@ public static class SpydateProject
         patches?.MarkSaved();
         breakpoints?.MarkSaved();
         notes?.MarkSaved();
+        members?.MarkSaved();
+    }
+
+    /// <summary>
+    /// Member annotations for the file being written, merged the way address annotations are: only the keys this
+    /// session touched are overlaid, so a member a second writer named survives. With no store — a caller that
+    /// does not know about members — whatever the file holds stays as it is.
+    /// </summary>
+    private static Dictionary<string, AnnotationDto> MergeMembers(Dictionary<string, AnnotationDto>? existing, MemberAnnotationStore? members)
+    {
+        var entries = existing ?? new Dictionary<string, AnnotationDto>(StringComparer.Ordinal);
+        if (members is null)
+        {
+            return entries;
+        }
+
+        var mine = members.Snapshot().ToDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal);
+        var overlay = existing is null ? mine.Keys : members.ChangedKeys;
+        foreach (string key in overlay)
+        {
+            if (mine.TryGetValue(key, out var annotation))
+            {
+                entries[key] = new AnnotationDto
+                {
+                    Member = key,
+                    Name = annotation.Name,
+                    Comment = annotation.Comment,
+                    Source = annotation.Source,
+                    Modified = annotation.Modified,
+                };
+            }
+            else
+            {
+                entries.Remove(key);   // cleared here, so it goes from the file too
+            }
+        }
+
+        return entries;
     }
 
     /// <summary>
@@ -459,8 +501,9 @@ public static class SpydateProject
     /// error — merging would mix two binaries' annotations at addresses that mean different things
     /// in each — so the stale file is replaced rather than joined.
     /// </summary>
-    private static Dictionary<string, AnnotationDto>? ExistingEntries(string path, ProjectIdentity identity)
+    private static Dictionary<string, AnnotationDto>? ExistingEntries(string path, ProjectIdentity identity, out Dictionary<string, AnnotationDto>? members)
     {
+        members = null;
         if (!File.Exists(path))
         {
             return null;
@@ -475,14 +518,22 @@ public static class SpydateProject
             }
 
             var entries = new Dictionary<string, AnnotationDto>(stored.Count, StringComparer.OrdinalIgnoreCase);
+            // Member keys are names, and Java's are case-sensitive, so they are kept apart from the addresses and
+            // compared exactly.
+            var byMember = new Dictionary<string, AnnotationDto>(StringComparer.Ordinal);
             foreach (var entry in stored)
             {
-                if (entry.Rva is { Length: > 0 } rva)
+                if (entry.Member is { Length: > 0 } member)
+                {
+                    byMember[member] = entry;
+                }
+                else if (entry.Rva is { Length: > 0 } rva)
                 {
                     entries[rva] = entry;
                 }
             }
 
+            members = byMember;
             return entries;
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
@@ -492,7 +543,7 @@ public static class SpydateProject
     }
 
     /// <summary>Finds the project belonging to <paramref name="image"/> and applies it.</summary>
-    public static ProjectLoadResult LoadFor(IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static ProjectLoadResult LoadFor(IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, MemberAnnotationStore? members = null)
     {
         ArgumentNullException.ThrowIfNull(image);
 
@@ -504,7 +555,7 @@ public static class SpydateProject
                 continue;
             }
 
-            var result = Load(path, image, annotations, patches, breakpoints, notes);
+            var result = Load(path, image, annotations, patches, breakpoints, notes, members);
             if (result.Loaded)
             {
                 return result;
@@ -517,7 +568,7 @@ public static class SpydateProject
     }
 
     /// <summary>Applies one project file, rejecting it if it was made for a different build.</summary>
-    public static ProjectLoadResult Load(string path, IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public static ProjectLoadResult Load(string path, IBinaryImage image, AnnotationStore annotations, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, MemberAnnotationStore? members = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -559,6 +610,25 @@ public static class SpydateProject
         int skipped = 0;
         foreach (var entry in file.Annotations ?? new List<AnnotationDto>())
         {
+            if (entry.Member is { Length: > 0 } member)
+            {
+                // A member entry belongs to a reading keyed by members. A caller without a store for them is
+                // not told it skipped one: it never could have placed it.
+                if (members is not null)
+                {
+                    members.Set(member, new Annotation
+                    {
+                        Name = entry.Name,
+                        Comment = entry.Comment,
+                        Source = entry.Source ?? AnnotationSource.User,
+                        Modified = entry.Modified,
+                    });
+                    applied++;
+                }
+
+                continue;
+            }
+
             uint rva = ParseHex32(entry.Rva);
             if (rva == 0 && !string.Equals(entry.Rva, "0x0", StringComparison.OrdinalIgnoreCase))
             {
@@ -654,6 +724,7 @@ public static class SpydateProject
         }
 
         annotations.MarkSaved();
+        members?.MarkSaved();
         return new ProjectLoadResult
         {
             Loaded = true,
@@ -791,6 +862,13 @@ public static class SpydateProject
     private sealed class AnnotationDto
     {
         [JsonPropertyName("rva")] public string? Rva { get; set; }
+
+        /// <summary>
+        /// Set instead of <see cref="Rva"/> for a file whose program has no addresses — a JAR — naming the type or
+        /// member the reading keys it by. Still format 1: a reader that predates it skips an entry it cannot place.
+        /// </summary>
+        [JsonPropertyName("member")] public string? Member { get; set; }
+
         [JsonPropertyName("name")] public string? Name { get; set; }
         [JsonPropertyName("comment")] public string? Comment { get; set; }
         [JsonPropertyName("locals")] public Dictionary<string, string>? Locals { get; set; }

@@ -2,9 +2,11 @@ using System.Globalization;
 using ICSharpCode.Decompiler.TypeSystem;
 using Spydate.App.Services;
 using Spydate.Core.Elf;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 using Spydate.Core.Readings;
 using Spydate.Core.Symbols;
+using Spydate.Decompiler.Jvm;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using Wpf.Ui.Controls;
@@ -18,6 +20,7 @@ public static class ExplorerTreeBuilder
     {
         ElfImage elf => BuildElf(binary, elf),
         PeImage pe => BuildPe(binary, pe),
+        JarImage jar => BuildJar(binary, jar),
         var other => throw new NotSupportedException($"No explorer for {other.Format}."),
     };
 
@@ -76,6 +79,56 @@ public static class ExplorerTreeBuilder
         root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "ascii + utf-16"));
         root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{elf.Length:N0} bytes"));
         return root;
+    }
+
+    /// <summary>
+    /// A JAR's tree: its classes by package — the program — then the archive's own files, the strings its code
+    /// loads, and its raw bytes. There are no sections, imports or functions: nothing in a JAR has an address.
+    /// </summary>
+    private static ExplorerNodeViewModel BuildJar(OpenedBinary binary, JarImage jar)
+    {
+        var reading = binary.Bytecode;
+        string subtitle = reading is null ? "JAR" : $"JAR · {reading.Platform} · {jar.Classes.Count:N0} classes";
+        var root = new ExplorerNodeViewModel(jar.FileName, jar.IsLibrary ? SymbolRegular.Library24 : SymbolRegular.Document24, new OverviewTarget(), subtitle)
+        {
+            IsExpanded = true,
+        };
+
+        root.Add(new ExplorerNodeViewModel("Overview", SymbolRegular.Info24, new OverviewTarget()));
+        if (reading is { EntryPoint: { } main } && reading.Namespaces.SelectMany(n => n.Types).SelectMany(Flatten).FirstOrDefault(t => t.Members.Contains(main)) is { } mainType)
+        {
+            root.Add(new ExplorerNodeViewModel("Main", SymbolRegular.Play24, new ReadingTarget(mainType, main), $"{mainType.FullName}.{main.Name}"));
+        }
+
+        if (reading is not null)
+        {
+            var packages = root.Add(new ExplorerNodeViewModel("Packages", SymbolRegular.Braces24, null, reading.Namespaces.Count.ToString(CultureInfo.InvariantCulture)));
+            packages.IsExpanded = true;
+            var targets = TargetsFor(reading);
+            foreach (var ns in reading.Namespaces)
+            {
+                var n = ns;
+                var node = packages.Add(new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString(CultureInfo.InvariantCulture)));
+                node.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets));
+            }
+        }
+
+        int files = jar.Archive.Entries.Count(e => !e.IsDirectory);
+        root.Add(new ExplorerNodeViewModel("Entries", SymbolRegular.FolderZip24, new EntriesTarget(), $"{files:N0} files"));
+        if (jar.Manifest is not null)
+        {
+            root.Add(new ExplorerNodeViewModel("Manifest", SymbolRegular.DocumentText24, new ArchiveEntryTarget("META-INF/MANIFEST.MF"), $"{jar.Manifest.Main.Count} attributes"));
+        }
+
+        if (reading is not null)
+        {
+            root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "string constants"));
+        }
+
+        root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{jar.Length:N0} bytes"));
+        return root;
+
+        static IEnumerable<IBytecodeType> Flatten(IBytecodeType type) => type.NestedTypes.SelectMany(Flatten).Prepend(type);
     }
 
     /// <summary>Functions, and the entry point under Headers, for any binary the native analysis can read.</summary>

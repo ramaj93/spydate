@@ -530,18 +530,20 @@ public sealed class ElfTests : IDisposable
     }
 
     [Fact]
-    public async Task AJarIsStillNamedAndPointedAtReadFile()
+    public async Task AnApkIsStillNamedAndPointedAtReadFile()
     {
-        string path = Path.Combine(_directory, "lib.jar");
+        // A JAR opens now (JarTests); an APK is the recognised format that is still refused by name.
+        string path = Path.Combine(_directory, "app.apk");
         using (var zip = System.IO.Compression.ZipFile.Open(path, System.IO.Compression.ZipArchiveMode.Create))
         {
-            zip.CreateEntry("META-INF/MANIFEST.MF");
+            zip.CreateEntry("AndroidManifest.xml");
+            zip.CreateEntry("classes.dex");
         }
 
         using var store = new SessionStore();
         string answer = await new SessionTools(store, McpOptions.Default).OpenBinaryAsync(path);
 
-        Assert.Contains("Java archive", answer, StringComparison.Ordinal);
+        Assert.Contains("Android package", answer, StringComparison.Ordinal);
         Assert.Contains("read_file", answer, StringComparison.Ordinal);
     }
 

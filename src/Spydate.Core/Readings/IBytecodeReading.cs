@@ -128,4 +128,12 @@ public interface IBytecodeReading
     /// type's own. Throws <see cref="ArgumentException"/> for a view the reading does not offer.
     /// </summary>
     string Render(IBytecodeType type, IBytecodeMember? member, string view, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The key a name or comment on this type or member is stored under, when the reading keys annotations by
+    /// member — a JAR has no addresses to key them by. It must stay the same across builds of the same code and
+    /// tell overloads apart. Null when the reading's annotations live at addresses instead, as .NET's do: its
+    /// methods are annotated where their IL sits.
+    /// </summary>
+    string? AnnotationKey(IBytecodeType type, IBytecodeMember? member);
 }

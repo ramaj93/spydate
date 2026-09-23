@@ -57,7 +57,7 @@ public sealed class PatchTools
 
         if (session is not { Analysis: not null } && session.Managed is null)
         {
-            return $"there is nothing to patch: {session.MachineName} is not a machine this disassembles";
+            return $"there is nothing to patch: {SessionTools.WhyNoNative(session)}";
         }
 
         var resolved = Targets.Resolve(session, target);

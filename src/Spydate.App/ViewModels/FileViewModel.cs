@@ -8,12 +8,15 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
+using Spydate.Core.Archive;
 using Spydate.Core.Binary;
 using Spydate.Core.Elf;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Core.Readings;
 using Spydate.Core.Text;
+using Spydate.Decompiler.Jvm;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
 using SymbolRegular = Wpf.Ui.Controls.SymbolRegular;
@@ -232,7 +235,7 @@ public sealed partial class FileViewModel : ObservableObject
             Warnings.Add($"Managed decompiler could not load the assembly: {managedError}");
         }
 
-        if (Binary.Analysis is null && !Binary.IsManaged)
+        if (Binary.Analysis is null && !Binary.IsManaged && Binary.Image is not JarImage)
         {
             Warnings.Add($"Machine type {Binary.MachineName} is not supported by the native disassembler (x86/x64 only).");
         }
@@ -243,6 +246,10 @@ public sealed partial class FileViewModel : ObservableObject
             Log(elf.StaticSymbols.Count > 0
                 ? $"Symbols: {elf.StaticSymbols.Count:N0} in .symtab, {elf.DynamicSymbols.Count:N0} in .dynsym, {elf.UnwindRanges.Count:N0} functions in .eh_frame."
                 : $"Stripped (no .symtab): {elf.DynamicSymbols.Count:N0} dynamic symbols, {elf.UnwindRanges.Count:N0} functions in .eh_frame.");
+        }
+        else if (Binary.Image is JarImage jar)
+        {
+            Log($"{jar.Classes.Count:N0} classes in {Binary.Bytecode?.Namespaces.Count ?? 0} packages; nothing in a JAR has an address, so there are no functions to discover.");
         }
         else if (Binary.Analysis?.Pdb is { } pdb)
         {
@@ -282,6 +289,10 @@ public sealed partial class FileViewModel : ObservableObject
         if (discover && Binary.Analysis is { } analysis)
         {
             _ = RunDiscoveryAsync(analysis);
+        }
+        else if (Binary.Image is JarImage)
+        {
+            AnalysisText = "bytecode";
         }
         else
         {
@@ -1183,6 +1194,11 @@ public sealed partial class FileViewModel : ObservableObject
         {
             OpenTarget(new DisassemblyTarget(Binary.Image.EntryPointVa, Core.Symbols.SymbolTable.EntryPointName(Binary.Image)));
         }
+        else if (Binary.Bytecode is JvmReading { MainType: { } mainType, EntryPoint: { } main })
+        {
+            // A JAR starts where its manifest's Main-Class does: its main method.
+            OpenTarget(new ReadingTarget(mainType, main));
+        }
         else
         {
             StatusText = "This file has no native entry point to disassemble.";
@@ -1502,6 +1518,24 @@ public sealed partial class FileViewModel : ObservableObject
         return CodeDocumentViewModel.ForText(ReadingKey(target), title, SymbolRegular.Code24, HighlightingService.Plain, text);
     }
 
+    /// <summary>
+    /// Opens a file from inside the archive: a class file as the class it declares, anything else as its contents.
+    /// A class that did not parse — or a multi-release copy, which is not in the tree — opens as its bytes.
+    /// </summary>
+    private void OpenEntry(ArchiveEntry entry)
+    {
+        if (Binary.Bytecode is JvmReading jvm
+            && Binary.Image is JarImage jar
+            && jar.Classes.FirstOrDefault(c => ReferenceEquals(c.Entry, entry)) is { } parsed
+            && jvm.FindType(parsed.File.Name) is { } type)
+        {
+            OpenTarget(new ReadingTarget(type, null));
+            return;
+        }
+
+        OpenTarget(new ArchiveEntryTarget(entry.Name));
+    }
+
     /// <summary>Opens the code at an address, when there is an analysis to read it with.</summary>
     private void OpenCode(ulong va, string name)
     {
@@ -1553,7 +1587,15 @@ public sealed partial class FileViewModel : ObservableObject
             ImportsTarget when b.Image is PeImage pe => Find("imports") ?? new ImportsDocumentViewModel(pe, b.Analysis),
             ResourcesTarget when b.Image is PeImage pe => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
             ResourcePreviewTarget preview => OpenResource(preview),
+            StringsTarget when b.Bytecode is JvmReading jvm => Find("strings") ?? JarDocuments.Strings(jvm, (type, member) => OpenTarget(new ReadingTarget(type, member))),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(b.Image, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
+            EntriesTarget when b.Image is JarImage jar => Find("entries") ?? JarDocuments.Entries(jar, OpenEntry),
+            ArchiveEntryTarget entry when b.Image is JarImage jar && jar.Archive.Find(entry.Name) is { } found => Find($"entry:{entry.Name}") ?? CodeDocumentViewModel.ForText(
+                $"entry:{entry.Name}",
+                entry.Name[(entry.Name.LastIndexOf('/') + 1)..],
+                SymbolRegular.Document24,
+                entry.Name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ? HighlightingService.Xml : HighlightingService.Plain,
+                JarDocuments.Contents(jar, found)),
             AnnotationsTarget when b.Analysis is { } ann => Find("annotations") ?? new AnnotationsDocumentViewModel(ann, GoToAnnotation),
             NotesTarget => Find("notes") ?? new NotesDocumentViewModel(b.Notes, b.SaveProject),
             ExportsTarget when b.Image is ElfImage elf => Find("exports") ?? ElfDocuments.Exports(elf, b.Analysis is null ? null : OpenCode),

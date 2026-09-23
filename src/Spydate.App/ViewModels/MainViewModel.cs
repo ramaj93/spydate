@@ -49,7 +49,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         AssistantProvider = assistantProvider;
         Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
-        Log("Spydate started. Open a PE or ELF binary to begin (Ctrl+O).");
+        Log("Spydate started. Open a PE, ELF or JAR to begin (Ctrl+O).");
     }
 
     /// <summary>
@@ -278,10 +278,19 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
 
             var image = opened.Image;
-            StatusText = $"{opened.DisplayName}  ·  {opened.MachineName}  ·  {opened.ContainerName}{(opened.IsManaged ? "  ·  .NET" : string.Empty)}  ·  {image.Sections.Count} sections";
-            Log($"Loaded {opened.DisplayName}: {opened.MachineName}, {opened.ContainerName}, {image.Length:N0} bytes, " +
-                $"{image.Sections.Count} sections, {ImportSummary(image)}, " +
-                $"{image.Exports.Count} exports{(opened.IsManaged ? ", managed" : string.Empty)}.");
+            if (image is Core.Jvm.JarImage jar)
+            {
+                // An archive has no sections or imports to count; its classes and files are what it holds.
+                StatusText = $"{opened.DisplayName}  ·  JAR  ·  {opened.Bytecode?.Platform}  ·  {jar.Classes.Count:N0} classes";
+                Log($"Loaded {opened.DisplayName}: JAR, {image.Length:N0} bytes, {jar.Archive.Entries.Count:N0} entries, {jar.Classes.Count:N0} classes, needs {opened.Bytecode?.Platform}.");
+            }
+            else
+            {
+                StatusText = $"{opened.DisplayName}  ·  {opened.MachineName}  ·  {opened.ContainerName}{(opened.IsManaged ? "  ·  .NET" : string.Empty)}  ·  {image.Sections.Count} sections";
+                Log($"Loaded {opened.DisplayName}: {opened.MachineName}, {opened.ContainerName}, {image.Length:N0} bytes, " +
+                    $"{image.Sections.Count} sections, {ImportSummary(image)}, " +
+                    $"{image.Exports.Count} exports{(opened.IsManaged ? ", managed" : string.Empty)}.");
+            }
 
             // Where the new tab goes, worked out before the old one is closed so that replacing
             // puts it back in the same place in the strip rather than at the end.
@@ -313,6 +322,8 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             {
                 UnsupportedFormatException => "Not a format Spydate opens yet",
                 Core.Elf.ElfParseException => "Not a valid ELF file",
+                Core.Archive.ArchiveException => "Not a readable archive",
+                Core.Jvm.ClassFormatException => "Not a valid class file",
                 _ => "Not a valid PE file",
             };
             StatusText = $"Cannot open: {ex.Message}";

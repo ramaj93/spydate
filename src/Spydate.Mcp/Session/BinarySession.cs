@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using Spydate.Core.Binary;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Core.Readings;
+using Spydate.Decompiler.Jvm;
 using Spydate.Decompiler.Managed;
 using Spydate.Decompiler.Native;
 using Spydate.Disassembly;
@@ -63,13 +65,15 @@ public sealed class BinarySession : IDisposable
         ManagedAssembly? managed = null,
         string? managedLoadError = null,
         bool ownsManaged = true,
-        IBytecodeReading? bytecode = null)
+        IBytecodeReading? bytecode = null,
+        MemberAnnotationStore? members = null)
     {
         // A lambda rather than the method group: SpydateProject.Save takes optional stores now, and a
         // group with defaulted parameters no longer converts on its own.
         Patches = patches ?? new PatchStore();
         Notes = notes ?? new NoteStore();
-        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations, Patches, notes: Notes));
+        MemberAnnotations = members;
+        Save = save ?? ((image, annotations) => SpydateProject.Save(image, annotations, Patches, notes: Notes, members: MemberAnnotations));
         Path = path;
         Image = image;
         Analysis = analysis;
@@ -211,6 +215,12 @@ public sealed class BinarySession : IDisposable
     /// <summary>What has been learned about the binary as a whole — keyed sections, saved in the project.</summary>
     public NoteStore Notes { get; }
 
+    /// <summary>
+    /// Names and comments keyed by member rather than address, for a file whose program has no addresses — a JAR.
+    /// Null for every other file, whose annotations live in <see cref="BinaryAnalysis.Annotations"/>.
+    /// </summary>
+    public MemberAnnotationStore? MemberAnnotations { get; }
+
     /// <summary>Writes the annotations out, returning where they went.</summary>
     public Func<IBinaryImage, AnnotationStore, string?> Save { get; }
 
@@ -272,6 +282,17 @@ public sealed class BinarySession : IDisposable
         // are IL: the two readings of the same file are unrelated, and either can be the useful
         // one — a mixed-mode assembly has both, a NativeAOT publish has only the native side.
         var (managed, managedError) = LoadManaged(image, full);
+
+        // A JAR is nothing but bytecode: no native analysis, its annotations keyed by member. Its classes are
+        // parsed here, while the open is still the thing being waited for, rather than by the first tool.
+        if (image is JarImage jar)
+        {
+            var members = new MemberAnnotationStore { Source = AnnotationSource.Agent };
+            var jarNotes = new NoteStore { Source = AnnotationSource.Agent };
+            var jarProject = SpydateProject.LoadFor(image, new AnnotationStore(), notes: jarNotes, members: members);
+            var reading = new JvmReading(jar, members);
+            return new BinarySession(full, image, null, jarProject, DiscoveryState.None, notes: jarNotes, bytecode: reading, members: members);
+        }
 
         if (image.Architecture is not (Architecture.X86 or Architecture.X64))
         {

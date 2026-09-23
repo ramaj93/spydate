@@ -65,5 +65,8 @@ public sealed class DotNetReading : IBytecodeReading
         };
     }
 
+    /// <summary>Always null: a .NET method is annotated at the address its IL begins, like any other code.</summary>
+    public string? AnnotationKey(IBytecodeType type, IBytecodeMember? member) => null;
+
     public override string ToString() => $"{FullName} (.NET)";
 }

@@ -134,6 +134,9 @@ public sealed class BytecodeReadingTests
                 ? member is null ? $"class {type.FullName}\n  ...\n" : $"{member.Signature}\n  0: aload_1\n  1: areturn\n"
                 : throw new ArgumentException($"not a view: {view}", nameof(view));
 
+        public string? AnnotationKey(IBytecodeType type, IBytecodeMember? member)
+            => member is null ? type.OtherNames[0] : $"{type.OtherNames[0]}.{member.Name}";
+
         internal sealed record Member(string Name, string Signature, BytecodeMemberKind Kind) : IBytecodeMember;
 
         internal sealed record TypeRow(string Name, string FullName, IReadOnlyList<string> OtherNames, BytecodeTypeKind Kind, IReadOnlyList<IBytecodeType> NestedTypes, IReadOnlyList<IBytecodeMember> Members) : IBytecodeType

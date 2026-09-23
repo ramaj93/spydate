@@ -39,6 +39,12 @@ public sealed record ManagedMemberTarget(Spydate.Decompiler.Managed.ManagedType 
 /// </summary>
 public sealed record ReadingTarget(Spydate.Core.Readings.IBytecodeType Type, Spydate.Core.Readings.IBytecodeMember? Member) : NodeTarget;
 
+/// <summary>An archive's table of files.</summary>
+public sealed record EntriesTarget : NodeTarget;
+
+/// <summary>One file inside an archive, by its name there, opened as its contents.</summary>
+public sealed record ArchiveEntryTarget(string Name) : NodeTarget;
+
 /// <summary>A node in the explorer tree. Children may be materialised lazily via <see cref="ChildrenFactory"/>.</summary>
 public sealed partial class ExplorerNodeViewModel : ObservableObject
 {

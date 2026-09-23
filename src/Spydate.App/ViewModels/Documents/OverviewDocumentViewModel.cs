@@ -2,6 +2,7 @@ using System.Globalization;
 using Spydate.App.Services;
 using Spydate.Core.Binary;
 using Spydate.Core.Elf;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 using Wpf.Ui.Controls;
 
@@ -22,6 +23,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             SecurityTitle = "Hardening";
             Version = new List<PropertyRow>();
             Signature = new List<PropertyRow>();
+            BuildTitle = "Build";
             Build = new List<PropertyRow>
             {
                 new("Build ID", elf.BuildId ?? "(none)", elf.BuildId is null ? "the project file is matched on a hash of the headers instead" : "GNU build-id note"),
@@ -37,6 +39,66 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 Warnings.Insert(0, $"{elf.Header.MachineName} code is not something the native disassembler reads (x86/x64 only); the structure is still shown.");
             }
 
+            return;
+        }
+
+        if (binary.Image is JarImage jar)
+        {
+            FileName = jar.FileName;
+            FilePath = jar.Path ?? "(memory)";
+            var files = jar.Archive.Entries.Where(e => !e.IsDirectory).ToList();
+            int classes = files.Count(e => e.Name.EndsWith(".class", StringComparison.OrdinalIgnoreCase));
+            Kind = jar.IsLibrary ? "Java library (JAR)" : "Java application (JAR)";
+            General = new List<PropertyRow>
+            {
+                new("File", jar.Path ?? "(memory)"),
+                new("Size", $"{jar.Length:N0} bytes"),
+                new("Entries", $"{files.Count:N0} files", $"{classes:N0} class files, {files.Count - classes:N0} other"),
+                new("Main-Class", jar.Manifest?["Main-Class"] ?? "(none)", jar.IsLibrary ? "a library: java -jar has nothing to run" : "what java -jar runs"),
+                new("Module", jar.ModuleName ?? "(none)", jar.ModuleName is null ? "on the class path, or an automatic module" : "declared by module-info.class"),
+                new("Fingerprint", jar.Fingerprint, "a hash of the zip directory; the project file is matched on it"),
+            };
+
+            ManagedTitle = "Java";
+            Managed = new List<PropertyRow>();
+            if (binary.Bytecode is { } reading)
+            {
+                Managed.Add(new PropertyRow("Archive", reading.FullName));
+                Managed.Add(new PropertyRow("Needs", reading.Platform, $"the newest class file is version {reading.FormatVersion}"));
+                Managed.Add(new PropertyRow("Packages", reading.Namespaces.Count.ToString(CultureInfo.InvariantCulture)));
+                Managed.Add(new PropertyRow("Classes", jar.Classes.Count.ToString(CultureInfo.InvariantCulture), jar.VersionedClasses > 0 ? $"+{jar.VersionedClasses} multi-release versions not shown" : null));
+                if (reading.EntryPoint is { } main)
+                {
+                    Managed.Add(new PropertyRow("Entry point", main.Signature));
+                }
+
+                if (reading.Requires.Count > 0)
+                {
+                    Managed.Add(new PropertyRow("Class-Path", string.Join(", ", reading.Requires)));
+                }
+            }
+
+            VersionTitle = "Manifest";
+            Version = jar.Manifest?.Main.Select(a => new PropertyRow(a.Key, a.Value)).ToList() ?? new List<PropertyRow>();
+            Security = new List<PropertyRow>();
+            Signature = jar.Archive.Entries
+                .Where(e => e.Name.StartsWith("META-INF/", StringComparison.OrdinalIgnoreCase)
+                            && (e.Name.EndsWith(".SF", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".RSA", StringComparison.OrdinalIgnoreCase)
+                                || e.Name.EndsWith(".DSA", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".EC", StringComparison.OrdinalIgnoreCase)))
+                .Select(e => new PropertyRow("Signature file", e.Name, "the JAR is signed; the signature is listed, not verified"))
+                .ToList();
+            Build = new List<PropertyRow>();
+            BuildTitle = "Build";
+            foreach (string key in (string[])["Created-By", "Build-Jdk", "Build-Jdk-Spec", "Built-By", "Bnd-LastModified"])
+            {
+                if (jar.Manifest?[key] is { } value)
+                {
+                    Build.Add(new PropertyRow(key, value));
+                }
+            }
+
+            Debug = new List<PropertyRow>();
+            Warnings = jar.Warnings.ToList();
             return;
         }
 
@@ -213,6 +275,13 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
 
     /// <summary>What that group is called: a PE's is load config and TLS, an ELF's is how it was hardened.</summary>
     public string SecurityTitle { get; } = "Security and TLS";
+
+    /// <summary>The bytecode section's heading: the .NET runtime's for an assembly, Java's for a JAR.</summary>
+    public string ManagedTitle { get; } = ".NET / CLR";
+
+    public string VersionTitle { get; } = "Version info";
+
+    public string BuildTitle { get; } = "Build toolchain (Rich header)";
     public bool HasSecurity => Security.Count > 0;
     /// <summary>Decoded VS_VERSIONINFO resource.</summary>
     public List<PropertyRow> Version { get; }

@@ -572,7 +572,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             return _agent;
         }
 
-        if (_binary is not { Analysis: not null } binary)
+        if (_binary is not { } binary || (binary.Analysis is null && binary.Bytecode is null))
         {
             throw new InvalidOperationException("This file cannot be analysed — there is nothing to look at.");
         }
@@ -593,7 +593,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             binary.Image,
             binary.Analysis,
             binary.Project,
-            new DiscoveryState(binary.Analysis!.FunctionCount, true, TimeSpan.Zero),
+            binary.Analysis is { } analysis ? new DiscoveryState(analysis.FunctionCount, true, TimeSpan.Zero) : DiscoveryState.None,
             save: null,
 
             // The window's own store, so a patch the assistant records appears in the Patches tab
@@ -612,7 +612,12 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             // disposing the assistant's session must not dispose it.
             managed: binary.Managed,
             managedLoadError: binary.ManagedLoadError,
-            ownsManaged: false));
+            ownsManaged: false,
+
+            // A reading that is not .NET (a JAR) is handed over as it is, with the window's own member
+            // annotations, so a class the assistant names shows under that name in the window's listing.
+            bytecode: binary.Managed is null ? binary.Bytecode : null,
+            members: binary.MemberAnnotations));
 
         var provider = Settings.ToProviderSettings();
         // The window's own debugger, not one of its own. Two processes of the same untrusted binary,

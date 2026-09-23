@@ -149,13 +149,20 @@ public sealed class BinaryImageTests : IDisposable
     }
 
     [Fact]
-    public void AJarIsNamedAndRefused()
+    public void AJarOpensAndAnApkIsNamedAndRefused()
     {
-        string path = Zip("lib.jar", "META-INF/MANIFEST.MF", "a/B.class");
+        string jar = Zip("lib.jar", "META-INF/MANIFEST.MF", "a/B.class");
+        var image = Assert.IsType<Spydate.Core.Jvm.JarImage>(BinaryImage.Load(jar));
+        Assert.Equal(BinaryFormat.Jar, image.Format);
 
-        var ex = Assert.Throws<UnsupportedFormatException>(() => BinaryImage.Load(path));
-        Assert.Equal(BinaryFormat.Jar, ex.Format);
-        Assert.Contains("Java archive", ex.Message);
+        // The "class" here is one byte, not a class file: it is reported by name, never thrown on.
+        Assert.Empty(image.Classes);
+        Assert.Contains(image.Warnings, w => w.Contains("a/B.class", StringComparison.Ordinal));
+
+        string apk = Zip("app.apk", "AndroidManifest.xml", "classes.dex");
+        var ex = Assert.Throws<UnsupportedFormatException>(() => BinaryImage.Load(apk));
+        Assert.Equal(BinaryFormat.Apk, ex.Format);
+        Assert.Contains("Android package", ex.Message);
     }
 
     [Fact]

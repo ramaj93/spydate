@@ -1,8 +1,10 @@
 using System.IO;
 using Spydate.Core.Binary;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 using Spydate.Core.Readings;
+using Spydate.Decompiler.Jvm;
 using Spydate.Decompiler.Managed;
 using Spydate.Decompiler.Native;
 using Spydate.Disassembly;
@@ -12,8 +14,9 @@ namespace Spydate.App.Services;
 /// <summary>Everything loaded for one file: the image (PE or ELF) plus the native and/or managed analysis objects.</summary>
 public sealed class OpenedBinary : IDisposable
 {
-    public OpenedBinary(IBinaryImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, IBytecodeReading? bytecode = null)
+    public OpenedBinary(IBinaryImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, IBytecodeReading? bytecode = null, MemberAnnotationStore? members = null)
     {
+        MemberAnnotations = members;
         Image = image;
         Analysis = analysis;
         Bytecode = managed is null ? bytecode : new DotNetReading(managed);
@@ -94,15 +97,21 @@ public sealed class OpenedBinary : IDisposable
     /// <summary>Names and comments the user has added; empty when the image cannot be analysed.</summary>
     public AnnotationStore? Annotations => Analysis?.Annotations;
 
+    /// <summary>
+    /// Names and comments keyed by member rather than address, for a file whose program has no addresses — a JAR.
+    /// Null for every other file.
+    /// </summary>
+    public MemberAnnotationStore? MemberAnnotations { get; }
+
     /// <summary>True when there are annotations, patches, breakpoints or notes that have not been written to disk.</summary>
-    public bool HasUnsavedAnnotations => Annotations is { IsDirty: true } || Patches.IsDirty || Breakpoints.IsDirty || Notes.IsDirty;
+    public bool HasUnsavedAnnotations => Annotations is { IsDirty: true } || Patches.IsDirty || Breakpoints.IsDirty || Notes.IsDirty || MemberAnnotations is { IsDirty: true };
 
     /// <summary>
     /// Writes the project out, returning where it went (null when there was nothing to write). Notes go
     /// even when there is no analysis to carry annotations — an empty annotation store touches nothing
     /// in the file, so the merge keeps everything else and only the notes are written.
     /// </summary>
-    public string? SaveProject() => SpydateProject.Save(Image, Annotations ?? new AnnotationStore(), Patches, Breakpoints, Notes);
+    public string? SaveProject() => SpydateProject.Save(Image, Annotations ?? new AnnotationStore(), Patches, Breakpoints, Notes, MemberAnnotations);
 
     public string DisplayName => Image.FileName;
 
@@ -215,10 +224,12 @@ public sealed class WorkspaceService : IDisposable
 
         if (binary.Analysis is not { } analysis)
         {
-            // Still catch up on notes for a managed-only image, whose agent may have written some.
+            // Still catch up on notes for a managed-only image, whose agent may have written some — and on the
+            // member annotations of a JAR, which is all a JAR's annotations are.
             binary.Notes.Clear();
-            SpydateProject.LoadFor(binary.Image, new AnnotationStore(), notes: binary.Notes);
-            return null;
+            binary.MemberAnnotations?.Clear();
+            var result = SpydateProject.LoadFor(binary.Image, new AnnotationStore(), notes: binary.Notes, members: binary.MemberAnnotations);
+            return binary.MemberAnnotations is null ? null : result;
         }
 
         analysis.Annotations.Clear();
@@ -229,7 +240,7 @@ public sealed class WorkspaceService : IDisposable
 
     private void Watch(OpenedBinary opened)
     {
-        if (opened.Analysis is null)
+        if (opened.Analysis is null && opened.MemberAnnotations is null)
         {
             return;   // nothing to annotate, so nothing to notice
         }
@@ -276,6 +287,22 @@ public sealed class WorkspaceService : IDisposable
     private static OpenedBinary Load(string path)
     {
         var image = BinaryImage.Load(path);
+
+        // A JAR is only bytecode: no native analysis, annotations keyed by member. Its classes are parsed here,
+        // off the UI thread, where the rest of opening happens.
+        if (image is JarImage jar)
+        {
+            var members = new MemberAnnotationStore();
+            var jarNotes = new NoteStore();
+            var jarProject = SpydateProject.LoadFor(image, new AnnotationStore(), notes: jarNotes, members: members);
+            var reading = new JvmReading(jar, members);
+
+            // Every reference and string in the archive, which the Strings document asks for on the UI thread:
+            // decoded now, in the background, so a large JAR's first look at its strings does not stall the window.
+            _ = Task.Run(() => reading.References);
+            return new OpenedBinary(image, null, null, null, jarProject, notes: jarNotes, bytecode: reading, members: members);
+        }
+
         BinaryAnalysis? analysis = image.Architecture is Architecture.X86 or Architecture.X64 ? new BinaryAnalysis(image) : null;
         analysis?.LoadPdbSymbols();
 

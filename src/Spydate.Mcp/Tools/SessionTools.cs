@@ -3,7 +3,9 @@ using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
 using Spydate.Core.Binary;
+using Spydate.Core.Archive;
 using Spydate.Core.Elf;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 using Spydate.Core.Readings;
 using Spydate.Core.Strings;
@@ -26,7 +28,7 @@ public sealed class SessionTools
     }
 
     [McpServerTool(Name = "open_binary")]
-    [Description("Open a PE (exe/dll/sys) or ELF (Linux program or .so) for analysis and return an orientation summary. Replaces whatever was open. Run this first.")]
+    [Description("Open a PE (exe/dll/sys), ELF (Linux program or .so) or JAR for analysis and return an orientation summary. Replaces whatever was open. Run this first.")]
     public async Task<string> OpenBinaryAsync(
         [Description("Full path to the file, e.g. C:\\\\Windows\\\\System32\\\\notepad.exe")] string path,
         CancellationToken cancellationToken = default)
@@ -74,7 +76,7 @@ public sealed class SessionTools
         => _store.Current is { } session ? Overview(session, opened: false) : NothingOpen;
 
     [McpServerTool(Name = "read_file")]
-    [Description("Read raw bytes of any file on disk - not only a PE - as hex or text, to probe a blob open_binary cannot open (a resource, a .inx, an unknown container). A window of at most 4096 bytes; within --root.")]
+    [Description("Read raw bytes of any file on disk as hex or text, to probe a blob open_binary cannot open (a resource, a .inx, an unknown container). At most 4096 bytes; within --root. In the open JAR, \"x.jar!/path\" reads an entry and \"x.jar!/\" lists them.")]
     public string ReadFile(
         [Description("Full path to the file.")] string path,
         [Description("Byte offset to start at.")] long offset = 0,
@@ -84,6 +86,13 @@ public sealed class SessionTools
         if (string.IsNullOrWhiteSpace(path))
         {
             return "give a path to a file to read";
+        }
+
+        // app.jar!/META-INF/MANIFEST.MF — the JVM's own spelling of a file inside an archive.
+        int bang = path.IndexOf("!/", StringComparison.Ordinal);
+        if (bang > 0)
+        {
+            return ReadEntry(path[..bang], path[(bang + 2)..], offset, length, @as);
         }
 
         if (!_options.Allows(path))
@@ -146,7 +155,85 @@ public sealed class SessionTools
         }
     }
 
+    /// <summary>The most an archive entry is inflated to be read from; a resource larger than this is a bomb or a disk image.</summary>
+    private const int MaxEntryRead = 64 * 1024 * 1024;
+
+    private const int EntriesPerPage = 100;
+
+    /// <summary>
+    /// One file inside the open archive, read like a file on disk; or, for a name ending in <c>/</c> (the empty
+    /// name included), the entries under it. Only the archive that is open: its entries are already indexed, and
+    /// it has already passed the --root check.
+    /// </summary>
+    private string ReadEntry(string archive, string name, long offset, int length, string @as)
+    {
+        if (_store.Current is not { Image: JarImage jar } session
+            || !(string.Equals(archive, jar.FileName, StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(archive.Replace('/', '\\'), session.Path, StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"{archive} is not the open archive; entries are read from the archive open_binary opened"
+                   + (_store.Current is { } open ? $" ({open.Image.FileName})" : string.Empty);
+        }
+
+        if (name.Length == 0 || name.EndsWith('/'))
+        {
+            var under = jar.Archive.Entries.Where(e => e.Name.StartsWith(name, StringComparison.Ordinal) && !e.IsDirectory).ToList();
+            int from = (int)Math.Clamp(offset, 0, under.Count);
+            var table = new TextTable(("entry", 70), ("size", 10), ("packed", 10), ("method", 9));
+            foreach (var entry in under.Skip(from).Take(EntriesPerPage))
+            {
+                table.Add(entry.Name, entry.Size.ToString(CultureInfo.InvariantCulture), entry.CompressedSize.ToString(CultureInfo.InvariantCulture), entry.MethodName + (entry.IsEncrypted ? ", encrypted" : string.Empty));
+            }
+
+            int shown = Math.Min(EntriesPerPage, under.Count - from);
+            string? next = from + shown < under.Count ? $"read_file(\"{jar.FileName}!/{name}\", offset={from + shown})" : null;
+            return Budget.Clip(table.Render($"no files under {name}") + '\n'
+                               + TextTable.Meta(shown, under.Count, jar.Archive.Entries.Count, "entries", next, name.Length == 0 ? null : $"under {name}"));
+        }
+
+        if (jar.Archive.Find(name) is not { } found)
+        {
+            string tail = name[(name.LastIndexOf('/') + 1)..];
+            var near = jar.Archive.Entries.Where(e => e.Name.Contains(tail, StringComparison.OrdinalIgnoreCase)).Take(5).Select(e => e.Name).ToList();
+            return $"{jar.FileName} has no entry {name}" + (near.Count > 0 ? $". Did you mean: {string.Join(", ", near)}?" : $"; read_file(\"{jar.FileName}!/\") lists them");
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = jar.Archive.Read(found, MaxEntryRead);
+        }
+        catch (ArchiveException ex)
+        {
+            return ex.Message;
+        }
+
+        offset = Math.Clamp(offset, 0, bytes.Length);
+        int take = (int)Math.Min(Math.Clamp(length, 1, 4096), bytes.Length - offset);
+        var window = bytes.AsSpan((int)offset, take).ToArray();
+        string header = $"{jar.FileName}!/{name}: {bytes.Length} bytes ({found.MethodName}); showing {window.Length} at offset 0x{offset:X}"
+                        + (offset + window.Length < bytes.Length ? " (more follows)" : string.Empty)
+                        + (name.EndsWith(".class", StringComparison.OrdinalIgnoreCase) ? " - a class; read_function reads it as bytecode" : string.Empty) + "\n";
+        string body = @as switch
+        {
+            "utf8" => StringLiterals.Escape(Encoding.UTF8.GetString(window)),
+            "utf16" => StringLiterals.Escape(Encoding.Unicode.GetString(window)),
+            _ => HexDump.Render(window, (ulong)offset),
+        };
+
+        return Budget.Clip(header + body);
+    }
+
     internal const string NothingOpen = "no binary is open - call open_binary(path) first";
+
+    /// <summary>
+    /// Why a native-code tool has nothing to say about the open file, in words that point at what does. A JAR is
+    /// not an unsupported machine — it has no machine code at all, and its program is read another way.
+    /// </summary>
+    internal static string WhyNoNative(BinarySession session) => session.Image is JarImage jar
+        ? $"{jar.FileName} is a Java archive: its code is JVM bytecode, with no addresses or machine code. "
+          + "Browse it with find_symbol, read it with read_function(view=\"bytecode\"), and list its files with read_file(\"" + jar.FileName + "!/\")"
+        : $"{session.MachineName} is not a machine this disassembles";
 
     /// <summary>Width of the label column, wide enough for the longest label with a gap after it.</summary>
     private const int LabelWidth = 10;
@@ -165,6 +252,11 @@ public sealed class SessionTools
         if (session.Image is ElfImage elf)
         {
             return ElfOverview(session, elf, opened);
+        }
+
+        if (session.Image is JarImage jar)
+        {
+            return JarOverview(session, jar, opened);
         }
 
         var image = (PeImage)session.Image;
@@ -286,6 +378,84 @@ public sealed class SessionTools
             Line(sb, "next", "list_functions(named=\"unnamed\", sort=\"refs\") | list_imports() | find_strings(query=...)");
         }
 
+        Notes(sb, session);
+        return Budget.Clip(sb.ToString());
+    }
+
+    /// <summary>
+    /// The screenful for a JAR. There are no sections or imports to list; what orients an agent is what the
+    /// archive holds (classes, resources, nested JARs, native libraries), how it runs (the manifest's Main-Class
+    /// and Class-Path), what built it, and — since its annotations key on members — how many it already has.
+    /// </summary>
+    private static string JarOverview(BinarySession session, JarImage jar, bool opened)
+    {
+        var sb = new StringBuilder();
+        Line(sb, opened ? "opened" : "open", jar.FileName);
+        Line(sb, "path", session.Path);
+
+        var files = jar.Archive.Entries.Where(e => !e.IsDirectory).ToList();
+        int classes = files.Count(e => e.Name.EndsWith(".class", StringComparison.OrdinalIgnoreCase));
+        int jars = files.Count(e => e.Name.EndsWith(".jar", StringComparison.OrdinalIgnoreCase));
+        int natives = files.Count(e => e.Name.EndsWith(".so", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".dylib", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".jnilib", StringComparison.OrdinalIgnoreCase));
+        var contents = new List<string> { $"{classes} class files" };
+        if (jars > 0)
+        {
+            contents.Add($"{jars} nested JARs");
+        }
+
+        if (natives > 0)
+        {
+            contents.Add($"{natives} native libraries");
+        }
+
+        contents.Add($"{files.Count - classes - jars - natives} other files");
+        Line(sb, "format", $"JAR (zip), {files.Count} files: {string.Join(", ", contents)}, {Size(jar.Length)}");
+
+        if (jar.Manifest is { } manifest)
+        {
+            var facts = new List<string>();
+            if (manifest["Main-Class"] is { } main)
+            {
+                facts.Add($"Main-Class {main}");
+            }
+
+            if ((manifest["Build-Jdk-Spec"] ?? manifest["Build-Jdk"] ?? manifest["Created-By"]) is { } built)
+            {
+                facts.Add($"built by {built}");
+            }
+
+            if (manifest["Multi-Release"] is { } multi && multi.Equals("true", StringComparison.OrdinalIgnoreCase))
+            {
+                facts.Add($"multi-release ({jar.VersionedClasses} versioned classes not shown)");
+            }
+
+            if (manifest.EntrySections > 0)
+            {
+                facts.Add($"{manifest.EntrySections} per-entry sections (signed?)");
+            }
+
+            Line(sb, "manifest", facts.Count == 0 ? $"{manifest.Main.Count} attributes" : string.Join(", ", facts));
+        }
+        else
+        {
+            Line(sb, "manifest", "none");
+        }
+
+        if (jar.ModuleName is { } module)
+        {
+            Line(sb, "module", module);
+        }
+
+        Bytecode(sb, session);
+        Line(sb, "project", Project(session) + ((session.MemberAnnotations?.Count ?? 0) > 0 ? " (list_annotations)" : string.Empty));
+        Line(sb, "debug", "not available - the debugger runs Windows programs; this archive is read, not run");
+
+        if (jar.Warnings.Count > 0)
+        {
+            Line(sb, "warnings", string.Join("; ", jar.Warnings.Take(3)) + (jar.Warnings.Count > 3 ? $"; +{jar.Warnings.Count - 3} more" : string.Empty));
+        }
+
+        Line(sb, "next", $"find_symbol(query=...) | read_function(target=\"package.Class\") | read_function(target=\"Class::method\", view=\"bytecode\") | xrefs | find_strings | read_file(\"{jar.FileName}!/\")");
         Notes(sb, session);
         return Budget.Clip(sb.ToString());
     }

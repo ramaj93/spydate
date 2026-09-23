@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using Spydate.Core.Elf;
+using Spydate.Core.Jvm;
 using Spydate.Core.PE;
 
 namespace Spydate.Core.Binary;
@@ -100,7 +101,7 @@ public static class BinaryImage
     }
 
     /// <summary>
-    /// Opens a binary. A PE or an ELF is parsed; a recognised format Spydate does not open yet is refused by name.
+    /// Opens a binary. A PE, an ELF or a JAR is parsed; a recognised format Spydate does not open yet is refused by name.
     /// A file nothing recognises still goes to the PE parser, whose error explains what it found where a header
     /// should be — the same answer opening an unknown file has always given.
     /// </summary>
@@ -114,7 +115,12 @@ public static class BinaryImage
             return ElfImage.Load(path);
         }
 
-        if (format is BinaryFormat.Jar or BinaryFormat.Apk)
+        if (format == BinaryFormat.Jar)
+        {
+            return JarImage.Load(path);
+        }
+
+        if (format == BinaryFormat.Apk)
         {
             throw new UnsupportedFormatException(path, format);
         }
@@ -127,6 +133,7 @@ public static class BinaryImage
     {
         PeImage pe => pe.Machine.ToString(),
         ElfImage elf => elf.Header.MachineName,
+        JarImage => "JVM",
         _ => image.Architecture.ToString(),
     };
 
@@ -135,6 +142,7 @@ public static class BinaryImage
     {
         PeImage pe => pe.Is64Bit ? "PE32+" : "PE32",
         ElfImage elf => elf.Header.ClassName,
+        JarImage => "JAR",
         _ => image.Format.ToString(),
     };
 

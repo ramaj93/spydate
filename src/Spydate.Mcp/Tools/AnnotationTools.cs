@@ -39,7 +39,7 @@ public sealed class AnnotationTools
             return ReadOnlyRefusal;
         }
 
-        if (_store.Current is not { Analysis: { } analysis } session)
+        if (_store.Current is not { } open)
         {
             return SessionTools.NothingOpen;
         }
@@ -47,6 +47,16 @@ public sealed class AnnotationTools
         if (name is null && comment is null)
         {
             return "give a name, a comment, or both";
+        }
+
+        if (open.MemberAnnotations is { } members)
+        {
+            return AnnotateMember(open, members, target, name, comment);
+        }
+
+        if (open is not { Analysis: { } analysis } session)
+        {
+            return $"there is nothing to annotate: {SessionTools.WhyNoNative(open)}";
         }
 
         var resolved = Targets.Resolve(session, target);
@@ -119,6 +129,11 @@ public sealed class AnnotationTools
             return ReadOnlyRefusal;
         }
 
+        if (_store.Current is { MemberAnnotations: not null })
+        {
+            return "a JAR's local variables keep the names its class files give them; name the method or field itself with annotate";
+        }
+
         if (_store.Current is not { Analysis: { } analysis } session)
         {
             return SessionTools.NothingOpen;
@@ -156,6 +171,11 @@ public sealed class AnnotationTools
         [Description("Rows to skip, for paging.")] int offset = 0,
         [Description("Rows to return, at most 200.")] int limit = DefaultLimit)
     {
+        if (_store.Current is { MemberAnnotations: { } members } jar)
+        {
+            return ListMembers(jar, members, source, query, offset, limit);
+        }
+
         if (_store.Current is not { Analysis: { } analysis } session)
         {
             return SessionTools.NothingOpen;
@@ -225,6 +245,11 @@ public sealed class AnnotationTools
     public string ReadAnnotation(
         [Description("Address, sub_XXXX, an existing name, or a .NET Type::Method.")] string target)
     {
+        if (_store.Current is { MemberAnnotations: { } members } jar)
+        {
+            return ReadMember(jar, members, target);
+        }
+
         if (_store.Current is not { Analysis: { } analysis } session)
         {
             return SessionTools.NothingOpen;
@@ -533,6 +558,145 @@ public sealed class AnnotationTools
             : null;
     }
 
+    // --- a reading keyed by member (a JAR) ----------------------------------
+
+    /// <summary>
+    /// Names or comments a class, method or field, keyed on what the reading says identifies it for good. The
+    /// target is taken the way read_function takes it, so the name an agent just read is the name it annotates.
+    /// </summary>
+    private string AnnotateMember(BinarySession session, MemberAnnotationStore members, string target, string? name, string? comment)
+    {
+        var found = BytecodeTargets.Resolve(session, target);
+        if (!found.Found)
+        {
+            return found.Problem ?? $"'{target}' is not a type or member in this {session.Bytecode?.Noun ?? "file"}";
+        }
+
+        if (session.Bytecode!.AnnotationKey(found.Type, found.Member) is not { } key)
+        {
+            return $"{found.Describe()} cannot be annotated";
+        }
+
+        string what = found.Describe();
+        string? was = members.Get(key)?.Name;
+        var sb = new StringBuilder();
+        if (name is not null)
+        {
+            string? applied = members.SetName(key, name);
+            sb.Append(applied is null
+                ? $"{what} has its own name back"
+                : $"{what} is now called {applied}{(was is null || was == applied ? string.Empty : $" (was {was})")}");
+        }
+
+        if (comment is not null)
+        {
+            string? applied = members.SetComment(key, comment);
+            sb.Append(sb.Length > 0 ? "; " : string.Empty);
+            sb.Append(applied is null ? "comment cleared" : $"comment: {applied}");
+        }
+
+        return sb.Append(Persist(session)).ToString();
+    }
+
+    private static string ListMembers(BinarySession session, MemberAnnotationStore members, string source, string? query, int offset, int limit)
+    {
+        limit = Math.Clamp(limit, 1, MaxLimit);
+        offset = Math.Max(0, offset);
+        string? needle = string.IsNullOrWhiteSpace(query) ? null : query.Trim();
+
+        var all = members.Snapshot();
+        var matching = all
+            .Where(e => source switch
+            {
+                "agent" => e.Value.Source == AnnotationSource.Agent,
+                "user" => e.Value.Source == AnnotationSource.User,
+                _ => true,
+            })
+            .Where(e => needle is null
+                        || e.Key.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                        || (e.Value.Name?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false)
+                        || (e.Value.Comment?.Contains(needle, StringComparison.OrdinalIgnoreCase) ?? false))
+            .ToList();
+
+        var table = new TextTable(("member", 70), ("by", 5), ("name", 36), ("comment", 80));
+        foreach (var (key, annotation) in matching.Skip(offset).Take(limit))
+        {
+            table.Add(key, annotation.Source == AnnotationSource.Agent ? "agent" : "user", annotation.Name ?? string.Empty, annotation.Comment ?? string.Empty);
+        }
+
+        int returned = Math.Max(0, Math.Min(limit, matching.Count - offset));
+        string paging = needle is null ? $"offset={offset + returned}" : $"query=\"{needle}\", offset={offset + returned}";
+        string? next = offset + returned < matching.Count ? $"list_annotations({paging})" : null;
+        return Budget.Clip(table.Render(needle is null ? "nothing has been named yet" : $"nothing matches \"{needle}\"") + '\n'
+                           + TextTable.Meta(returned, matching.Count, all.Count, "annotations", next, $"source={source}")
+                           + Where(session));
+    }
+
+    private static string ReadMember(BinarySession session, MemberAnnotationStore members, string target)
+    {
+        var found = BytecodeTargets.Resolve(session, target);
+        if (!found.Found)
+        {
+            return found.Problem ?? $"'{target}' is not a type or member in this {session.Bytecode?.Noun ?? "file"}";
+        }
+
+        string? key = session.Bytecode!.AnnotationKey(found.Type, found.Member);
+        var sb = new StringBuilder();
+        sb.Append(found.Describe());
+        var annotation = key is null ? null : members.Get(key);
+        if (annotation is null || annotation.IsEmpty)
+        {
+            sb.Append('\n');
+        }
+        else
+        {
+            string by = annotation.Source == AnnotationSource.Agent ? "agent" : "user";
+            string when = annotation.Modified is { } m ? $", {m.ToLocalTime():yyyy-MM-dd HH:mm}" : string.Empty;
+            sb.Append(CultureInfo.InvariantCulture, $"  (by {by}{when})\n");
+            if (annotation.Name is { } name)
+            {
+                sb.Append(CultureInfo.InvariantCulture, $"name      {name}\n");
+            }
+
+            if (annotation.Comment is { } comment)
+            {
+                sb.Append(CultureInfo.InvariantCulture, $"comment   {comment}\n");
+            }
+        }
+
+        // What was recorded about the members of a type, when a type is asked about: the work a re-read would miss.
+        if (found.Member is null && key is not null)
+        {
+            var inside = members.Snapshot()
+                .Where(e => e.Key.StartsWith(key + ".", StringComparison.Ordinal))
+                .ToList();
+            foreach (var (memberKey, note) in inside)
+            {
+                string text = string.Join("; ", new[] { note.Name, note.Comment }.Where(s => s is not null));
+                sb.Append(CultureInfo.InvariantCulture, $"member    {memberKey[(key.Length + 1)..]}  {text}\n");
+            }
+        }
+
+        if (annotation?.Name is { Length: > 0 } named)
+        {
+            var mentions = session.Notes.Snapshot()
+                .Where(s => s.Value.Text.Contains(named, StringComparison.OrdinalIgnoreCase))
+                .Select(s => s.Key)
+                .ToList();
+            if (mentions.Count > 0)
+            {
+                sb.Append(CultureInfo.InvariantCulture, $"notes     {string.Join(", ", mentions)}  (read_notes)\n");
+            }
+        }
+
+        if (annotation is null || annotation.IsEmpty)
+        {
+            sb.Append("nothing recorded here yet\n");
+        }
+
+        return sb.ToString().TrimEnd('\n');
+    }
+
     internal const string ReadOnlyRefusal =
         "this server was started with --read-only, so nothing can be renamed or commented. Everything else still works.";
 
@@ -548,7 +712,7 @@ public sealed class AnnotationTools
     {
         try
         {
-            string? path = session.Save(session.Image, session.Analysis!.Annotations);
+            string? path = session.Save(session.Image, session.Analysis?.Annotations ?? new AnnotationStore());
             return path is null ? string.Empty : $"\nsaved to {path}";
         }
         catch (IOException ex)

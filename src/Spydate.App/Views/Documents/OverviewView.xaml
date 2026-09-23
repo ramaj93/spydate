@@ -61,7 +61,7 @@
             </Border>
 
             <StackPanel Visibility="{Binding HasManaged, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text=".NET / CLR" Style="{StaticResource SectionHeader}" />
+                <TextBlock Text="{Binding ManagedTitle}" Style="{StaticResource SectionHeader}" />
                 <Border Style="{StaticResource Card}">
                     <ItemsControl ItemsSource="{Binding Managed}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
                 </Border>
@@ -75,7 +75,7 @@
             </StackPanel>
 
             <StackPanel Visibility="{Binding HasVersion, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="Version info" Style="{StaticResource SectionHeader}" />
+                <TextBlock Text="{Binding VersionTitle}" Style="{StaticResource SectionHeader}" />
                 <Border Style="{StaticResource Card}">
                     <ItemsControl ItemsSource="{Binding Version}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
                 </Border>
@@ -89,7 +89,7 @@
             </StackPanel>
 
             <StackPanel Visibility="{Binding HasBuild, Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="Build toolchain (Rich header)" Style="{StaticResource SectionHeader}" />
+                <TextBlock Text="{Binding BuildTitle}" Style="{StaticResource SectionHeader}" />
                 <Border Style="{StaticResource Card}">
                     <ItemsControl ItemsSource="{Binding Build}" ItemTemplate="{StaticResource PropertyRowTemplate}" />
                 </Border>

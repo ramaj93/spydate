@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using ModelContextProtocol.Server;
 using Spydate.Core.Strings;
+using Spydate.Decompiler.Jvm;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
 
@@ -53,9 +54,15 @@ public sealed class StringTools
             return Managed(open, query, referencedOnly, minLength, offset, limit);
         }
 
+        // A JAR's strings are its ldc constants, each loaded by a known method; its bytes are compressed.
+        if (open.Bytecode is JvmReading jvm)
+        {
+            return JvmAnswers.Strings(jvm, query, minLength, offset, limit);
+        }
+
         if (open is not { Analysis: { } analysis } session)
         {
-            return $"there are no strings to read: {open.MachineName} is not a machine this disassembles";
+            return $"there are no strings to read: {SessionTools.WhyNoNative(open)}";
         }
 
         // The first touch scans the whole file; it is lazy in the engine and cached from then on.
