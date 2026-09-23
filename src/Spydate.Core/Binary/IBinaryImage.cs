@@ -181,3 +181,27 @@ public interface IUnwindInfoSource
     /// <summary>Each declared function's start and end, relative to the image base. Chained fragments are left out.</summary>
     IReadOnlyList<(uint BeginRva, uint EndRva)> UnwindRanges { get; }
 }
+
+/// <summary>What an <see cref="ImageSymbol"/> names.</summary>
+public enum ImageSymbolKind
+{
+    Function,
+
+    /// <summary>A variable or constant.</summary>
+    Data,
+
+    /// <summary>A linker-made stub that jumps to an import, such as an ELF PLT entry. Named after the import.</summary>
+    Stub,
+}
+
+/// <summary>A named address the file itself declares, besides its exports: a local function, a global variable.</summary>
+public sealed record ImageSymbol(string Name, uint Rva, uint Size, ImageSymbolKind Kind);
+
+/// <summary>
+/// An image that carries its own names for addresses beyond what it exports — an ELF's <c>.symtab</c>, and the
+/// PLT stubs that stand for its imports. A PE's equivalent lives in a PDB, which is loaded separately.
+/// </summary>
+public interface ISymbolSource
+{
+    IReadOnlyList<ImageSymbol> Symbols { get; }
+}

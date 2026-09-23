@@ -90,13 +90,17 @@ public sealed class BinarySession : IDisposable
 
     public IBinaryImage Image { get; }
 
-    /// <summary>
-    /// The PE behind <see cref="Image"/>, for the tools that report a PE's own structures. Temporary: every
-    /// format opened today is a PE, so this never throws, and each use is a place the next format has to be
-    /// taught about. Grep for it; that is the to-do list.
-    /// </summary>
-    public PeImage Pe => Image as PeImage
-        ?? throw new InvalidOperationException($"{Image.FileName} is {Image.Format}, not a PE; this tool does not know that format yet");
+    /// <summary>The CLR header, when this is a .NET assembly. Only a PE can be one.</summary>
+    public ClrHeader? ClrHeader => (Image as PeImage)?.ClrHeader;
+
+    /// <summary>A .NET assembly with no native code of its own: the IL is the program.</summary>
+    public bool IsILOnly => ClrHeader?.IsILOnly == true;
+
+    /// <summary>The processor, in the format's own words, for messages.</summary>
+    public string MachineName => BinaryImage.MachineName(Image);
+
+    /// <summary>The debugger runs Windows processes; any other format is read, not run.</summary>
+    public bool CanDebug => Image.Format == BinaryFormat.Pe;
 
     /// <summary>Null when the image is not x86 or x64: there is nothing here that can read it.</summary>
     public BinaryAnalysis? Analysis { get; }

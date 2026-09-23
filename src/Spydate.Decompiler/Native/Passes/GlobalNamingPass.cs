@@ -70,7 +70,10 @@ public sealed class GlobalNames
     /// <summary>True when an immediate is worth reading as a pointer rather than a number.</summary>
     public bool IsNamedTarget(ulong va, int bits)
     {
-        if (va == 0 || bits != _image.Bitness || SectionAt(va) is not { } section)
+        // A non-PIE Linux x64 program lives below 4 GB, so its code loads addresses as 32-bit immediates
+        // (mov esi, 0x47F093). A PE x64 image sits above 4 GB and never does, so it keeps the stricter rule.
+        bool pointerWide = bits == _image.Bitness || (bits == 32 && _image.Bitness == 64 && _image.Format != BinaryFormat.Pe);
+        if (va == 0 || !pointerWide || SectionAt(va) is not { } section)
         {
             return false;
         }

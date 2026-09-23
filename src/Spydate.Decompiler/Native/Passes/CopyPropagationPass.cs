@@ -1,4 +1,5 @@
 using Spydate.Decompiler.Native.IR;
+using Spydate.Disassembly;
 
 namespace Spydate.Decompiler.Native.Passes;
 
@@ -24,8 +25,8 @@ public sealed class CopyPropagationPass : IIrPass
 
             // Dry run to learn how many readers each definition has and whether it dies inside the
             // block, then the real pass.
-            var facts = Process(block, function.Bitness, dryRun: true, null, seeds);
-            Process(block, function.Bitness, dryRun: false, facts, seeds);
+            var facts = Process(block, function.Bitness, function.Convention, dryRun: true, null, seeds);
+            Process(block, function.Bitness, function.Convention, dryRun: false, facts, seeds);
         }
     }
 
@@ -45,7 +46,7 @@ public sealed class CopyPropagationPass : IIrPass
         public bool Redefined;
     }
 
-    private static Dictionary<int, Def> Process(IrBlock block, int bitness, bool dryRun, Dictionary<int, Def>? facts, List<(IrExpr Var, IrExpr Value)> seeds)
+    private static Dictionary<int, Def> Process(IrBlock block, int bitness, CallingConvention convention, bool dryRun, Dictionary<int, Def>? facts, List<(IrExpr Var, IrExpr Value)> seeds)
     {
         var stmts = block.Statements;
         var live = new List<Def>();
@@ -152,7 +153,7 @@ public sealed class CopyPropagationPass : IIrPass
                     continue;
                 }
 
-                if (hasCall && def.Var is IrReg r && IsCallerSaved(r.Name, bitness))
+                if (hasCall && def.Var is IrReg r && IsCallerSaved(r.Name, bitness, convention))
                 {
                     // The call clobbers volatile registers: the definition is dead afterwards.
                     def.Valid = false;
@@ -299,11 +300,9 @@ public sealed class CopyPropagationPass : IIrPass
     /// Registers a call may clobber. On x86 only eax is treated as clobbered: ecx/edx may carry
     /// fastcall/thiscall arguments that argument recovery does not model yet, so their values are kept visible.
     /// </summary>
-    private static bool IsCallerSaved(string reg, int bitness)
+    private static bool IsCallerSaved(string reg, int bitness, CallingConvention convention)
     {
         string c = RegisterAliases.CanonicalOf(reg);
-        return bitness == 64
-            ? c is "rax" or "rcx" or "rdx" or "r8" or "r9" or "r10" or "r11" || c.StartsWith("zmm", StringComparison.Ordinal)
-            : c is "rax";
+        return bitness == 64 ? convention.IsVolatile(c) : c is "rax";
     }
 }

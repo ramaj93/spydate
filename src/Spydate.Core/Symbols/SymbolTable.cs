@@ -65,14 +65,32 @@ public sealed class SymbolTable
     public string NameOrDefault(ulong va, string prefix = "loc")
         => _byVa.TryGetValue(va, out var s) ? s.Name : $"{prefix}_{va:X}";
 
-    /// <summary>Builds the initial symbol table from an image: entry point, exports, import slots, sections.</summary>
+    /// <summary>
+    /// What the entry point is called: the name the image gives it (an ELF's <c>_start</c>) when it has one,
+    /// otherwise <c>EntryPoint</c>, or <c>DllEntryPoint</c> for a PE DLL.
+    /// </summary>
+    public static string EntryPointName(IBinaryImage image)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (image is ISymbolSource source && source.Symbols.FirstOrDefault(s => s.Rva == image.EntryPointRva && s.Kind == ImageSymbolKind.Function) is { } named)
+        {
+            return named.Name;
+        }
+
+        return image.IsLibrary && image.Format == BinaryFormat.Pe ? "DllEntryPoint" : "EntryPoint";
+    }
+
+    /// <summary>
+    /// Builds the initial symbol table from an image: entry point, exports, import slots, the image's own
+    /// symbols (an ELF's symbol table and PLT stubs), sections.
+    /// </summary>
     public static SymbolTable FromImage(IBinaryImage image)
     {
         var table = new SymbolTable();
 
         if (image.EntryPointRva != 0)
         {
-            table.Add(new Symbol(image.EntryPointVa, image.IsLibrary ? "DllEntryPoint" : "EntryPoint", SymbolKind.EntryPoint));
+            table.Add(new Symbol(image.EntryPointVa, EntryPointName(image), SymbolKind.EntryPoint));
         }
 
         foreach (var e in image.Exports)
@@ -87,7 +105,19 @@ public sealed class SymbolTable
 
         foreach (var import in image.Imports)
         {
-            table.Add(new Symbol(image.RvaToVa(import.SlotRva), $"{StripExtension(import.Module)}!{import.DisplayName}", SymbolKind.Import, (uint)(image.Is64Bit ? 8 : 4)));
+            // An ELF import whose library the file does not record is still an import; its slot says so by name.
+            string name = import.Module.Length == 0 ? $"{import.DisplayName}@got" : $"{StripExtension(import.Module)}!{import.DisplayName}";
+            table.Add(new Symbol(image.RvaToVa(import.SlotRva), name, SymbolKind.Import, (uint)(image.Is64Bit ? 8 : 4)));
+        }
+
+        if (image is ISymbolSource source)
+        {
+            foreach (var s in source.Symbols)
+            {
+                // A PLT stub is code — discovery reads it as a one-jump function — and carries the import's bare name.
+                var kind = s.Kind == ImageSymbolKind.Data ? SymbolKind.Data : SymbolKind.Function;
+                table.Add(new Symbol(image.RvaToVa(s.Rva), s.Name, kind, s.Size));
+            }
         }
 
         foreach (var s in image.Sections)
@@ -99,8 +129,15 @@ public sealed class SymbolTable
         return table;
     }
 
+    /// <summary><c>kernel32.dll</c> → <c>kernel32</c>; <c>libc.so.6</c> → <c>libc</c>, dropping the version too.</summary>
     private static string StripExtension(string moduleName)
     {
+        int so = moduleName.IndexOf(".so", StringComparison.Ordinal);
+        if (so > 0 && (so + 3 == moduleName.Length || moduleName[so + 3] == '.'))
+        {
+            return moduleName[..so];
+        }
+
         int dot = moduleName.LastIndexOf('.');
         return dot > 0 ? moduleName[..dot] : moduleName;
     }

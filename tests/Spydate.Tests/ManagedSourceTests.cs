@@ -160,9 +160,17 @@ public class ManagedSourceTests
         // walking the IL: that walk is wrong the first time a method contains a ternary, which is
         // how the whole of McpOptions.Parse came to be read as one statement. Whether the runtime
         // really accepts these is a question for a running process, and ManagedDebuggerTests asks it.
+        // Types are read until enough lines have been checked, not a fixed first few: which types come first
+        // depends on what namespaces Core has, and a namespace of enums and records (ELF's) carries few
+        // statements, which starved a fixed count of lines to check.
         int checkedLines = 0;
-        foreach (var type in assembly.Namespaces.SelectMany(n => n.Types).Take(12))
+        foreach (var type in assembly.Namespaces.SelectMany(n => n.Types))
         {
+            if (checkedLines > 100)
+            {
+                break;
+            }
+
             var source = assembly.Decompiler.SourceForType(type);
             var lines = ManagedDecompiler.Addressed(source, bodies, image.ImageBase).Split('\n');
 

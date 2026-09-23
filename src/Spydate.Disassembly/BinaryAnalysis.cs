@@ -13,7 +13,7 @@ namespace Spydate.Disassembly;
 public readonly record struct AnalysisProgress(int FunctionsFound, int Pending, string Message);
 
 /// <summary>
-/// Analysis session for one native <see cref="PeImage"/>: owns the disassembler, the symbol table
+/// Analysis session for one native <see cref="IBinaryImage"/>: owns the disassembler, the symbol table
 /// and the cache of discovered functions. Safe for concurrent readers.
 /// </summary>
 public sealed class BinaryAnalysis
@@ -51,6 +51,17 @@ public sealed class BinaryAnalysis
         "FatalExit", "FatalAppExitA", "FatalAppExitW", "CorExitProcess",
         "abort", "exit", "_exit", "_Exit", "quick_exit", "_invoke_watson",
         "_invalid_parameter_noinfo_noreturn", "_CxxThrowException", "longjmp", "_longjmp",
+    };
+
+    /// <summary>
+    /// The C library and C++ runtime on Linux and the BSDs. Kept apart because some of these names (<c>err</c>) are
+    /// ordinary functions elsewhere, and a wrong "never returns" cuts a function short.
+    /// </summary>
+    private static readonly HashSet<string> ElfNoReturnNames = new(StringComparer.Ordinal)
+    {
+        "__stack_chk_fail", "__assert_fail", "__cxa_throw", "__cxa_rethrow", "_Unwind_Resume", "__longjmp_chk",
+        "siglongjmp", "pthread_exit", "__fortify_fail", "__chk_fail", "err", "errx", "verr", "verrx", "_ZSt9terminatev",
+        "__libc_start_main",
     };
 
     /// <summary>Addresses (IAT slots and function entries) known never to return.</summary>
@@ -94,7 +105,12 @@ public sealed class BinaryAnalysis
         {
             // Import thunks are named "kernel32!ExitProcess"; exports are bare.
             string bare = symbol.Name.Contains('!') ? symbol.Name[(symbol.Name.LastIndexOf('!') + 1)..] : symbol.Name;
-            if (NoReturnNames.Contains(bare))
+            if (image.Format == BinaryFormat.Elf && bare.IndexOf('@') is > 0 and var at)
+            {
+                bare = bare[..at];   // exit@got, exit@@GLIBC_2.2.5
+            }
+
+            if (NoReturnNames.Contains(bare) || (image.Format == BinaryFormat.Elf && ElfNoReturnNames.Contains(bare)))
             {
                 _noReturn.Add(symbol.Va);
             }
@@ -212,7 +228,7 @@ public sealed class BinaryAnalysis
             return Signatures?.LookupSymbol(imported.Name) ?? CalleeSignature.Unknown;
         }
 
-        return CalleeSignatures.FromCode(function, Image.Bitness);
+        return CalleeSignatures.FromCode(function, CallingConvention.For(Image));
     }
 
     /// <summary>
@@ -340,7 +356,7 @@ public sealed class BinaryAnalysis
 
         if (Image.EntryPointRva != 0)
         {
-            Add(Image.EntryPointVa, Image.IsLibrary ? "DllEntryPoint" : "EntryPoint");
+            Add(Image.EntryPointVa, SymbolTable.EntryPointName(Image));
         }
 
         if (Image is PeImage { Tls: { } tls })

@@ -51,7 +51,10 @@ public readonly record struct CalleeSignature
     /// <summary>Bytes of arguments the callee removes from the stack, or -1 when that is not known.</summary>
     public int StackCleanupBytes { get; init; } = -1;
 
-    /// <summary>Bit <c>i</c> set when argument <c>i</c> arrives in a float register rather than an integer one.</summary>
+    /// <summary>
+    /// Windows x64: bit <c>i</c> set when argument <c>i</c> arrives in a float register rather than an integer one.
+    /// System V: bit <c>i</c> set for each of <c>xmm0</c>… that carries a float, counted apart from the integers.
+    /// </summary>
     public uint FloatMask { get; init; }
 
     public SignatureSource Source { get; init; }
@@ -67,6 +70,28 @@ public readonly record struct CalleeSignature
     public bool HasStackCleanup => Source != SignatureSource.None && StackCleanupBytes >= 0;
 
     public bool IsFloat(int index) => index is >= 0 and < 32 && (FloatMask & (1u << index)) != 0;
+
+    /// <summary>
+    /// How many of the arguments are integers. Under Windows x64 a float takes a slot of its own, so this is every
+    /// argument; under System V the floats are counted apart, in <see cref="FloatMask"/> by xmm register.
+    /// </summary>
+    public int IntegerArgumentCount(CallingConvention convention)
+    {
+        ArgumentNullException.ThrowIfNull(convention);
+        if (!HasArgumentCount)
+        {
+            return 0;
+        }
+
+        return convention.FloatsShareSlots ? ArgumentCount : Math.Max(0, ArgumentCount - FloatArgumentCount(convention));
+    }
+
+    /// <summary>System V float arguments, <c>xmm0</c> up; zero under Windows x64, where floats sit in the integer count.</summary>
+    public int FloatArgumentCount(CallingConvention convention)
+    {
+        ArgumentNullException.ThrowIfNull(convention);
+        return !HasArgumentCount || convention.FloatsShareSlots || FloatMask == 0 ? 0 : 32 - System.Numerics.BitOperations.LeadingZeroCount(FloatMask);
+    }
 
     public override string ToString()
     {
@@ -99,10 +124,13 @@ public static class CalleeSignatures
     /// </summary>
     private const int MaxCleanupBytes = 256;
 
-    public static CalleeSignature FromCode(Function function, int bitness)
+    public static CalleeSignature FromCode(Function function, int bitness) => FromCode(function, CallingConvention.For(bitness));
+
+    public static CalleeSignature FromCode(Function function, CallingConvention convention)
     {
         ArgumentNullException.ThrowIfNull(function);
-        return bitness == 64 ? FromRegisterUse(function) : FromStackCleanup(function);
+        ArgumentNullException.ThrowIfNull(convention);
+        return convention.IsStackBased ? FromStackCleanup(function) : FromRegisterUse(function, convention);
     }
 
     /// <summary>
@@ -161,9 +189,22 @@ public static class CalleeSignatures
     /// an integer, since claiming a float would change the type printed at every call site on the
     /// strength of an ambiguity.
     /// </summary>
-    public static CalleeSignature FromRegisterUse(Function function)
+    public static CalleeSignature FromRegisterUse(Function function) => FromRegisterUse(function, CallingConvention.Microsoft64);
+
+    /// <summary>
+    /// The same question under either x64 convention. System V counts integers and floats apart: the integer
+    /// count is the highest of <c>rdi, rsi, rdx, rcx, r8, r9</c> read, and <see cref="CalleeSignature.FloatMask"/>
+    /// has a bit per xmm register read. A function that reads all eight xmm registers is not taking eight
+    /// floats: it is a variadic function saving them for <c>va_arg</c>, and its floats are left unclaimed.
+    /// </summary>
+    public static CalleeSignature FromRegisterUse(Function function, CallingConvention convention)
     {
         ArgumentNullException.ThrowIfNull(function);
+        ArgumentNullException.ThrowIfNull(convention);
+        if (!convention.FloatsShareSlots)
+        {
+            return FromSeparateRegisters(function, convention);
+        }
 
         uint floats = 0;
         int highest = -1;
@@ -197,4 +238,46 @@ public static class CalleeSignatures
             Source = SignatureSource.RegisterUse,
         };
     }
+
+    private static CalleeSignature FromSeparateRegisters(Function function, CallingConvention convention)
+    {
+        int integers = 0;
+        for (int slot = 0; slot < convention.IntegerArguments.Count; slot++)
+        {
+            if (RegisterUse.ReadsBeforeWriting(function, IcedRegister(convention.IntegerArguments[slot])))
+            {
+                integers = slot + 1;
+            }
+        }
+
+        uint floats = 0;
+        for (int slot = 0; slot < convention.FloatArguments.Count; slot++)
+        {
+            if (RegisterUse.ReadsBeforeWriting(function, IcedRegister(convention.FloatArguments[slot])))
+            {
+                floats |= 1u << slot;
+            }
+        }
+
+        if (floats == (1u << convention.FloatArguments.Count) - 1)
+        {
+            floats = 0;   // the va_arg register save area, not eight floats
+        }
+
+        // As with the integers, a float in xmm2 means xmm0 and xmm1 were taken first.
+        int floatCount = floats == 0 ? 0 : 32 - System.Numerics.BitOperations.LeadingZeroCount(floats);
+        if (integers + floatCount == 0)
+        {
+            return CalleeSignature.Unknown;
+        }
+
+        return new CalleeSignature
+        {
+            ArgumentCount = integers + floatCount,
+            FloatMask = floatCount == 0 ? 0 : (1u << floatCount) - 1,
+            Source = SignatureSource.RegisterUse,
+        };
+    }
+
+    private static Register IcedRegister(string name) => Enum.Parse<Register>(name, ignoreCase: true);
 }

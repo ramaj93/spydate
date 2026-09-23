@@ -1,4 +1,4 @@
-using Spydate.Core.PE;
+using Spydate.Core.Binary;
 
 namespace Spydate.Core.Project;
 
@@ -301,7 +301,7 @@ public static class PatchWriter
     /// least able to notice — so the caller must name somewhere else, and this refuses if they name
     /// the same place.
     /// </summary>
-    public static PatchWriteResult Write(PeImage image, PatchStore patches, string path)
+    public static PatchWriteResult Write(IBinaryImage image, PatchStore patches, string path)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(patches);

@@ -19,6 +19,7 @@ public sealed class NativeDecompiler
     private readonly IReadOnlyList<IIrPass> _passes;
     private readonly Func<ulong, int>? _registerArguments;
     private readonly AnnotationStore? _annotations;
+    private readonly CallingConvention? _convention;
 
     public NativeDecompiler(
         int bitness,
@@ -27,9 +28,11 @@ public sealed class NativeDecompiler
         GlobalNames? names = null,
         Func<ulong, int>? registerArguments = null,
         AnnotationStore? annotations = null,
-        Func<ulong, CalleeSignature>? signatureFor = null)
+        Func<ulong, CalleeSignature>? signatureFor = null,
+        CallingConvention? convention = null)
     {
         _bitness = bitness;
+        _convention = convention;
         _symbols = symbols;
         _registerArguments = registerArguments;
         _annotations = annotations;
@@ -43,7 +46,8 @@ public sealed class NativeDecompiler
             names: GlobalNames.For(analysis),
             registerArguments: va => RegisterArgumentsFor(analysis, va),
             annotations: analysis.Annotations,
-            signatureFor: analysis.SignatureFor)
+            signatureFor: analysis.SignatureFor,
+            convention: CallingConvention.For(analysis.Image))
     {
     }
 
@@ -105,6 +109,10 @@ public sealed class NativeDecompiler
     {
         var lifter = new X86Lifter(_bitness, _symbols);
         var ir = lifter.Lift(function);
+        if (_convention is not null)
+        {
+            ir.Convention = _convention;   // a Linux x64 binary passes its arguments in other registers
+        }
 
         // A function that reads ecx before writing it was handed something in it; the same analysis that
         // gives calls their register arguments gives this one its register parameters.

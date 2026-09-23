@@ -48,14 +48,14 @@ public sealed class StringTools
         // A managed assembly's literals are in the #US heap and are loaded by ldstr, so scanning the
         // file for runs of printable bytes finds them - as UTF-16 fragments, each with a length
         // prefix glued to its front and no idea what uses it. The IL knows all of that.
-        if (open.Managed is not null && open.Pe.ClrHeader?.IsILOnly == true)
+        if (open.Managed is not null && open.IsILOnly)
         {
             return Managed(open, query, referencedOnly, minLength, offset, limit);
         }
 
         if (open is not { Analysis: { } analysis } session)
         {
-            return $"there are no strings to read: {open.Pe.Machine} is not a machine this disassembles";
+            return $"there are no strings to read: {open.MachineName} is not a machine this disassembles";
         }
 
         // The first touch scans the whole file; it is lazy in the engine and cached from then on.

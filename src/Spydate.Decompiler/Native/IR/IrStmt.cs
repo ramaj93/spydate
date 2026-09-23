@@ -1,3 +1,5 @@
+using Spydate.Disassembly;
+
 namespace Spydate.Decompiler.Native.IR;
 
 /// <summary>Base of all IR statements. Each statement remembers the VA of the instruction it came from.</summary>
@@ -93,6 +95,7 @@ public sealed class IrFunction
         EntryVa = entryVa;
         Name = name;
         Bitness = bitness;
+        Convention = CallingConvention.For(bitness);
     }
 
     public ulong EntryVa { get; }
@@ -100,6 +103,12 @@ public sealed class IrFunction
     public string Name { get; }
 
     public int Bitness { get; }
+
+    /// <summary>
+    /// How calls pass arguments and which registers they destroy. Defaults to what the bitness implies for a
+    /// Windows binary; the decompiler sets it from the image, so a Linux x64 binary is read as System V.
+    /// </summary>
+    public CallingConvention Convention { get; set; }
 
     public List<IrBlock> Blocks { get; } = new();
 

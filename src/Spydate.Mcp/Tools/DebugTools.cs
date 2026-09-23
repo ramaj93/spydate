@@ -402,7 +402,17 @@ public sealed class DebugTools
             return "this host has no debugger to drive.";
         }
 
-        return _store.Current is null ? SessionTools.NothingOpen : null;
+        if (_store.Current is not { } open)
+        {
+            return SessionTools.NothingOpen;
+        }
+
+        // Said here, once, for every debug tool: an ELF is read and decompiled, never run. Without it a
+        // start would reach CreateProcess and come back as a Windows error about an unrecognised file.
+        return open.CanDebug
+            ? null
+            : $"debugging is not available for {open.Image.Format} files: the debugger runs Windows programs, "
+              + "and this one is read, not run. Everything that reads it still works.";
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using Spydate.Core.Elf;
 using Spydate.Core.PE;
 
 namespace Spydate.Core.Binary;
@@ -99,22 +100,43 @@ public static class BinaryImage
     }
 
     /// <summary>
-    /// Opens a binary. A PE is parsed; a recognised format Spydate does not open yet is refused by name. A file
-    /// nothing recognises still goes to the PE parser, whose error explains what it found where a header should
-    /// be — the same answer opening an unknown file has always given.
+    /// Opens a binary. A PE or an ELF is parsed; a recognised format Spydate does not open yet is refused by name.
+    /// A file nothing recognises still goes to the PE parser, whose error explains what it found where a header
+    /// should be — the same answer opening an unknown file has always given.
     /// </summary>
     public static IBinaryImage Load(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
         var format = Detect(path);
-        if (format is BinaryFormat.Elf or BinaryFormat.Jar or BinaryFormat.Apk)
+        if (format == BinaryFormat.Elf)
+        {
+            return ElfImage.Load(path);
+        }
+
+        if (format is BinaryFormat.Jar or BinaryFormat.Apk)
         {
             throw new UnsupportedFormatException(path, format);
         }
 
         return PeImage.Load(path);
     }
+
+    /// <summary>The processor, in the format's own words: <c>Amd64</c> for a PE, <c>X86_64</c> for an ELF.</summary>
+    public static string MachineName(IBinaryImage image) => image switch
+    {
+        PeImage pe => pe.Machine.ToString(),
+        ElfImage elf => elf.Header.MachineName,
+        _ => image.Architecture.ToString(),
+    };
+
+    /// <summary>The container and its width: <c>PE32+</c>, <c>ELF32</c>.</summary>
+    public static string ContainerName(IBinaryImage image) => image switch
+    {
+        PeImage pe => pe.Is64Bit ? "PE32+" : "PE32",
+        ElfImage elf => elf.Header.ClassName,
+        _ => image.Format.ToString(),
+    };
 
     /// <summary>An APK has a manifest and Dalvik code; a JAR has a Java manifest or classes; anything else is neither.</summary>
     private static BinaryFormat ZipKind(string path)

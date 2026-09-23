@@ -1,5 +1,6 @@
 using Spydate.Decompiler.Native.IR;
 using Spydate.Decompiler.Native.Structuring;
+using Spydate.Disassembly;
 
 namespace Spydate.Decompiler.Native.Passes;
 
@@ -48,7 +49,7 @@ internal static class ReachingValues
                 result[cfg.Va(node)] = entry;
             }
 
-            outputs[node] = Transfer(cfg.Blocks[node], entry, function.Bitness);
+            outputs[node] = Transfer(cfg.Blocks[node], entry, function.Bitness, function.Convention);
         }
 
         return result;
@@ -73,7 +74,7 @@ internal static class ReachingValues
         return kept;
     }
 
-    private static List<(IrExpr Var, IrExpr Value)> Transfer(IrBlock block, List<(IrExpr Var, IrExpr Value)> entry, int bitness)
+    private static List<(IrExpr Var, IrExpr Value)> Transfer(IrBlock block, List<(IrExpr Var, IrExpr Value)> entry, int bitness, CallingConvention convention)
     {
         var live = new List<(IrExpr Var, IrExpr Value)>(entry);
 
@@ -84,7 +85,7 @@ internal static class ReachingValues
 
             live.RemoveAll(def =>
                 (written is not null && (RegisterAliases.MayAlias(written, def.Var) || Reads(def.Value, written)))
-                || (hasCall && Clobbers(def.Var, bitness)));
+                || (hasCall && Clobbers(def.Var, bitness, convention)));
 
             if (written is not null && statement is IrAssign assign && IsStable(assign.Src) && !Reads(assign.Src, written))
             {
@@ -96,19 +97,17 @@ internal static class ReachingValues
     }
 
     /// <summary>A call clobbers the volatile registers, and may write the caller's frame through a pointer.</summary>
-    private static bool Clobbers(IrExpr variable, int bitness) => variable switch
+    private static bool Clobbers(IrExpr variable, int bitness, CallingConvention convention) => variable switch
     {
         IrLocal => true,
-        IrReg r => IsCallerSaved(r.Name, bitness),
+        IrReg r => IsCallerSaved(r.Name, bitness, convention),
         _ => true,
     };
 
-    private static bool IsCallerSaved(string register, int bitness)
+    private static bool IsCallerSaved(string register, int bitness, CallingConvention convention)
     {
         string canonical = RegisterAliases.CanonicalOf(register);
-        return bitness == 64
-            ? canonical is "rax" or "rcx" or "rdx" or "r8" or "r9" or "r10" or "r11" || canonical.StartsWith("zmm", StringComparison.Ordinal)
-            : canonical is "rax";
+        return bitness == 64 ? convention.IsVolatile(canonical) : canonical is "rax";
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using Spydate.Decompiler.Native.IR;
 using Spydate.Decompiler.Native.Structuring;
+using Spydate.Disassembly;
 
 namespace Spydate.Decompiler.Native.Passes;
 
@@ -49,7 +50,7 @@ public sealed class DeadCodeEliminationPass : IIrPass
                 foreach (int node in order)
                 {
                     var live = LiveOut(cfg, node, liveIn);
-                    Scan(cfg.Blocks[node], function.Bitness, live, remove: false);
+                    Scan(cfg.Blocks[node], function.Bitness, function.Convention, live, remove: false);
                     if (!live.SetEquals(liveIn[node]))
                     {
                         liveIn[node] = live;
@@ -66,7 +67,7 @@ public sealed class DeadCodeEliminationPass : IIrPass
             bool removed = false;
             foreach (int node in order)
             {
-                removed |= Scan(cfg.Blocks[node], function.Bitness, LiveOut(cfg, node, liveIn), remove: true);
+                removed |= Scan(cfg.Blocks[node], function.Bitness, function.Convention, LiveOut(cfg, node, liveIn), remove: true);
             }
 
             if (!removed)
@@ -103,7 +104,7 @@ public sealed class DeadCodeEliminationPass : IIrPass
     /// plain liveness — dead statements still count as readers, which is what keeps the fixpoint sound.
     /// With it, the statements found dead are deleted and their reads no longer count.
     /// </summary>
-    private static bool Scan(IrBlock block, int bitness, HashSet<string> live, bool remove)
+    private static bool Scan(IrBlock block, int bitness, CallingConvention convention, HashSet<string> live, bool remove)
     {
         bool removed = false;
         var statements = block.Statements;
@@ -169,7 +170,7 @@ public sealed class DeadCodeEliminationPass : IIrPass
             if (statement is IrCallStmt call2 && !(bitness == 32 && call2.Call.ConventionKnown))
             {
                 var named = call2.Call.Args.Select(Key).ToHashSet(StringComparer.Ordinal);
-                foreach (string register in ArgumentRegisters(bitness))
+                foreach (string register in convention.ArgumentRegisters)
                 {
                     if (!named.Contains(register))
                     {
@@ -181,11 +182,6 @@ public sealed class DeadCodeEliminationPass : IIrPass
 
         return removed;
     }
-
-    /// <summary>Registers a call may take an argument in, whether or not the IR named them.</summary>
-    private static IEnumerable<string> ArgumentRegisters(int bitness) => bitness == 64
-        ? new[] { "rcx", "rdx", "r8", "r9", "zmm0", "zmm1", "zmm2", "zmm3" }
-        : new[] { "rcx", "rdx" };
 
     /// <summary>True when writing this replaces the whole register, so earlier values of it are dead.</summary>
     private static bool FullyKills(IrExpr written, int bitness) => written switch

@@ -16,7 +16,14 @@ public static class FunctionPrologues
     /// then attributes real code to the wrong place.
     /// </summary>
     public static bool LooksLikeFunctionStart(ReadOnlySpan<byte> code, int bitness)
-        => bitness == 64 ? MatchesX64(code) : MatchesX86(code);
+        => IsEndBranch(code) || (bitness == 64 ? MatchesX64(code) : MatchesX86(code));
+
+    /// <summary>
+    /// <c>endbr64</c> / <c>endbr32</c>: with control-flow protection on, every function that can be reached
+    /// indirectly starts with one, and nothing else does. gcc and clang emit it by default on Linux.
+    /// </summary>
+    private static bool IsEndBranch(ReadOnlySpan<byte> c)
+        => c.Length >= 4 && c[0] == 0xF3 && c[1] == 0x0F && c[2] == 0x1E && c[3] is 0xFA or 0xFB;
 
     private static bool MatchesX64(ReadOnlySpan<byte> c)
     {
@@ -27,6 +34,12 @@ public static class FunctionPrologues
 
         // mov [rsp+disp8], reg — MSVC's home-register spill, by far the most common opening.
         if (c[0] is 0x48 or 0x4C && c[1] == 0x89 && (c[2] & 0xC7) == 0x44 && c[3] == 0x24)
+        {
+            return true;
+        }
+
+        // push rbp; mov rbp, rsp in the encoding gcc and clang use (MSVC writes 48 8B EC).
+        if (c[0] == 0x55 && c[1] == 0x48 && c[2] == 0x89 && c[3] == 0xE5)
         {
             return true;
         }
@@ -78,8 +91,8 @@ public static class FunctionPrologues
             return true;
         }
 
-        // push ebp; mov ebp, esp
-        if (c[0] == 0x55 && c[1] == 0x8B && c[2] == 0xEC)
+        // push ebp; mov ebp, esp (8B EC from MSVC, 89 E5 from gcc)
+        if (c[0] == 0x55 && ((c[1] == 0x8B && c[2] == 0xEC) || (c[1] == 0x89 && c[2] == 0xE5)))
         {
             return true;
         }

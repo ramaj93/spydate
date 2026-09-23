@@ -8,7 +8,8 @@ namespace Spydate.Decompiler.Native.Passes;
 /// so that every stack access can be expressed relative to the entry stack pointer and named:
 /// <c>local_XX</c> below the return address, <c>arg_XX</c> above it. Stack-pointer bookkeeping statements are
 /// removed, <c>lea</c> of a stack slot becomes <c>&amp;local_XX</c>, and calls receive their arguments:
-/// on x64 the contiguous prefix of <c>rcx, rdx, r8, r9</c> defined since the previous call in the block;
+/// on x64 the contiguous prefix of the convention's argument registers (<c>rcx, rdx, r8, r9</c> on Windows,
+/// <c>rdi, rsi, rdx, rcx, r8, r9</c> on Linux) defined since the previous call in the block;
 /// on x86 the values pushed since the previous call (cdecl/stdcall convention).
 ///
 /// Where the callee can be read - it is in this image, or it is an import whose DLL is on disk - its own
@@ -28,11 +29,6 @@ public sealed class StackFramePass : IIrPass
     public StackFramePass(Func<ulong, CalleeSignature>? signatureFor = null) => _signatureFor = signatureFor;
 
     public string Name => "stack-frame";
-
-    private static readonly string[] Win64ArgRegs = { "rcx", "rdx", "r8", "r9" };
-
-    /// <summary>The xmm register that shares each argument slot with the integer register above it.</summary>
-    private static readonly string[] Win64FloatArgRegs = { "xmm0", "xmm1", "xmm2", "xmm3" };
 
     public void Run(IrFunction function)
     {
@@ -250,9 +246,7 @@ public sealed class StackFramePass : IIrPass
         private bool IsVolatile(string reg)
         {
             string c = RegisterAliases.CanonicalOf(reg);
-            return _fn.Bitness == 64
-                ? c is "rax" or "rcx" or "rdx" or "r8" or "r9" or "r10" or "r11"
-                : c is "rax" or "rcx" or "rdx";
+            return _fn.Convention.IsVolatile(c) && !c.StartsWith("zmm", StringComparison.Ordinal);
         }
 
         private static bool IsGpr(string reg)
@@ -476,7 +470,7 @@ public sealed class StackFramePass : IIrPass
 
                     var signature = SignatureOf(call);
                     var args = _fn.Bitness == 64
-                        ? Win64Args(block, i, byVa, signature)
+                        ? RegisterArgs(block, i, byVa, signature, _fn.Convention)
                         : X86Args(block, i, depths is not null && i < depths.Length ? depths[i] : null, signature);
                     if (args.Count == 0)
                     {
@@ -497,21 +491,47 @@ public sealed class StackFramePass : IIrPass
         }
 
         /// <summary>
-        /// Contiguous prefix of rcx/rdx/r8/r9 defined since the previous call, scanning backwards through
-        /// this block and then through single-predecessor blocks (a jcc between "mov rcx, x" and the call is common).
+        /// The x64 register arguments of a call: the contiguous prefix of argument registers defined since the
+        /// previous call, scanning backwards through this block and then through single-predecessor blocks (a jcc
+        /// between "mov rcx, x" and the call is common). Windows reads <c>rcx, rdx, r8, r9</c>, where a float takes
+        /// the xmm register of its slot; System V reads <c>rdi, rsi, rdx, rcx, r8, r9</c>, with floats numbered
+        /// separately in <c>xmm0</c>… and appended after the integers, since nothing at the call site says where
+        /// they sat among them.
         /// </summary>
-        private static List<IrExpr> Win64Args(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, CalleeSignature signature)
+        private static List<IrExpr> RegisterArgs(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, CalleeSignature signature, CallingConvention convention)
         {
+            if (!convention.FloatsShareSlots)
+            {
+                var integers = SlotArgs(block, callIndex, byVa, [.. convention.IntegerArguments], signature.IntegerArgumentCount(convention));
+                int floats = signature.FloatArgumentCount(convention);
+                if (integers.Count < signature.IntegerArgumentCount(convention))
+                {
+                    return integers;   // a gap in the integers: the floats cannot be placed either
+                }
+
+                for (int k = 0; k < floats && k < convention.FloatArguments.Count; k++)
+                {
+                    integers.Add(new IrReg(convention.FloatArguments[k], 64));
+                }
+
+                return integers;
+            }
+
             // A slot holds either an integer register or the xmm register that shares it, never both, and
             // only the callee knows which. Looking for the wrong one finds nothing, which is how float
             // arguments used to disappear.
-            var slots = new string[Win64ArgRegs.Length];
+            var slots = new string[convention.IntegerArguments.Count];
             for (int k = 0; k < slots.Length; k++)
             {
-                slots[k] = signature.IsFloat(k) ? Win64FloatArgRegs[k] : Win64ArgRegs[k];
+                slots[k] = signature.IsFloat(k) ? convention.FloatArguments[k] : convention.IntegerArguments[k];
             }
 
-            var defined = new IrReg?[Win64ArgRegs.Length];
+            return SlotArgs(block, callIndex, byVa, slots, signature.ArgumentCount);
+        }
+
+        private static List<IrExpr> SlotArgs(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, string[] slots, int known)
+        {
+            var defined = new IrReg?[slots.Length];
             var current = block;
             int start = callIndex - 1;
             var visited = new HashSet<IrBlock> { block };
@@ -562,7 +582,7 @@ public sealed class StackFramePass : IIrPass
             // Slots the callee reads that the call site never wrote: they already held what it wants, or
             // they were set somewhere this backwards walk could not follow. Naming the register is honest
             // - it is what is in the slot - and it is what makes a float argument appear at all.
-            for (int k = 0; k < signature.ArgumentCount && k < defined.Length; k++)
+            for (int k = 0; k < known && k < defined.Length; k++)
             {
                 defined[k] ??= new IrReg(slots[k], 64);
             }
@@ -741,13 +761,7 @@ public sealed class StackFramePass : IIrPass
             }
         }
 
-        private bool IsCalleeSaved(string reg)
-        {
-            string c = RegisterAliases.CanonicalOf(reg);
-            return _fn.Bitness == 64
-                ? c is "rbx" or "rbp" or "rdi" or "rsi" or "r12" or "r13" or "r14" or "r15"
-                : c is "rbx" or "rbp" or "rdi" or "rsi";
-        }
+        private bool IsCalleeSaved(string reg) => _fn.Convention.IsPreserved(RegisterAliases.CanonicalOf(reg));
 
         private static void Add<T>(Dictionary<string, List<T>> d, string key, T value)
         {

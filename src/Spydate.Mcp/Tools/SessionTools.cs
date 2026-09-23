@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
 using Spydate.Core.Binary;
+using Spydate.Core.Elf;
 using Spydate.Core.PE;
 using Spydate.Core.Strings;
 using Spydate.Mcp.Rendering;
@@ -24,14 +25,14 @@ public sealed class SessionTools
     }
 
     [McpServerTool(Name = "open_binary")]
-    [Description("Open a PE file (exe/dll/sys) for analysis and return an orientation summary. Replaces whatever was open. Run this first.")]
+    [Description("Open a PE (exe/dll/sys) or ELF (Linux program or .so) for analysis and return an orientation summary. Replaces whatever was open. Run this first.")]
     public async Task<string> OpenBinaryAsync(
         [Description("Full path to the file, e.g. C:\\\\Windows\\\\System32\\\\notepad.exe")] string path,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
-            return "give a path to a PE file to open";
+            return "give a path to a binary to open";
         }
 
         if (!_options.Allows(path))
@@ -51,14 +52,14 @@ public sealed class SessionTools
         }
         catch (BinaryParseException ex)
         {
-            // Name the way out. open_binary parses a PE into an image and cannot do anything with a
+            // Name the way out. open_binary parses a PE or an ELF into an image and cannot do anything with a
             // file that is not one, and an agent that hits only this wall concludes non-PEs are
             // unreadable and goes off to reconstruct the bytes from process memory. read_file reads
             // any file's raw bytes and is the answer — the path is already inside --root, since that
             // was checked above, so it is allowed here.
-            return $"{path} is not a PE file open_binary can read ({ex.Message}). "
+            return $"{path} is not a file open_binary can read ({ex.Message}). "
                 + "It is still a file: read_file(path) reads its raw bytes as hex or text, which is how "
-                + "to look at a non-PE like this — a resource, a .inx, an unknown container.";
+                + "to look at a file like this — a resource, a .inx, an unknown container.";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -160,7 +161,12 @@ public sealed class SessionTools
     /// </summary>
     internal static string Overview(BinarySession session, bool opened)
     {
-        var image = session.Pe;   // the overview reports a PE's own structures
+        if (session.Image is ElfImage elf)
+        {
+            return ElfOverview(session, elf, opened);
+        }
+
+        var image = (PeImage)session.Image;
         var sb = new StringBuilder();
 
         Line(sb, opened ? "opened" : "open", image.FileName);
@@ -223,6 +229,68 @@ public sealed class SessionTools
     }
 
     /// <summary>
+    /// The same screenful for an ELF. What an agent needs first differs: which libraries it loads (an ELF names
+    /// them apart from its imports), whether it was stripped (it decides how much of the function list has
+    /// names), and that its x64 code passes arguments in rdi, rsi, rdx — not the Windows registers — so a
+    /// reading of the pseudo-C does not carry Windows habits over.
+    /// </summary>
+    private static string ElfOverview(BinarySession session, ElfImage image, bool opened)
+    {
+        var sb = new StringBuilder();
+        Line(sb, opened ? "opened" : "open", image.FileName);
+        Line(sb, "path", session.Path);
+        Line(sb, "format", $"{image.Header.ClassName} {image.Header.MachineName} {image.Kind}{(image.Header.OsAbi == 0 ? string.Empty : $", {image.Header.OsAbiName} ABI")}, base 0x{image.ImageBase:X}, {Size(image.Length)}");
+        Line(sb, "loader", image.Interpreter is { } interp
+            ? $"{interp}, needs {(image.Needed.Count == 0 ? "no libraries" : string.Join(", ", image.Needed.Take(MaxReferencesListed)))}"
+            : image.Dynamic.Count > 0 ? $"none (a library), needs {string.Join(", ", image.Needed.Take(MaxReferencesListed))}" : "none - statically linked");
+
+        if (image.EntryPointRva != 0)
+        {
+            Line(sb, "entry", $"0x{image.EntryPointVa:X}  {session.Analysis?.NameFor(image.EntryPointVa) ?? "entry"}");
+        }
+
+        Line(sb, "sections", SectionList(image));
+        Line(sb, "imports", image.Imports.Count == 0 ? "none" : $"{image.Imports.Count} symbols, {image.PltStubs.Count} called through PLT stubs");
+        Line(sb, "exports", image.Exports.Count == 0 ? "none" : $"{image.Exports.Count}{(image.SoName is { } so ? $" as {so}" : string.Empty)}");
+        Line(sb, "symbols", (image.StaticSymbols.Count > 0 ? $"{image.StaticSymbols.Count} in .symtab" : "stripped (no .symtab)")
+                            + $", {image.UnwindRanges.Count} functions in .eh_frame");
+
+        if (session.Analysis is { } analysis)
+        {
+            Line(sb, "analysis", $"{session.Discovery.Describe()}, {analysis.Xrefs.Count} references");
+            Line(sb, "calls", $"{Spydate.Disassembly.CallingConvention.For(image).Name}: arguments in "
+                              + (image.Is64Bit ? "rdi, rsi, rdx, rcx, r8, r9" : "stack slots"));
+            Line(sb, "project", Project(session));
+        }
+        else
+        {
+            Line(sb, "analysis", $"none - {image.Header.MachineName} is not a machine this disassembles, so only headers and strings are readable");
+        }
+
+        Line(sb, "debug", "not available - the debugger runs Windows programs; this file is read, not run");
+        if (image.Warnings.Count > 0)
+        {
+            Line(sb, "warnings", string.Join("; ", image.Warnings.Take(3)));
+        }
+
+        if (session.Analysis is not null)
+        {
+            Line(sb, "next", "list_functions(named=\"unnamed\", sort=\"refs\") | list_imports() | find_strings(query=...)");
+        }
+
+        Notes(sb, session);
+        return Budget.Clip(sb.ToString());
+    }
+
+    private static string SectionList(IBinaryImage image)
+    {
+        string sections = string.Join(
+            " | ",
+            image.Sections.Take(MaxSectionsListed).Select(s => $"{s.Name} 0x{s.Rva:X} {Size(s.Extent)} {s.Permissions.Replace("-", string.Empty, StringComparison.Ordinal)}"));
+        return image.Sections.Count > MaxSectionsListed ? sections + $" | +{image.Sections.Count - MaxSectionsListed} more" : sections;
+    }
+
+    /// <summary>
     /// The other reading of the same file, when there is one.
     ///
     /// A .NET assembly has two descriptions and only one of them is about the program. The native
@@ -233,7 +301,7 @@ public sealed class SessionTools
     /// </summary>
     private static void Managed(StringBuilder sb, BinarySession session)
     {
-        if (session.Pe.ClrHeader is not { } clr)
+        if (session.ClrHeader is not { } clr)
         {
             return;
         }

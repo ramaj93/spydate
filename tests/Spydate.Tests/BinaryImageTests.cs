@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using Spydate.Core.Binary;
+using Spydate.Core.Elf;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
 
@@ -136,14 +137,25 @@ public sealed class BinaryImageTests : IDisposable
     }
 
     [Fact]
-    public void AnElfIsNamedAndRefused()
+    public void ABrokenElfGoesToTheElfParserAndIsRefusedAsAnElf()
     {
+        // An ELF is opened now; one whose header is cut short is refused by the ELF parser, in its own terms,
+        // rather than handed to the PE parser to be called "not a valid PE".
         string path = Write("tool", [0x7F, (byte)'E', (byte)'L', (byte)'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
         Assert.Equal(BinaryFormat.Elf, BinaryImage.Detect(path));
+        var ex = Assert.Throws<ElfParseException>(() => BinaryImage.Load(path));
+        Assert.Contains("ELF header is cut short", ex.Message);
+    }
+
+    [Fact]
+    public void AJarIsNamedAndRefused()
+    {
+        string path = Zip("lib.jar", "META-INF/MANIFEST.MF", "a/B.class");
+
         var ex = Assert.Throws<UnsupportedFormatException>(() => BinaryImage.Load(path));
-        Assert.Equal(BinaryFormat.Elf, ex.Format);
-        Assert.Contains("ELF", ex.Message);
+        Assert.Equal(BinaryFormat.Jar, ex.Format);
+        Assert.Contains("Java archive", ex.Message);
     }
 
     [Fact]
@@ -179,10 +191,10 @@ public sealed class BinaryImageTests : IDisposable
     }
 
     [Fact]
-    public async Task OpenBinaryNamesAnElfAndPointsAtReadFile()
+    public async Task OpenBinaryNamesABrokenElfAndPointsAtReadFile()
     {
         // Without the shared base the refusal would escape open_binary as an unhandled exception. It must be
-        // an answer instead — naming the format, and naming the tool that can still read the bytes.
+        // an answer instead — saying what is wrong with it, and naming the tool that can still read the bytes.
         string elf = Write("tool", [0x7F, (byte)'E', (byte)'L', (byte)'F', 2, 1, 1, 0]);
         var tools = new Spydate.Mcp.Tools.SessionTools(new Spydate.Mcp.Session.SessionStore(), Spydate.Mcp.McpOptions.Default);
 

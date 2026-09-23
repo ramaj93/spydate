@@ -2,6 +2,8 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Reflection.Metadata;
 using ModelContextProtocol.Server;
+using Spydate.Core.Binary;
+using Spydate.Core.Elf;
 using Spydate.Core.Symbols;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
@@ -102,14 +104,14 @@ public sealed class NavigationTools
         // Managed first when there is a managed reading. The native symbol table of an IL-only
         // assembly holds one import and the loader stub, so answering from it would be answering a
         // question about the file that nobody asked.
-        if (open.ManagedIndex is { } managed && open.Pe.ClrHeader?.IsILOnly == true)
+        if (open.ManagedIndex is { } managed && open.IsILOnly)
         {
             return FindManaged(managed, open.Managed!.PInvokes, query, limit);
         }
 
         if (open.Analysis is not { } analysis)
         {
-            return $"there is no symbol table: {open.Pe.Machine} is not a machine this disassembles";
+            return $"there is no symbol table: {open.MachineName} is not a machine this disassembles";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
@@ -154,41 +156,63 @@ public sealed class NavigationTools
 
         // An IL-only assembly's import directory holds one entry, for the loader. Answering from it
         // would be truthfully describing the wrong table: what the program uses is in its MemberRefs.
-        if (open.Managed is not null && open.Pe.ClrHeader?.IsILOnly == true)
+        if (open.Managed is not null && open.IsILOnly)
         {
             return ManagedImports(open, module, filter, sort, Math.Max(0, offset), Math.Clamp(limit, 1, MaxLimit));
         }
 
         if (open is not { Analysis: { } analysis } session)
         {
-            return $"there is no import table to read: {open.Pe.Machine} is not a machine this disassembles";
+            return $"there is no import table to read: {open.MachineName} is not a machine this disassembles";
         }
 
         limit = Math.Clamp(limit, 1, MaxLimit);
         offset = Math.Max(0, offset);
 
-        var image = session.Pe;   // the import table as a PE lists it, module by module
-        var rows = image.Imports.Concat(image.DelayImports)
-            .Where(m => module is null || m.Name.Contains(module, StringComparison.OrdinalIgnoreCase))
-            .SelectMany(m => m.Functions.Select(f => (Module: m, Function: f)))
-            .Where(e => filter is null || e.Function.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase))
-            .Select(e => (e.Module, e.Function, Va: image.RvaToVa(e.Function.IatRva)))
+        var image = session.Image;
+
+        // An ELF's code calls the PLT stub, not the GOT slot, so a count of references to the slot alone would
+        // call every import unused. The stub is where the calls are, and it is the address to pass to xrefs.
+        var stubs = image is ElfImage elf
+            ? elf.PltStubs.GroupBy(p => p.Import.SlotRva).ToDictionary(g => g.Key, g => image.RvaToVa(g.First().Rva))
+            : null;
+        int Refs(ImportedSymbol import, ulong va)
+            => analysis.Xrefs.CountTo(va) + (stubs is not null && stubs.TryGetValue(import.SlotRva, out ulong stub) ? analysis.Xrefs.CountTo(stub) : 0);
+
+        var rows = image.Imports
+            .Where(i => module is null || i.Module.Contains(module, StringComparison.OrdinalIgnoreCase))
+            .Where(i => filter is null || i.DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            .Select(i => (Import: i, Va: image.RvaToVa(i.SlotRva)))
             .ToList();
 
-        int total = image.Imports.Sum(m => m.Functions.Count) + image.DelayImports.Sum(m => m.Functions.Count);
+        int total = image.Imports.Count;
         var ordered = sort == "name"
-            ? rows.OrderBy(r => r.Module.Name, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Function.DisplayName, StringComparer.Ordinal).ToList()
-            : rows.OrderByDescending(r => analysis.Xrefs.CountTo(r.Va)).ThenBy(r => r.Function.DisplayName, StringComparer.Ordinal).ToList();
+            ? rows.OrderBy(r => r.Import.Module, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Import.DisplayName, StringComparer.Ordinal).ToList()
+            : rows.OrderByDescending(r => Refs(r.Import, r.Va)).ThenBy(r => r.Import.DisplayName, StringComparer.Ordinal).ToList();
 
-        var table = new TextTable(("iat_va", 18), ("module", 34), ("function", 40), ("takes", 22), ("refs", 5));
-        foreach (var row in ordered.Skip(offset).Take(limit))
+        var table = stubs is null
+            ? new TextTable(("iat_va", 18), ("module", 34), ("function", 40), ("takes", 22), ("refs", 5))
+            : new TextTable(("plt_va", 18), ("got_va", 18), ("library", 24), ("symbol", 40), ("refs", 5));
+        foreach (var (import, va) in ordered.Skip(offset).Take(limit))
         {
-            table.Add(
-                $"0x{row.Va:X}",
-                row.Module.Name,
-                row.Function.DisplayName + (row.Module.IsDelayLoad ? " (delay)" : string.Empty),
-                Takes(analysis.SignatureFor(row.Va)),
-                analysis.Xrefs.CountTo(row.Va).ToString(CultureInfo.InvariantCulture));
+            if (stubs is null)
+            {
+                table.Add(
+                    $"0x{va:X}",
+                    import.Module,
+                    import.DisplayName + (import.IsDelayLoad ? " (delay)" : string.Empty),
+                    Takes(analysis.SignatureFor(va)),
+                    analysis.Xrefs.CountTo(va).ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                table.Add(
+                    stubs.TryGetValue(import.SlotRva, out ulong stub) ? $"0x{stub:X}" : "-",
+                    $"0x{va:X}",
+                    import.Module.Length == 0 ? "(any)" : import.Module,
+                    import.DisplayName,
+                    Refs(import, va).ToString(CultureInfo.InvariantCulture));
+            }
         }
 
         int returned = Math.Max(0, Math.Min(limit, ordered.Count - offset));
@@ -228,7 +252,7 @@ public sealed class NavigationTools
             // no analysis to fall through, and "who calls File.Delete" is still a fair question.
             return open.References?.Import(target) is { } only
                 ? Outside(open, only, offset, Math.Clamp(limit, 1, MaxLimit))
-                : managed.Problem ?? $"there is nothing to cross-reference: {open.Pe.Machine} is not a machine this disassembles";
+                : managed.Problem ?? $"there is nothing to cross-reference: {open.MachineName} is not a machine this disassembles";
         }
 
         var resolved = Targets.Resolve(session, target);
@@ -563,7 +587,7 @@ public sealed class NavigationTools
     /// unnamed-by-references worklist made of those would be a day's work naming nothing.
     /// </summary>
     private static string Stub(BinarySession session)
-        => session.Managed is not null && session.Pe.ClrHeader?.IsILOnly == true
+        => session.Managed is not null && session.IsILOnly
             ? "-- IL-only .NET assembly: these are x86 shapes found in bytes that hold IL, not this "
               + "program's methods. Its own code is find_symbol() and read_function(view=\"csharp\") --\n"
             : string.Empty;
