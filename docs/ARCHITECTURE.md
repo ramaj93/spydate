@@ -165,6 +165,23 @@ no dependency on ILSpy. The MCP server indexes any reading with `BytecodeIndex` 
 it. What only .NET has (bodies at addresses, IL patching, P/Invokes, IL cross-references, the debugger) is
 reached through `ManagedAssembly`. See DECISIONS, "A file's bytecode is an IBytecodeReading".
 
+### 3.1d `JarImage`, `ClassFile` and `JvmReading`
+
+A JAR, in `Spydate.Core/Archive` and `Spydate.Core/Jvm`. `ZipArchiveFile : IArchive` reads the zip directory
+itself (zip64 included) and inflates one entry at a time through `DeflateStream`, checking its size and CRC.
+`JarImage : IBinaryImage` has no address space — no sections, architecture `Unknown`, so no native analysis —
+and holds the archive, the `JarManifest` and every class that parsed (`Classes`, read on first use), with
+its fingerprint a hash of the zip directory. `ClassFile` parses one class through the bounds-checked
+`ClassReader`: the `ConstantPool`, fields, methods with their `Code` (exception table, line and variable
+tables), and the class attributes that say where it came from and how it nests. `Bytecode.Decode` turns code
+into `JvmInstruction`s and reports bad code as a last instruction with a `Problem` rather than throwing;
+`Descriptors` reads descriptors and generic signatures as Java names.
+
+`JvmReading : IBytecodeReading`, in `Spydate.Decompiler/Jvm`, is the reading: packages, nesting from
+`InnerClasses`/`EnclosingMethod`, the manifest's `main`, one view (`bytecode`, rendered by
+`BytecodeListing`), and `JvmReferences` — every reference and string constant, indexed once, which `xrefs`,
+`list_imports` and `find_strings` answer from. See DECISIONS, "A JAR is parsed in-house".
+
 ### 3.2 `StringScanner`
 
 Finds printable ASCII and UTF-16LE runs in the raw file bytes (so the overlay is
@@ -386,6 +403,10 @@ beside the binary (`notepad.exe.spydate`) when that folder can be written to and
 in `%LOCALAPPDATA%\Spydate\Projects` when it cannot — which is the normal case for
 anything in System32. Both are probed on open, and a project whose recorded size,
 timestamp and checksum do not match the image is refused with a reason.
+
+A file with no addresses — a JAR — is annotated by member instead: `MemberAnnotationStore` keys a name and
+comment on what `IBytecodeReading.AnnotationKey` returns (for the JVM, internal name plus name and
+descriptor), and the project file stores it as an annotation entry with `member` where `rva` would be.
 
 ## 5c. Following one view from another
 

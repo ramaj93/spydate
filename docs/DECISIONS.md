@@ -1026,3 +1026,69 @@ Two parts of the plan were left out on purpose. The native reading keeps its nam
 `Native` everywhere would be churn with nothing behind it. And there is no `IArchive` yet: the first thing
 that is an archive is the JAR, and the interface should be drawn when it has an implementation to be
 measured against, in Phase 3, not guessed at here.
+
+## A JAR is parsed in-house, read as bytecode, and annotated by member
+
+Phase 3a opens a JAR end to end without a JVM: its archive, its class files, a bytecode listing of any class
+or member, cross-references and strings read out of the bytecode, and names and comments that survive in the
+project file. Source-level Java is not part of it (see the plan's Phase 3b and 3c).
+
+**The zip directory is read here; only inflating is delegated.** `ZipArchiveFile` parses the end record
+(zip64 included) and the central directory itself and hands `DeflateStream` a slice to inflate. The BCL's
+`ZipArchive` would do, but it hides what an analyst wants — an entry's compression method, a name that
+appears twice (the JVM reads the first; a tool that reads the last sees another program), the directory's
+own bytes — and it trusts sizes. Here every length is checked against the file, an entry is refused by its
+declared size before anything is allocated, inflates to exactly that size or is refused, and must match its
+CRC-32. `IArchive` is the interface APK support will read through; it was drawn now because the JAR is the
+first implementation to measure it against, as the readings ADR said it would be.
+
+**Class files are parsed in-house, like PE and ELF.** `ClassFile` is strict about structure — magic, the
+constant pool, every count — and lenient about attributes: each attribute is read by a reader bounded to its
+declared length, and one that does not parse costs itself and a warning, not the class. Counts are checked
+against the bytes left before they size anything. A class that does not parse is left out of the reading and
+named in the image's warnings; one whose name another class already declared is kept once. The parser was
+run over the 921 JARs Android Studio ships (535,752 classes, 90 million instructions) with no failure, and a
+test flips bytes in a class three thousand times and asserts nothing but `ClassFormatException` escapes —
+which found the one real bug: a hostile pool entry sent the listing's constant and reference printers round
+each other until the stack gave out. Both now stop, and dynamic constants nest at most eight deep.
+
+**A JAR is an `IBinaryImage` with no address space.** It opens through `BinaryImage.Load`, keeps a project
+file and has a fingerprint like any other file — a SHA-256 of the central directory, which holds every
+entry's name, size and CRC, so any change to any entry changes it. It has no sections, no entry address and
+no native symbols, and its architecture is `Unknown`, which is what keeps native analysis from starting on
+one. The tools that need addresses say so in one message that names what to use instead, rather than
+"nothing is open".
+
+**The reading is `JvmReading`, in the Decompiler project beside `DotNetReading`.** Packages come from each
+class's own internal name, not its path in the archive (a Spring Boot JAR keeps classes under
+`BOOT-INF/classes/`). Nesting comes from what each class says about itself — its `InnerClasses` row, or for a
+local or anonymous class its `EnclosingMethod` — and a chain that loops, which only a crafted file has,
+leaves the classes at the top. A member class reads `Outer.Inner`, as Java writes it; an anonymous one keeps
+its binary name, `Outer$1`. Signatures follow the .NET reading's short form, `greet(String) : String`, so an
+agent types one back the same way. The one view is `bytecode`: `javap -c -p` in shape, with the pool resolved
+to Java names, branches as target offsets, local slots named from the variable table, and an
+`invokedynamic` followed by its bootstrap method and arguments — which is how a lambda's body or a string
+concatenation's recipe is found. Multi-release copies under `META-INF/versions/` are counted, not shown.
+
+**References are read once, per archive.** `JvmReferences` decodes every method and indexes every field,
+method and class reference by owner, including ones outside the archive, and every string constant with the
+member that loads it. That answers `xrefs` for a member here or anywhere (`java.lang.Runtime::exec`, in any
+of its spellings), `list_imports` as the classes the archive uses from outside itself, and `find_strings`. A
+lambda body is reached only through a bootstrap method's handle, so handles count as references.
+
+**Annotations key on members, not addresses.** `IBytecodeReading.AnnotationKey` gives the key a reading
+stores a type's or member's name and comment under: for the JVM, the internal name plus name and descriptor
+(`com/example/Greeter.greet(Ljava/lang/String;)Ljava/lang/String;`) — what the class file says, stable across
+rebuilds of the same code, and distinct per overload. .NET returns null: its methods are annotated where their
+IL sits, as before. `MemberAnnotationStore` holds them with the same cleaning, provenance and change tracking
+as the address store, and the project file carries them as annotation entries with `member` in place of
+`rva` — still format 1, since an older reader skips an entry it cannot place. A save merges them the way it
+merges everything else, comparing keys exactly because Java names are case-sensitive, and a caller that knows
+nothing of members (a native save) leaves them in the file. The listing shows a member's name and comment
+above it; the MCP `annotate`, `read_annotation` and `list_annotations` work on members, and the window's
+assistant can annotate a JAR. Editing member names from the window's own menus is not done yet, and a rename
+shows in the listing, not yet in the explorer's tree.
+
+**The MCP surface gained no tool.** `open_binary` opens a JAR; `read_file` reads one entry of the open
+archive as `app.jar!/path` — the JVM's own spelling — and lists them with `app.jar!/`. The manifest budget
+moved only by those description words.

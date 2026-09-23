@@ -44,12 +44,24 @@ agent used to Windows would otherwise get wrong: the loader and the libraries it
 file was stripped, and that x64 arguments arrive in `rdi, rsi, rdx, rcx, r8, r9` (System V), which is
 also how the pseudo-C was recovered.
 
+It also opens a JAR, which has no machine code and no addresses at all. The screen then says what the
+archive holds (class files, nested JARs, native libraries, other files), how it runs (the manifest's
+`Main-Class` and `Class-Path`, what built it), the newest Java release its classes need, and its `main`.
+The program is browsed with `find_symbol`, read with `read_function(view="bytecode")` — a `javap`-shaped
+listing with the constant pool resolved to Java names and local slots named — and cross-referenced with
+`xrefs`, which answers for a member here or one outside the archive (`java.lang.Runtime::exec`).
+`list_imports` lists the classes it uses from outside itself, `find_strings` the string constants its code
+loads, and `annotate` names a class, method or field, saved by member rather than by address. The tools
+that need addresses (`list_functions`, `disassemble`, `read_data`, `patch`) say so and name these instead.
+
 `read_file` is the way past the one thing `open_binary` cannot do: it parses a PE or an ELF into an
 image, so a file that is neither — a resource, a `.inx`, an unknown container beside the binary — is a wall.
 `read_file` reads any file's raw bytes, a window of at most 4096 by offset, as a hex dump with an
 ASCII column or decoded as UTF-8 or UTF-16, and reports the file's size so the window can be moved. It
 is bound by `--root` exactly as `open_binary` is, and reads more than PEs, so the root matters more
-with it than without.
+with it than without. With a JAR open, `read_file("app.jar!/META-INF/MANIFEST.MF")` reads one file inside
+it — the JVM's own spelling — and `read_file("app.jar!/")` (or any folder ending in `/`) lists the files,
+a hundred at a time, with their sizes and compression.
 
 **Finding something worth reading** — `list_functions` · `find_symbol` · `list_imports` · `xrefs` ·
 `find_strings`
