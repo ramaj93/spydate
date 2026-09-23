@@ -185,6 +185,9 @@ public sealed class JvmPackage : IBytecodeNamespace
 /// </summary>
 public sealed class JvmReading : IBytecodeReading
 {
+    /// <summary>The in-house decompiler's Java-shaped pseudo-code: the default view.</summary>
+    public const string JavaView = "java";
+
     public const string BytecodeView = "bytecode";
 
     private readonly Dictionary<string, JvmType> _byInternalName = new(StringComparer.Ordinal);
@@ -277,7 +280,7 @@ public sealed class JvmReading : IBytecodeReading
     /// <summary>The manifest's Main-Class, when it is in the archive.</summary>
     public JvmType? MainType { get; }
 
-    public IReadOnlyList<string> Views { get; } = [BytecodeView];
+    public IReadOnlyList<string> Views { get; } = [JavaView, BytecodeView];
 
     /// <summary>The class with this internal name (<c>com/example/Greeter</c>), or null.</summary>
     public JvmType? FindType(string internalName) => _byInternalName.GetValueOrDefault(internalName);
@@ -358,9 +361,16 @@ public sealed class JvmReading : IBytecodeReading
             throw new ArgumentException("the type and member must come from this archive", nameof(type));
         }
 
+        if (view == JavaView)
+        {
+            return member is JvmMember javaMember
+                ? Java.JavaDecompiler.Member(this, jvmType, javaMember, cancellationToken)
+                : Java.JavaDecompiler.Type(this, jvmType, cancellationToken);
+        }
+
         if (view != BytecodeView)
         {
-            throw new ArgumentException($"a JAR is read as {BytecodeView}, not {view}", nameof(view));
+            throw new ArgumentException($"a JAR is read as {JavaView} or {BytecodeView}, not {view}", nameof(view));
         }
 
         var listing = new BytecodeListing(this);

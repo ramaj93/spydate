@@ -232,7 +232,7 @@ public sealed class SessionTools
     /// </summary>
     internal static string WhyNoNative(BinarySession session) => session.Image is JarImage jar
         ? $"{jar.FileName} is a Java archive: its code is JVM bytecode, with no addresses or machine code. "
-          + "Browse it with find_symbol, read it with read_function(view=\"bytecode\"), and list its files with read_file(\"" + jar.FileName + "!/\")"
+          + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the bytecode), and list its files with read_file(\"" + jar.FileName + "!/\")"
         : $"{session.MachineName} is not a machine this disassembles";
 
     /// <summary>Width of the label column, wide enough for the longest label with a gap after it.</summary>
@@ -304,6 +304,12 @@ public sealed class SessionTools
         else
         {
             Bytecode(sb, session);
+            if (session.Bytecode is { Kind: BytecodeKind.Jvm })
+            {
+                // Said plainly: the native side is real, but it is the part that finds a JVM and starts it.
+                Line(sb, "launcher", "this PE is a Java launcher: the program is the JAR appended to it. "
+                                     + "find_symbol and read_function read it as Java; the functions above only start the JVM");
+            }
         }
 
         if (image.Warnings.Count > 0)

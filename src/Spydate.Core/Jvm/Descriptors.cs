@@ -67,6 +67,34 @@ public static class Descriptors
         return ReadType(descriptor, ref at, simple) is { } returns && at == descriptor.Length ? (parameters, returns) : null;
     }
 
+    /// <summary>
+    /// A method descriptor's parameter types as descriptors (<c>I</c>, <c>Ljava/lang/String;</c>, <c>[J</c>), in
+    /// order. Empty when it is not a method descriptor; as far as it parses when it is broken part-way.
+    /// </summary>
+    public static IReadOnlyList<string> ParameterDescriptors(string descriptor)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        var parameters = new List<string>();
+        if (!descriptor.StartsWith('('))
+        {
+            return parameters;
+        }
+
+        int at = 1;
+        while (at < descriptor.Length && descriptor[at] != ')')
+        {
+            int start = at;
+            if (ReadType(descriptor, ref at, simple: true) is null)
+            {
+                break;
+            }
+
+            parameters.Add(descriptor[start..at]);
+        }
+
+        return parameters;
+    }
+
     /// <summary>How many local slots a method's parameters take: a long or double takes two.</summary>
     public static int ParameterSlots(string descriptor)
     {

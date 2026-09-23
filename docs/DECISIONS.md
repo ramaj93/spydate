@@ -1095,3 +1095,77 @@ such as Main, keeps it. A reading document renders again on reload, so the listi
 **The MCP surface gained no tool.** `open_binary` opens a JAR; `read_file` reads one entry of the open
 archive as `app.jar!/path` — the JVM's own spelling — and lists them with `app.jar!/`. The manifest budget
 moved only by those description words.
+
+## Java is decompiled in-house on the native IR, as pseudo-code
+
+Phase 3b gives a JAR a `java` view with no JVM: Java-shaped pseudo-code, at the level of the native pseudo-C.
+The best Java decompilers stay available later, run on a JVM the user links (Phase 3c); this is the view that is
+always there, and it is the default.
+
+**It is built on the native decompiler's IR and structurer, not beside them.** Java's expressions and statements
+(`JExpr` — fields, calls, `new`, casts, `instanceof`, `&&`/`||` — and `JExprStmt`, `JThrow`, `JMonitor`) derive from
+`IrExpr`/`IrStmt`, so the unchanged `Structurer` carries them, its conditions included; only the emitter knows how
+to print them. Blocks are addressed by bytecode offset. Reusing the structurer is the whole economy of the approach:
+the part of a decompiler that is hardest to get right already had its tests.
+
+**The operand stack is simulated away per block.** Values stay expressions until something with an effect — a
+call, a store, a write to the local an expression reads — would run over them; then they are spilled to a
+temporary first, so evaluation order is kept by construction. `JavaInliner` then folds a temporary back into the
+statement right after its run of definitions when it is used once there, in definition order, with no call
+evaluated ahead of it: `foo(a(), b())` comes back as written, and anything less certain keeps its temporary, which
+reads plainly and is never wrong. A value left on the stack at a join becomes a stack variable (`s1`); an object
+awaiting its constructor is carried across instead, so `new T(...)` still folds. `dup`, `swap` and the rest evaluate
+what they duplicate or reorder once, into temporaries that are not moved back.
+
+**Trees are bounded where they are built.** An expression taller than 40 is spilled, a merged condition taller
+than 48 is left unmerged, and inlining never builds past 64, so every recursive walk that follows has a known
+depth. Decompiling runs on a thread with a 256 MB stack as the second guard: the structurer recurses once per
+nesting level, and a crafted method two thousand loops deep costs time, not the process — a test builds exactly
+that, and another a 3,000-deep expression. A method that fails any other way prints as a comment saying so, and
+the rest of the class still prints.
+
+**Try blocks are regions, structured on their own and collapsed.** The structurer knows only ordinary edges and a
+handler is reached by none. So each try, innermost first, is structured as a small graph of its protected blocks
+and one per handler, each with the block they rejoin added as an empty exit (so leaving reads as falling out),
+then replaced by one block holding the result, which the enclosing graph — the next try out, and the method —
+structures in place. The exception table becomes regions the way javac lays code out: a handler's entries joined
+into one range (a `finally`'s skip its own copies), handlers with one range sharing a try, the entry that guards a
+handler's own code skipped, handlers running to the next handler or the join. A catch variable is the local its
+handler stores the exception to, or a fresh name when that slot also holds other values.
+
+**Short-circuit conditions are rebuilt before structuring, and early exits flattened after.** Two branches that
+share a target, the second block nothing but its branch and reached only from the first, merge into `a || b` or
+`a && b` (with the negations the fall-throughs imply), repeated to a fixed point but never across a try's
+boundary. A jump to a block that only returns a local or a constant becomes that `return`; statements after one
+that never falls through are dropped up to a label still jumped to; and `if (a) { return } else { rest }` reads
+as an early return with `rest` after it. On commons-lang3 these took the `goto`s left from 1,395 to 282.
+
+**What it does not do, on purpose.** Compiler sugar shows as what it compiled to: a `finally` copied onto each
+exit and caught as `Throwable`, a string switch as a switch on `hashCode()`, a pattern switch as its
+`SwitchBootstraps` loop, `synchronized` as `monitorenter`/`monitorexit`, concatenation before Java 9 as the
+`StringBuilder` chain. Java 9+ concatenation is read from its recipe (`"a" + x`), and a lambda or method reference
+prints as the method that implements it (`(Runnable) Greeter::lambda$main$0`). Edges no structure covers keep a
+`goto L0012;` and a label, as pseudo-C does. Names given in the project apply everywhere a member is used, and to
+the declarations.
+
+**Measured.** Every class of the 921 JARs Android Studio ships decompiles with no crash, commons-lang3's 4,917
+methods in about two seconds, and hand-built tests check the Java for loops with `&&`, try/catch, switches on
+values, constructor chaining, concatenation, `new`, lambdas and project names. The window opens a JAR's class or
+member in the `java` view, with the bytecode a button away; MCP's `read_function` reads it by default.
+
+## A zip is found from its end, and a launcher's appended JAR is a second reading
+
+The offsets a zip records count from where the zip starts. A launcher — launch4j and its kind build a Windows
+PE that finds a JVM and runs the JAR appended to it — puts the zip after 100 KB or more of program, so every
+recorded offset is short by that much, and the end record's directory offset still lands somewhere inside the
+file. The reader first read no entries at all from jd-gui.jar, which ships exactly like this. It now does what
+`java.util.zip` does: when the directory is not where the end record says, it must end just before the end
+record, and the difference is applied to the directory and to every entry's local header, with a warning
+naming the length of what precedes the zip.
+
+Such a file sniffs as a PE and opens as one, and that is right: the launcher is real code. But its program is
+the archive, so a PE that is not .NET and ends in a zip listing class files gets the JVM reading beside its
+native one (`JarImage.Embedded`), the way a .NET assembly's IL sits beside its loader stub. Its classes are
+browsed and decompiled as any JAR's, its member names are kept in the PE's own project file, and the tools say
+plainly that the native functions only start the JVM. `annotate` and `read_annotation` take a member when the
+name is one and an address otherwise; `list_annotations` lists both.

@@ -1,0 +1,185 @@
+using Spydate.Core.Jvm;
+
+namespace Spydate.Decompiler.Jvm.Java;
+
+/// <summary>
+/// Names a method's local variable slots. A slot is a register, not a variable: the compiler reuses one for
+/// several variables, even of different types. The local variable table says which variable a slot holds at
+/// each point, when the class kept it; without it a slot is <c>varN</c>, split by the kind of value stored
+/// (<c>var3</c>, <c>var3_l</c>) so one name never holds two types. Parameters take their names from the table,
+/// then <c>MethodParameters</c>, then <c>argN</c>.
+/// </summary>
+internal sealed class LocalNamer
+{
+    private readonly JvmMethod _method;
+    private readonly CodeAttribute _code;
+    private readonly Dictionary<string, JLocal> _byName = new(StringComparer.Ordinal);
+    private readonly Dictionary<(int Slot, char Kind), string> _untabled = new();
+    private readonly Dictionary<LocalVariable, string> _tabled = new();
+    private readonly Dictionary<string, string?> _declared = new(StringComparer.Ordinal);
+    private readonly Dictionary<int, JLocal> _parameterSlots = new();
+
+    public LocalNamer(ClassFile file, JvmMethod method, CodeAttribute code)
+    {
+        _method = method;
+        _code = code;
+
+        int slot = 0;
+        if ((method.Access & JvmAccess.Static) == 0)
+        {
+            var self = new JLocal("this", $"L{file.Name};", JLocalKind.This);
+            _byName[self.Name] = self;
+            _parameterSlots[0] = self;
+            slot = 1;
+        }
+
+        var parameters = Descriptors.ParameterDescriptors(method.Descriptor);
+        for (int i = 0; i < parameters.Count; i++)
+        {
+            string? name = i < method.ParameterNames.Count ? method.ParameterNames[i] : null;
+            name = code.Locals.FirstOrDefault(l => l.Slot == slot && l.StartPc == 0)?.Name ?? name;
+            var parameter = new JLocal(Unique(Clean(name) ?? $"arg{i}"), parameters[i], JLocalKind.Parameter);
+            _byName[parameter.Name] = parameter;
+            _parameterSlots[slot] = parameter;
+            Parameters.Add(parameter);
+            slot += parameters[i] is "J" or "D" ? 2 : 1;
+        }
+    }
+
+    /// <summary>The parameters in order, <c>this</c> excluded.</summary>
+    public List<JLocal> Parameters { get; } = [];
+
+    /// <summary>Every local that is not a parameter, with the type to declare it as.</summary>
+    public IReadOnlyDictionary<string, string?> Declared => _declared;
+
+    public JLocal Load(int slot, string kind, int pc) => Resolve(slot, kind, pc, null);
+
+    /// <summary>A store's variable starts just after it, which is where the table says it is live from.</summary>
+    public JLocal Store(int slot, string kind, int liveFrom, string? valueType) => Resolve(slot, kind, liveFrom, valueType);
+
+    private readonly HashSet<string> _caught = new(StringComparer.Ordinal);
+
+    /// <summary>Marks a local as a catch clause's variable, which the clause declares.</summary>
+    public void Caught(string name) => _caught.Add(name);
+
+    public bool IsCaught(string name) => _caught.Contains(name);
+
+    /// <summary>A new local under a name nothing else in the method uses: <c>ex</c>, <c>ex2</c>.</summary>
+    public JLocal Fresh(string name, string? type) => Local(Unique(name), type);
+
+    /// <summary>Declares a local the lifter or the region builder made up — a temporary, a stack variable — with its type.</summary>
+    public void Declare(JLocal local)
+    {
+        if (local.Kind is not (JLocalKind.Parameter or JLocalKind.This))
+        {
+            _declared.TryAdd(local.Name, local.Type);
+        }
+    }
+
+    private JLocal Resolve(int slot, string kind, int pc, string? valueType)
+    {
+        // A parameter's slot holds the parameter until the table says another variable took it over.
+        var entry = Entry(slot, pc);
+        if (entry is null && _parameterSlots.TryGetValue(slot, out var parameter) && !Reassigned(slot))
+        {
+            return parameter;
+        }
+
+        if (entry is not null)
+        {
+            if (_parameterSlots.TryGetValue(slot, out var tabledParameter) && entry.StartPc == 0)
+            {
+                return tabledParameter;
+            }
+
+            if (!_tabled.TryGetValue(entry, out string? tabledName))
+            {
+                tabledName = UniqueFor(Clean(entry.Name) ?? $"var{slot}", entry.Descriptor);
+                _tabled[entry] = tabledName;
+            }
+
+            return Local(tabledName, entry.Descriptor);
+        }
+
+        char category = kind[0] == 'L' || kind[0] == '[' ? 'a' : char.ToLowerInvariant(kind[0]);
+        if (!_untabled.TryGetValue((slot, category), out string? name))
+        {
+            bool first = !_untabled.Keys.Any(k => k.Slot == slot);
+            name = Unique(first ? $"var{slot}" : $"var{slot}_{category}");
+            _untabled[(slot, category)] = name;
+        }
+
+        // Without a table a reference slot is only "an object"; the first value stored in it says more.
+        string type = category == 'a' ? valueType is { Length: > 0 } t && t[0] is 'L' or '[' ? t : "Ljava/lang/Object;" : kind;
+        return Local(name, type);
+    }
+
+    private JLocal Local(string name, string? type)
+    {
+        if (!_byName.TryGetValue(name, out var local))
+        {
+            local = new JLocal(name, type);
+            _byName[name] = local;
+            _declared[name] = type;
+        }
+
+        return local;
+    }
+
+    /// <summary>The table's entry for a slot at a point, when the class kept one.</summary>
+    private LocalVariable? Entry(int slot, int pc)
+    {
+        foreach (var local in _code.Locals)
+        {
+            if (local.Slot == slot && pc >= local.StartPc && pc <= local.StartPc + local.Length)
+            {
+                return local;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether the table shows a slot of a parameter reused for another variable — in which case a bare load is not the parameter.</summary>
+    private bool Reassigned(int slot) => _code.Locals.Any(l => l.Slot == slot && l.StartPc > 0);
+
+    /// <summary>A name not yet used for a different type: the same name in two scopes with one type is one variable.</summary>
+    private string UniqueFor(string name, string type)
+    {
+        if (!_byName.TryGetValue(name, out var existing) || existing.Type == type && existing.Kind == JLocalKind.Local)
+        {
+            return name;
+        }
+
+        return Unique(name);
+    }
+
+    private string Unique(string name)
+    {
+        if (!_byName.ContainsKey(name) && name != "this")
+        {
+            return name;
+        }
+
+        for (int i = 2; ; i++)
+        {
+            string candidate = $"{name}{i}";
+            if (!_byName.ContainsKey(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    /// <summary>A name from the class file, if it is one Java could have: obfuscators write keywords and worse.</summary>
+    private static string? Clean(string? name)
+    {
+        if (string.IsNullOrEmpty(name) || name.Length > 64 || !(char.IsLetter(name[0]) || name[0] is '_' or '$')
+            || !name.All(c => char.IsLetterOrDigit(c) || c is '_' or '$') || JavaNames.IsKeyword(name))
+        {
+            return null;
+        }
+
+        return name;
+    }
+}

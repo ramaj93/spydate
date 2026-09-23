@@ -47,8 +47,10 @@ also how the pseudo-C was recovered.
 It also opens a JAR, which has no machine code and no addresses at all. The screen then says what the
 archive holds (class files, nested JARs, native libraries, other files), how it runs (the manifest's
 `Main-Class` and `Class-Path`, what built it), the newest Java release its classes need, and its `main`.
-The program is browsed with `find_symbol`, read with `read_function(view="bytecode")` — a `javap`-shaped
-listing with the constant pool resolved to Java names and local slots named — and cross-referenced with
+The program is browsed with `find_symbol` and read with `read_function`, as Java-shaped pseudo-code by
+default (the in-house decompiler: loops, `&&`, try/catch and switches recovered, compiler sugar left as it
+compiled, a `goto` where no structure fits) or with `view="bytecode"` as a `javap`-shaped listing with the
+constant pool resolved to Java names and local slots named — and cross-referenced with
 `xrefs`, which answers for a member here or one outside the archive (`java.lang.Runtime::exec`).
 `list_imports` lists the classes it uses from outside itself, `find_strings` the string constants its code
 loads, and `annotate` names a class, method or field, saved by member rather than by address. The tools

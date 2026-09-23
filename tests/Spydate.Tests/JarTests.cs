@@ -43,7 +43,7 @@ public sealed class JarTests : IDisposable
     /// <c>Runtime.exec("calc.exe")</c>, <c>choose</c> with a tableswitch, two constants, a member class and an
     /// anonymous one.
     /// </summary>
-    private static byte[] Greeter()
+    internal static byte[] Greeter()
     {
         var c = new SyntheticClass("com/example/Greeter").SourceFile("Greeter.java");
         ushort sb = c.Class("java/lang/StringBuilder");
@@ -137,7 +137,7 @@ public sealed class JarTests : IDisposable
             .AddMethod(0x0401, "area", "()D", null)
             .Build();
 
-    private static byte[] SampleJar(params (string Name, byte[] Bytes)[] extra)
+    internal static byte[] SampleJar(params (string Name, byte[] Bytes)[] extra)
         => SyntheticClass.Jar(
             [
                 ("META-INF/MANIFEST.MF", SyntheticClass.Manifest("com.example.Greeter")),
@@ -208,6 +208,55 @@ public sealed class JarTests : IDisposable
         Assert.Contains("a.txt", archive.Duplicates);
         Assert.Contains(archive.Warnings, w => w.Contains("more than once", StringComparison.Ordinal));
         Assert.Equal("first", Encoding.UTF8.GetString(archive.Read(archive.Find("a.txt")!, 100)));
+    }
+
+    [Fact]
+    public void AZipWithSomethingInFrontIsReadAtItsRealOffsets()
+    {
+        // A launcher or self-extractor stub before the zip: every offset the zip records is short by its length,
+        // yet the end record still points somewhere inside the file — jd-gui.jar ships exactly like this.
+        byte[] zip = SampleJar();
+        byte[] prefixed = [.. Enumerable.Repeat((byte)0x90, 128_512), .. zip];
+        var jar = JarImage.FromBytes(prefixed);
+
+        Assert.Equal(4, jar.Classes.Count);
+        Assert.Equal("mode=fast\n", Encoding.UTF8.GetString(jar.Archive.Read(jar.Archive.Find("config/app.properties")!, 100)));
+        Assert.Contains(jar.Warnings, w => w.Contains("128,512 bytes precede the zip", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ALauncherWithAJarAppendedHasBothReadings()
+    {
+        // A native launcher with the application's JAR appended, as launch4j builds them: the file is a PE, and
+        // the program is the archive after it.
+        const string notepad = @"C:\Windows\System32\notepad.exe";
+        if (!File.Exists(notepad))
+        {
+            return;
+        }
+
+        string path = WriteJar("launcher.exe", [.. File.ReadAllBytes(notepad), .. SampleJar()]);
+        var store = new SessionStore();
+        store.Set(BinarySession.Open(path, McpOptions.Default));
+        var session = store.Current!;
+
+        Assert.NotNull(session.Analysis);
+        Assert.IsType<JvmReading>(session.Bytecode);
+        Assert.True(session.BytecodeIsTheProgram);
+        Assert.Contains("Java launcher", new SessionTools(store, McpOptions.Default).GetOverview(), StringComparison.Ordinal);
+        Assert.Contains("return new StringBuilder().append(\"Hello, \").append(who).toString();", new CodeTools(store).ReadFunction("com.example.Greeter::greet"), StringComparison.Ordinal);
+
+        // A member name goes to the member store; an address still goes to the native one.
+        var annotations = new AnnotationTools(store, McpOptions.Default);
+        Assert.Contains("is now called salute", annotations.Annotate("com.example.Greeter::greet", name: "salute"), StringComparison.Ordinal);
+        Assert.Contains("is now launcherStart", annotations.Annotate($"0x{session.Image.EntryPointVa:X}", name: "launcherStart"), StringComparison.Ordinal);
+        string listed = annotations.ListAnnotations();
+        Assert.Contains("launcherStart", listed, StringComparison.Ordinal);
+        Assert.Contains("members of the embedded JAR", listed, StringComparison.Ordinal);
+        Assert.Contains("salute", listed, StringComparison.Ordinal);
+
+        // An ordinary binary has no archive in it.
+        Assert.Null(JarImage.Embedded(BinaryImage.Load(notepad)));
     }
 
     [Fact]
@@ -495,7 +544,7 @@ public sealed class JarTests : IDisposable
         Assert.Contains("invokedynamic   run() : java.lang.Runnable  // bootstrap java.lang.invoke.LambdaMetafactory.metafactory", main, StringComparison.Ordinal);
         Assert.Contains("com.example.Greeter.lambda$main$0", main, StringComparison.Ordinal);
 
-        Assert.Throws<ArgumentException>(() => reading.Render(greeter, null, "java"));
+        Assert.Throws<ArgumentException>(() => reading.Render(greeter, null, "kotlin"));
     }
 
     [Fact]
@@ -641,7 +690,7 @@ public sealed class JarTests : IDisposable
         var code = new CodeTools(store);
 
         Assert.Contains("com.example.Greeter::greet(String) : String", navigation.FindSymbol("greet"), StringComparison.Ordinal);
-        Assert.Contains("ldc             \"Hello, \"", code.ReadFunction("com.example.Greeter::greet"), StringComparison.Ordinal);
+        Assert.Contains("ldc             \"Hello, \"", code.ReadFunction("com.example.Greeter::greet", view: "bytecode"), StringComparison.Ordinal);
         Assert.Contains("\"bytecode\"", code.ReadFunction("com.example.Greeter::greet", view: "asm"), StringComparison.Ordinal);
 
         string callers = navigation.Xrefs("com.example.Greeter::greet");

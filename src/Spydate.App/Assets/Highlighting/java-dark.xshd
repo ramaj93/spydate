@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!-- The in-house Java view: the C# palette, with Java's keywords, and the labels and gotos that pseudo-code keeps
+     for the edges no structure covered shown in the colour of the listing's offsets. -->
+<SyntaxDefinition name="Spydate.Java" xmlns="http://icsharpcode.net/sharpdevelop/syntaxdefinition/2008">
+  <Color name="Comment"        foreground="#6A9955" />
+  <Color name="String"         foreground="#CE9178" />
+  <Color name="Char"           foreground="#CE9178" />
+  <Color name="Keyword"        foreground="#569CD6" />
+  <Color name="ControlKeyword" foreground="#C586C0" />
+  <Color name="TypeKeyword"    foreground="#569CD6" />
+  <Color name="Type"           foreground="#4EC9B0" />
+  <Color name="Number"         foreground="#B5CEA8" />
+  <Color name="Method"         foreground="#DCDCAA" />
+  <Color name="Label"          foreground="#6E7681" />
+
+  <RuleSet>
+    <Span color="Comment" begin="//" />
+    <Span color="Comment" multiline="true" begin="/\*" end="\*/" />
+    <Span color="String" begin="&quot;" end="&quot;">
+      <RuleSet><Span begin="\\" end="." /></RuleSet>
+    </Span>
+    <Span color="Char" begin="'" end="'">
+      <RuleSet><Span begin="\\" end="." /></RuleSet>
+    </Span>
+
+    <Rule color="Label">^\s*L[0-9A-F]{4}:|(?&lt;=\bgoto\s+)L[0-9A-F]{4}\b</Rule>
+
+    <Keywords color="ControlKeyword">
+      <Word>if</Word><Word>else</Word><Word>switch</Word><Word>case</Word><Word>default</Word><Word>do</Word><Word>for</Word>
+      <Word>while</Word><Word>break</Word><Word>continue</Word><Word>goto</Word><Word>return</Word><Word>throw</Word>
+      <Word>try</Word><Word>catch</Word><Word>finally</Word><Word>yield</Word>
+    </Keywords>
+
+    <Keywords color="TypeKeyword">
+      <Word>boolean</Word><Word>byte</Word><Word>char</Word><Word>double</Word><Word>float</Word><Word>int</Word>
+      <Word>long</Word><Word>short</Word><Word>void</Word><Word>var</Word>
+    </Keywords>
+
+    <Keywords color="Keyword">
+      <Word>abstract</Word><Word>assert</Word><Word>class</Word><Word>const</Word><Word>enum</Word><Word>extends</Word>
+      <Word>final</Word><Word>implements</Word><Word>import</Word><Word>instanceof</Word><Word>interface</Word>
+      <Word>native</Word><Word>new</Word><Word>package</Word><Word>private</Word><Word>protected</Word><Word>public</Word>
+      <Word>static</Word><Word>strictfp</Word><Word>super</Word><Word>synchronized</Word><Word>this</Word><Word>throws</Word>
+      <Word>transient</Word><Word>volatile</Word><Word>true</Word><Word>false</Word><Word>null</Word><Word>record</Word>
+      <Word>sealed</Word><Word>permits</Word><Word>non-sealed</Word><Word>module</Word>
+    </Keywords>
+
+    <Rule color="Method">\b[A-Za-z_$][\w$]*(?=\s*\()</Rule>
+    <Rule color="Type">\b[A-Z][A-Za-z0-9_$]*(?=[\s&lt;\[.,;)])</Rule>
+    <Rule color="Number">\b0[xX][0-9a-fA-F_]+[lL]?\b|\b\d[\d_]*(\.[\d_]+)?([eE][+-]?\d+)?[fFdDlL]?\b</Rule>
+  </RuleSet>
+</SyntaxDefinition>

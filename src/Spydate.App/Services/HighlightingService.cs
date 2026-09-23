@@ -15,6 +15,10 @@ public sealed class HighlightingService
 
     /// <summary>A JVM bytecode listing, in the IL palette so the two bytecode views read alike.</summary>
     public const string JvmBytecode = "Spydate.JvmBytecode";
+
+    /// <summary>The in-house decompiler's Java view.</summary>
+    public const string Java = "Spydate.Java";
+
     public const string Plain = "";
 
     /// <summary>Manifests are XML; AvalonEdit's built-in definition assumes a light background.</summary>
@@ -27,6 +31,7 @@ public sealed class HighlightingService
         (CSharp, "csharp-dark.xshd", new[] { ".cs" }),
         (Il, "il.xshd", new[] { ".il" }),
         (JvmBytecode, "jvm-bytecode.xshd", new[] { ".jbc" }),
+        (Java, "java-dark.xshd", new[] { ".java" }),
         (Xml, "xml-dark.xshd", new[] { ".manifest" }),
     };
 

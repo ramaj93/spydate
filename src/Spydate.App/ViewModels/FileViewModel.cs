@@ -306,7 +306,7 @@ public sealed partial class FileViewModel : ObservableObject
         }
         else if (Binary.Image is JarImage)
         {
-            AnalysisText = "bytecode";
+            AnalysisText = "Java · bytecode";
         }
         else
         {
@@ -1517,7 +1517,7 @@ public sealed partial class FileViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(reload);
 
-        if (Binary.MemberAnnotations is { } members)
+        if (Binary is { MemberAnnotations: { } members, Analysis: null })
         {
             if (members.IsDirty)
             {
@@ -1539,7 +1539,7 @@ public sealed partial class FileViewModel : ObservableObject
             return;
         }
 
-        if (analysis.Annotations.IsDirty)
+        if (analysis.Annotations.IsDirty || Binary.MemberAnnotations is { IsDirty: true })
         {
             Log("The project file changed on disk, but there are unsaved changes here, so it was not reloaded. Saving (Ctrl+S) merges both.");
             return;
@@ -1655,6 +1655,7 @@ public sealed partial class FileViewModel : ObservableObject
         string highlighting = view switch
         {
             JvmReading.BytecodeView => HighlightingService.JvmBytecode,
+            JvmReading.JavaView => HighlightingService.Java,
             _ => HighlightingService.Plain,
         };
 
@@ -1685,6 +1686,7 @@ public sealed partial class FileViewModel : ObservableObject
     private static string ViewLabel(string view) => view switch
     {
         JvmReading.BytecodeView => "Bytecode",
+        JvmReading.JavaView => "Java",
         _ => view,
     };
 

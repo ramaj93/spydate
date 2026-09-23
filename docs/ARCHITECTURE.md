@@ -178,9 +178,9 @@ into `JvmInstruction`s and reports bad code as a last instruction with a `Proble
 `Descriptors` reads descriptors and generic signatures as Java names.
 
 `JvmReading : IBytecodeReading`, in `Spydate.Decompiler/Jvm`, is the reading: packages, nesting from
-`InnerClasses`/`EnclosingMethod`, the manifest's `main`, one view (`bytecode`, rendered by
-`BytecodeListing`), and `JvmReferences` — every reference and string constant, indexed once, which `xrefs`,
-`list_imports` and `find_strings` answer from. See DECISIONS, "A JAR is parsed in-house".
+`InnerClasses`/`EnclosingMethod`, the manifest's `main`, two views — `java` (the in-house decompiler, §5) and
+`bytecode` (rendered by `BytecodeListing`) — and `JvmReferences` — every reference and string constant, indexed
+once, which `xrefs`, `list_imports` and `find_strings` answer from. See DECISIONS, "A JAR is parsed in-house".
 
 ### 3.2 `StringScanner`
 
@@ -375,6 +375,14 @@ See `DECOMPILER-DESIGN.md`. Summary:
   `DotNetReading` is the assembly as an `IBytecodeReading` (see §3.1c): the
   records implement the seam directly, and everything only .NET has stays on
   `ManagedAssembly`.
+- **Java** (`Decompiler/Jvm/Java`): the JVM reading's `java` view, Java-shaped
+  pseudo-code on the native IR. `JvmLifter` simulates the operand stack into
+  `JExpr`/`IrStmt` blocks (bytecode offsets as addresses); `JavaInliner` folds the
+  lifter's order-keeping temporaries back; `JavaConditions` rebuilds `&&`/`||`;
+  `JavaRegions` structures each try on its own and collapses it into one block,
+  then runs the native `Structurer` unchanged; `JavaEmitter` prints Java.
+  `JavaDecompiler` runs it on a large-stack thread. See DECISIONS, "Java is
+  decompiled in-house on the native IR".
 
 ## 5b. User annotations and the project file
 
