@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
+using Spydate.Core.Readings;
 using Spydate.Core.Strings;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
@@ -43,20 +44,28 @@ public sealed class CodeTools
         // for one case only, and it is the common one: in an IL-only assembly a native name lookup
         // can only fail, so letting it answer first would turn every "read this type" into "not an
         // address or a known name".
-        bool wantsManaged = view is "csharp" or "il";
+        bool wantsManaged = view is "csharp" or "il" || session.Bytecode?.Views.Contains(view) == true;
         string? managedProblem = null;
-        if (wantsManaged || session.Managed is not null)
+        if (wantsManaged || session.Bytecode is not null)
         {
-            var found = ManagedTargets.Resolve(session, target);
+            var found = BytecodeTargets.Resolve(session, target);
             if (found.Found)
             {
                 // Refused rather than quietly substituted. "asm" on a type could only mean the C#
                 // instead, and an agent that believes it is reading instructions when it is reading
                 // source will draw conclusions about bytes that were never there.
-                return view is "pseudo_c" or "asm"
-                    ? $"{found.Describe()} is managed code; \"{view}\" is for native code. "
-                      + $"Use view=\"csharp\" or view=\"il\"."
-                    : ReadManaged(session, session.Managed!, found, view, offset, maxLines, opened: true);
+                var views = session.Bytecode!.Views;
+                if (view is "pseudo_c" or "asm")
+                {
+                    return $"{found.Describe()} is managed code; \"{view}\" is for native code. "
+                           + $"Use {string.Join(" or ", views.Select(v => $"view=\"{v}\""))}.";
+                }
+
+                // .NET has the richer reading — addresses on every IL line, P/Invokes named — so it keeps
+                // its own; any other reading is rendered through the seam.
+                return session.Managed is { } managed
+                    ? ReadManaged(session, managed, found, view, offset, maxLines, opened: true)
+                    : ReadBytecode(session.Bytecode, found, view == "auto" ? views[0] : view, offset, maxLines);
             }
 
             // Not in the opened assembly. It may be a framework or dependency method — resolve the name
@@ -249,7 +258,7 @@ public sealed class CodeTools
                 continue;
             }
 
-            var found = ManagedTargets.Resolve(session.IndexFor(assembly), target);
+            var found = BytecodeTargets.Resolve(session.IndexFor(assembly), target);
             if (found.Found)
             {
                 return ReadManaged(session, assembly, found, view, offset, maxLines, opened: false);
@@ -259,15 +268,58 @@ public sealed class CodeTools
         return null;
     }
 
-    private static string ReadManaged(BinarySession session, ManagedAssembly managed, ManagedTarget target, string view, int offset, int maxLines, bool opened)
+    /// <summary>
+    /// A type or member of a reading that is not .NET, in one of its own views: a header naming what it is,
+    /// then the rendered text, paged like any other body.
+    /// </summary>
+    private static string ReadBytecode(IBytecodeReading reading, BytecodeTarget target, string view, int offset, int maxLines)
+    {
+        if (!reading.Views.Contains(view))
+        {
+            return $"{target.Describe()} is read as {string.Join(" or ", reading.Views.Select(v => $"view=\"{v}\""))}, not \"{view}\".";
+        }
+
+        string text;
+        try
+        {
+            text = reading.Render(target.Type!, target.Member, view);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            return $"{target.Describe()} could not be read as {view}: {ex.Message}";
+        }
+
+        maxLines = Math.Clamp(maxLines, 1, MaxLines);
+        offset = Math.Max(0, offset);
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var sb = new StringBuilder();
+        var type = target.Type!;
+        sb.Append(target.Member is { } member
+            ? $"{type.FullName}::{member.Signature}   {member.Kind.ToString().ToLowerInvariant()}\nin          {type.FullName} ({type.KindName})\n"
+            : $"{type.FullName}   {type.KindName}, {type.Members.Count} members\n");
+        sb.Append(CultureInfo.InvariantCulture, $"--- lines {Math.Min(offset + 1, lines.Length)}-{Math.Min(offset + maxLines, lines.Length)} of {lines.Length} ---\n");
+        foreach (string line in lines.Skip(offset).Take(maxLines))
+        {
+            sb.Append(line).Append('\n');
+        }
+
+        if (offset + maxLines < lines.Length)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"next: read_function(target=\"{target.Key()}\", view=\"{view}\", offset={offset + maxLines})\n");
+        }
+
+        return Budget.Clip(sb.ToString());
+    }
+
+    private static string ReadManaged(BinarySession session, ManagedAssembly managed, BytecodeTarget target, string view, int offset, int maxLines, bool opened)
     {
         bool il = view == "il";
-        var type = target.Type!;
+        var type = target.DotNetType!;
 
         string body;
         try
         {
-            body = (il, target.Member) switch
+            body = (il, target.DotNetMember) switch
             {
                 (false, { } member) => managed.Decompiler.DecompileMember(member),
                 (false, null) => managed.Decompiler.DecompileType(type),
@@ -293,7 +345,7 @@ public sealed class CodeTools
         string continuation = $"read_function(target=\"{target.Key()}\", view=\"{chosen}\", offset={offset + maxLines})";
 
         var sb = new StringBuilder();
-        if (target.Member is { } shown)
+        if (target.DotNetMember is { } shown)
         {
             sb.Append(CultureInfo.InvariantCulture, $"{type.FullName}::{shown.Signature}   {shown.Kind.ToString().ToLowerInvariant()}\n");
             sb.Append(CultureInfo.InvariantCulture, $"in          {type.FullName} ({type.Kind.ToString().ToLowerInvariant()})\n");

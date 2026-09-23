@@ -4,6 +4,7 @@ using System.Reflection.Metadata;
 using ModelContextProtocol.Server;
 using Spydate.Core.Binary;
 using Spydate.Core.Elf;
+using Spydate.Core.Readings;
 using Spydate.Core.Symbols;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
@@ -104,9 +105,9 @@ public sealed class NavigationTools
         // Managed first when there is a managed reading. The native symbol table of an IL-only
         // assembly holds one import and the loader stub, so answering from it would be answering a
         // question about the file that nobody asked.
-        if (open.ManagedIndex is { } managed && open.IsILOnly)
+        if (open.BytecodeIndex is { } managed && open.BytecodeIsTheProgram)
         {
-            return FindManaged(managed, open.Managed!.PInvokes, query, limit);
+            return FindManaged(managed, open.Managed?.PInvokes ?? [], query, limit);
         }
 
         if (open.Analysis is not { } analysis)
@@ -240,10 +241,14 @@ public sealed class NavigationTools
         // Resolved before the scan is paid for, not after. Walking every method body is the most
         // expensive thing in this server, and a mixed-mode assembly can be asked about an address -
         // for which the answer is native and the walk would have bought nothing.
-        var managed = ManagedTargets.Resolve(open, target);
+        var managed = BytecodeTargets.Resolve(open, target);
         if (managed.Found)
         {
-            return ManagedXrefs(open, managed, direction, kind, offset, Math.Clamp(limit, 1, MaxLimit));
+            // References are read out of .NET IL. Another reading is browsed and read through the seam, but
+            // who-calls-what is walked per bytecode, and that walk exists for .NET only so far.
+            return open.References is null
+                ? $"{managed.Describe()} is in a {open.Bytecode!.Kind} reading; cross-references are read from .NET IL only so far."
+                : ManagedXrefs(open, managed, direction, kind, offset, Math.Clamp(limit, 1, MaxLimit));
         }
 
         if (open is not { Analysis: { } analysis } session)
@@ -312,7 +317,7 @@ public sealed class NavigationTools
     /// form <c>read_function</c> takes: the point of an answer here is the call it leads to, and a
     /// row that has to be translated before it can be used is a row that will be translated wrongly.
     /// </summary>
-    private static string ManagedXrefs(BinarySession session, ManagedTarget target, string direction, string kind, int offset, int limit)
+    private static string ManagedXrefs(BinarySession session, BytecodeTarget target, string direction, string kind, int offset, int limit)
     {
         var references = session.References!;
         offset = Math.Max(0, offset);
@@ -320,7 +325,7 @@ public sealed class NavigationTools
 
         if (!to)
         {
-            if (target.Member is not { Handle.Kind: HandleKind.MethodDefinition } method)
+            if (target.DotNetMember is not { Handle.Kind: HandleKind.MethodDefinition } method)
             {
                 return $"\"from\" reads what a method's own code refers to, and {target.Describe()} is "
                        + (target.Member is null ? "a type" : "not a method") + ". Name a method.";
@@ -341,7 +346,7 @@ public sealed class NavigationTools
                                + Page(edges.Count, offset, limit, target.Key(), direction, kind));
         }
 
-        var handle = target.Member?.Handle ?? target.Type!.Handle;
+        var handle = target.DotNetMember?.Handle ?? target.DotNetType!.Handle;
         var sites = references.To(handle).Where(s => Wanted(s.Kind, kind)).ToList();
 
         var table = new TextTable(("in", 84), ("at", 7), ("kind", 6));
@@ -460,7 +465,7 @@ public sealed class NavigationTools
     /// returns that type and everything in it. Each row carries the type it belongs to, because a
     /// bare method name cannot be handed back to any other tool.
     /// </summary>
-    private static string FindManaged(ManagedIndex index, IReadOnlyList<ManagedPInvoke> pinvokes, string query, int limit)
+    private static string FindManaged(BytecodeIndex index, IReadOnlyList<ManagedPInvoke> pinvokes, string query, int limit)
     {
         limit = Math.Clamp(limit, 1, MaxLimit);
 
@@ -470,7 +475,7 @@ public sealed class NavigationTools
             bool wholeType = query.Length == 0 || type.FullName.Contains(query, StringComparison.OrdinalIgnoreCase);
             if (wholeType)
             {
-                hits.Add((type.Kind.ToString().ToLowerInvariant(), type.FullName));
+                hits.Add((type.KindName, type.FullName));
             }
 
             foreach (var member in type.Members)

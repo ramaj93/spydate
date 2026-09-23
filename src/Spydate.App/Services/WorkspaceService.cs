@@ -2,6 +2,7 @@ using System.IO;
 using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
+using Spydate.Core.Readings;
 using Spydate.Decompiler.Managed;
 using Spydate.Decompiler.Native;
 using Spydate.Disassembly;
@@ -11,11 +12,11 @@ namespace Spydate.App.Services;
 /// <summary>Everything loaded for one file: the image (PE or ELF) plus the native and/or managed analysis objects.</summary>
 public sealed class OpenedBinary : IDisposable
 {
-    public OpenedBinary(IBinaryImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null)
+    public OpenedBinary(IBinaryImage image, BinaryAnalysis? analysis, ManagedAssembly? managed, string? managedLoadError, ProjectLoadResult? project, PatchStore? patches = null, BreakpointStore? breakpoints = null, NoteStore? notes = null, IBytecodeReading? bytecode = null)
     {
         Image = image;
         Analysis = analysis;
-        Managed = managed;
+        Bytecode = managed is null ? bytecode : new DotNetReading(managed);
         ManagedLoadError = managedLoadError;
         Project = project;
         NativeDecompiler = analysis is null ? null : new NativeDecompiler(analysis);
@@ -46,8 +47,18 @@ public sealed class OpenedBinary : IDisposable
 
     public NativeDecompiler? NativeDecompiler { get; }
 
-    /// <summary>Managed assembly wrapper; null for native images or when loading failed.</summary>
-    public ManagedAssembly? Managed { get; }
+    /// <summary>
+    /// The file's bytecode reading, when it has one — its .NET assembly today. The explorer's namespace tree
+    /// and the overview read it through the seam; a second reading slots in beside the native one.
+    /// </summary>
+    public IBytecodeReading? Bytecode { get; }
+
+    /// <summary>
+    /// The .NET assembly behind <see cref="Bytecode"/>, when that is what it is; null for native images, for
+    /// another reading, or when loading failed. The .NET-only views — C#/IL documents, the debugger, IL
+    /// patches — go through this.
+    /// </summary>
+    public ManagedAssembly? Managed => (Bytecode as DotNetReading)?.Assembly;
 
     public string? ManagedLoadError { get; }
 
@@ -95,7 +106,11 @@ public sealed class OpenedBinary : IDisposable
 
     public string DisplayName => Image.FileName;
 
-    public void Dispose() => Managed?.Dispose();
+    public void Dispose()
+    {
+        Managed?.Dispose();
+        (Bytecode as IDisposable)?.Dispose();
+    }
 }
 
 /// <summary>

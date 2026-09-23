@@ -5,6 +5,7 @@ using ICSharpCode.Decompiler;
 using ICSharpCode.Decompiler.CSharp;
 using ICSharpCode.Decompiler.Metadata;
 using ICSharpCode.Decompiler.TypeSystem;
+using Spydate.Core.Readings;
 
 namespace Spydate.Decompiler.Managed;
 
@@ -18,8 +19,17 @@ public enum ManagedMemberKind
 }
 
 /// <summary>A member of a managed type (method, field, property, event).</summary>
-public sealed record ManagedMember(string Name, string Signature, ManagedMemberKind Kind, EntityHandle Handle, IEntity Entity)
+public sealed record ManagedMember(string Name, string Signature, ManagedMemberKind Kind, EntityHandle Handle, IEntity Entity) : IBytecodeMember
 {
+    BytecodeMemberKind IBytecodeMember.Kind => Kind switch
+    {
+        ManagedMemberKind.Constructor => BytecodeMemberKind.Constructor,
+        ManagedMemberKind.Field => BytecodeMemberKind.Field,
+        ManagedMemberKind.Property => BytecodeMemberKind.Property,
+        ManagedMemberKind.Event => BytecodeMemberKind.Event,
+        _ => BytecodeMemberKind.Method,
+    };
+
     public override string ToString() => Signature;
 }
 
@@ -31,14 +41,35 @@ public sealed record ManagedType(
     EntityHandle Handle,
     IReadOnlyList<ManagedType> NestedTypes,
     IReadOnlyList<ManagedMember> Members,
-    ITypeDefinition Definition)
+    ITypeDefinition Definition) : IBytecodeType
 {
+    /// <summary>The metadata's name for it — <c>+</c> for nesting, a backtick for arity — which IL listings print.</summary>
+    IReadOnlyList<string> IBytecodeType.OtherNames => [Definition.ReflectionName];
+
+    BytecodeTypeKind IBytecodeType.Kind => Kind switch
+    {
+        TypeKind.Class => BytecodeTypeKind.Class,
+        TypeKind.Interface => BytecodeTypeKind.Interface,
+        TypeKind.Struct => BytecodeTypeKind.Struct,
+        TypeKind.Enum => BytecodeTypeKind.Enum,
+        TypeKind.Delegate => BytecodeTypeKind.Delegate,
+        _ => BytecodeTypeKind.Other,
+    };
+
+    public string KindName => Kind.ToString().ToLowerInvariant();
+
+    IReadOnlyList<IBytecodeType> IBytecodeType.NestedTypes => NestedTypes;
+
+    IReadOnlyList<IBytecodeMember> IBytecodeType.Members => Members;
+
     public override string ToString() => FullName;
 }
 
 /// <summary>A namespace and its top-level types.</summary>
-public sealed record ManagedNamespace(string Name, IReadOnlyList<ManagedType> Types)
+public sealed record ManagedNamespace(string Name, IReadOnlyList<ManagedType> Types) : IBytecodeNamespace
 {
+    IReadOnlyList<IBytecodeType> IBytecodeNamespace.Types => Types;
+
     public string DisplayName => Name.Length == 0 ? "-" : Name;
     public override string ToString() => DisplayName;
 }

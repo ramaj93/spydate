@@ -176,10 +176,10 @@ internal static class ManagedDebugging
         string what;
         string module = System.IO.Path.GetFileName(session.Path);
 
-        var found = ManagedTargets.Resolve(session, text);
+        var found = BytecodeTargets.Resolve(session, text);
         if (found.Found)
         {
-            if (found.Member is not { } member || member.Handle.Kind != HandleKind.MethodDefinition)
+            if (found.DotNetMember is not { } member || member.Handle.Kind != HandleKind.MethodDefinition)
             {
                 return $"{found.Describe()} is not a method. A breakpoint goes in code, so name one of its methods.";
             }
@@ -242,7 +242,7 @@ internal static class ManagedDebugging
     /// suggestion ("Did you mean") or a real opened type missing the method ("has no member") both mean
     /// the name was aimed at the opened assembly, so it is not sent off to wait for another one.
     /// </summary>
-    private static (string Type, string Method)? ElsewhereByName(ManagedTarget found, string text)
+    private static (string Type, string Method)? ElsewhereByName(BytecodeTarget found, string text)
     {
         int mark = text.IndexOf("::", StringComparison.Ordinal);
         if (mark <= 0 || text[(mark + 2)..].Trim() is not { Length: > 0 } method)

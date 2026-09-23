@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Spydate.Core.Binary;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
+using Spydate.Core.Readings;
 using Spydate.Decompiler.Managed;
 using Spydate.Decompiler.Native;
 using Spydate.Disassembly;
@@ -35,7 +36,7 @@ public sealed class BinarySession : IDisposable
     private IReadOnlyList<Function>? _functions;
     private int _functionsAt = -1;
     private bool _namesChanged;
-    private ManagedIndex? _index;
+    private BytecodeIndex? _index;
     private ManagedReferences? _references;
     private ManagedBodies? _bodies;
     private readonly bool _ownsManaged;
@@ -61,7 +62,8 @@ public sealed class BinarySession : IDisposable
         NoteStore? notes = null,
         ManagedAssembly? managed = null,
         string? managedLoadError = null,
-        bool ownsManaged = true)
+        bool ownsManaged = true,
+        IBytecodeReading? bytecode = null)
     {
         // A lambda rather than the method group: SpydateProject.Save takes optional stores now, and a
         // group with defaulted parameters no longer converts on its own.
@@ -74,7 +76,7 @@ public sealed class BinarySession : IDisposable
         Decompiler = analysis is null ? null : new NativeDecompiler(analysis);
         Project = project;
         Discovery = discovery;
-        Managed = managed;
+        Bytecode = managed is null ? bytecode : new DotNetReading(managed);
         ManagedLoadError = managedLoadError;
         _ownsManaged = ownsManaged;
 
@@ -108,44 +110,58 @@ public sealed class BinarySession : IDisposable
     public NativeDecompiler? Decompiler { get; }
 
     /// <summary>
-    /// The assembly's metadata, and the C#/IL decompiler over it, when this is a .NET file ILSpy
-    /// could read. Null for a native binary — and null for a managed one whose metadata could not be
-    /// read, which <see cref="ManagedLoadError"/> distinguishes from the first case.
+    /// The file's bytecode reading, when it has one: its .NET assembly today. The tools that browse types
+    /// and members — resolving a name, find_symbol, the overview — work through this and never name a format.
     /// </summary>
-    public ManagedAssembly? Managed { get; }
+    public IBytecodeReading? Bytecode { get; }
+
+    /// <summary>
+    /// The assembly's metadata, and the C#/IL decompiler over it, when the reading is .NET and ILSpy could
+    /// read it. Null for a native binary — and null for a managed one whose metadata could not be read,
+    /// which <see cref="ManagedLoadError"/> distinguishes from the first case. What only .NET has — bodies
+    /// at addresses, IL patching, P/Invokes, the debugger — is reached through this.
+    /// </summary>
+    public ManagedAssembly? Managed => (Bytecode as DotNetReading)?.Assembly;
+
+    /// <summary>
+    /// Whether the bytecode is the whole program, so the tools that browse should answer from it rather than
+    /// from a native side that is only a loader: an IL-only assembly, whose x86 is the CLR stub, or a
+    /// reading of a format with no native code of its own.
+    /// </summary>
+    public bool BytecodeIsTheProgram => Bytecode is not null && (IsILOnly || Bytecode.Kind != BytecodeKind.DotNet);
 
     /// <summary>Why <see cref="Managed"/> is null on a file that carries a CLR header.</summary>
     public string? ManagedLoadError { get; }
 
     /// <summary>
-    /// Every type in the assembly, nested ones included, flattened and indexed by name.
+    /// Every type in the reading, nested ones included, flattened and indexed by name.
     ///
     /// Built once and held, because it is what every managed target resolves through:
-    /// <see cref="ManagedAssembly.Namespaces"/> is a tree, and walking it per lookup would make
+    /// <see cref="IBytecodeReading.Namespaces"/> is a tree, and walking it per lookup would make
     /// resolving a name cost the size of the assembly.
     /// </summary>
-    public ManagedIndex? ManagedIndex => _index ??= Managed is null ? null : new ManagedIndex(Managed);
+    public BytecodeIndex? BytecodeIndex => _index ??= Bytecode is null ? null : new BytecodeIndex(Bytecode);
 
     /// <summary>
     /// The name index for a resolved reference, built once and kept, so reading several framework
     /// methods does not re-index the framework each time. The opened assembly's own index is
-    /// <see cref="ManagedIndex"/>; this is for the assemblies it references.
+    /// <see cref="BytecodeIndex"/>; this is for the assemblies it references.
     /// </summary>
-    public ManagedIndex IndexFor(ManagedAssembly assembly)
+    public BytecodeIndex IndexFor(ManagedAssembly assembly)
     {
         ArgumentNullException.ThrowIfNull(assembly);
         lock (_referenceIndexes)
         {
             if (!_referenceIndexes.TryGetValue(assembly, out var index))
             {
-                _referenceIndexes[assembly] = index = new ManagedIndex(assembly);
+                _referenceIndexes[assembly] = index = new BytecodeIndex(new DotNetReading(assembly));
             }
 
             return index;
         }
     }
 
-    private readonly Dictionary<ManagedAssembly, ManagedIndex> _referenceIndexes = new();
+    private readonly Dictionary<ManagedAssembly, BytecodeIndex> _referenceIndexes = new();
 
     /// <summary>
     /// The body map for a resolved reference, built once and kept — the same as <see cref="Bodies"/>
@@ -305,6 +321,7 @@ public sealed class BinarySession : IDisposable
         if (_ownsManaged)
         {
             Managed?.Dispose();
+            (Bytecode as IDisposable)?.Dispose();
         }
 
         _gate.Dispose();

@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using Spydate.Core.Readings;
 using Spydate.Decompiler.Managed;
 
 namespace Spydate.Mcp.Session;
@@ -14,16 +15,17 @@ namespace Spydate.Mcp.Session;
 /// type when the namespace is obvious from context. Ambiguity is only possible on the last of them,
 /// and is reported rather than guessed at.
 /// </summary>
-public sealed class ManagedIndex
+public sealed class BytecodeIndex
 {
-    private readonly Dictionary<string, ManagedType> _byFullName = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, List<ManagedType>> _bySimpleName = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<ManagedType> _all = new();
+    private readonly Dictionary<string, IBytecodeType> _byFullName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<IBytecodeType>> _bySimpleName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<IBytecodeType> _all = new();
 
-    public ManagedIndex(ManagedAssembly assembly)
+    public BytecodeIndex(IBytecodeReading reading)
     {
-        ArgumentNullException.ThrowIfNull(assembly);
-        foreach (var space in assembly.Namespaces)
+        ArgumentNullException.ThrowIfNull(reading);
+        Reading = reading;
+        foreach (var space in reading.Namespaces)
         {
             foreach (var type in space.Types)
             {
@@ -34,8 +36,13 @@ public sealed class ManagedIndex
         MemberCount = _all.Sum(t => t.Members.Count);
     }
 
+    public IBytecodeReading Reading { get; }
+
+    /// <summary>What the reading is called in a message: "this assembly", "this archive".</summary>
+    public string Noun => Reading.Noun;
+
     /// <summary>Every type, nested ones included, in the order the namespaces list them.</summary>
-    public IReadOnlyList<ManagedType> Types => _all;
+    public IReadOnlyList<IBytecodeType> Types => _all;
 
     /// <summary>Members across every type. Reported in the overview so "how big is this" has an answer.</summary>
     public int MemberCount { get; }
@@ -45,15 +52,15 @@ public sealed class ManagedIndex
     /// reading a name back out of prose gets the case wrong far more often than two types in one
     /// assembly differ only by it.
     /// </summary>
-    public bool TryExact(string name, [NotNullWhen(true)] out ManagedType? type)
+    public bool TryExact(string name, [NotNullWhen(true)] out IBytecodeType? type)
         => _byFullName.TryGetValue(name, out type);
 
     /// <summary>
     /// Types whose bare name is this. More than one is normal — two assemblies' worth of
     /// <c>Options</c> — and is the caller's problem to report, not this one's to resolve.
     /// </summary>
-    public IReadOnlyList<ManagedType> BySimpleName(string name)
-        => _bySimpleName.TryGetValue(name, out var list) ? list : Array.Empty<ManagedType>();
+    public IReadOnlyList<IBytecodeType> BySimpleName(string name)
+        => _bySimpleName.TryGetValue(name, out var list) ? list : Array.Empty<IBytecodeType>();
 
     /// <summary>Full names containing the text, for a failure that wants to be helpful.</summary>
     public IEnumerable<string> Containing(string text)
@@ -62,15 +69,18 @@ public sealed class ManagedIndex
                .Distinct(StringComparer.Ordinal)
                .Order(StringComparer.Ordinal);
 
-    private void Add(ManagedType type)
+    private void Add(IBytecodeType type)
     {
         _all.Add(type);
         _byFullName.TryAdd(type.FullName, type);
-        _byFullName.TryAdd(type.Definition.ReflectionName, type);
+        foreach (string other in type.OtherNames)
+        {
+            _byFullName.TryAdd(other, type);
+        }
 
         if (!_bySimpleName.TryGetValue(type.Name, out var list))
         {
-            _bySimpleName[type.Name] = list = new List<ManagedType>();
+            _bySimpleName[type.Name] = list = new List<IBytecodeType>();
         }
 
         list.Add(type);
@@ -83,20 +93,20 @@ public sealed class ManagedIndex
 }
 
 /// <summary>What a managed target resolved to: a type, a member of one, or neither.</summary>
-public readonly record struct ManagedTarget(ManagedType? Type, ManagedMember? Member, string? Problem)
+public readonly record struct BytecodeTarget(IBytecodeType? Type, IBytecodeMember? Member, string? Problem)
 {
     /// <summary>True when this names something. A member always carries its declaring type as well.</summary>
     [MemberNotNullWhen(true, nameof(Type))]
     public bool Found => Type is not null;
 
-    public static ManagedTarget OfType(ManagedType type) => new(type, null, null);
+    public static BytecodeTarget OfType(IBytecodeType type) => new(type, null, null);
 
-    public static ManagedTarget OfMember(ManagedType type, ManagedMember member) => new(type, member, null);
+    public static BytecodeTarget OfMember(IBytecodeType type, IBytecodeMember member) => new(type, member, null);
 
-    public static ManagedTarget Failed(string problem) => new(null, null, problem);
+    public static BytecodeTarget Failed(string problem) => new(null, null, problem);
 
     /// <summary>Nothing matched and nothing is wrong — the text was never a managed name.</summary>
-    public static ManagedTarget None => default;
+    public static BytecodeTarget None => default;
 
     /// <summary>What to print for it: the member's signature under its type, or the type's full name.</summary>
     public string Describe() => Member is { } member
@@ -104,13 +114,19 @@ public readonly record struct ManagedTarget(ManagedType? Type, ManagedMember? Me
         : Type?.FullName ?? "-";
 
     /// <summary>
-    /// The same thing written so that <see cref="ManagedTargets.Resolve"/> gives it back. Every
+    /// The same thing written so that <see cref="BytecodeTargets.Resolve"/> gives it back. Every
     /// continuation this server prints is built from this rather than from what the caller typed,
     /// so a paged read resumes on the overload it started on.
     /// </summary>
     public string Key() => Member is { } member
         ? $"{Type!.FullName}::{Trim(member.Signature)}"
         : Type?.FullName ?? "-";
+
+    /// <summary>The .NET type behind it, when the reading is .NET: what the C# and IL renderers, bodies and debugger take.</summary>
+    public ManagedType? DotNetType => Type as ManagedType;
+
+    /// <summary>The .NET member behind it, when there is one and the reading is .NET.</summary>
+    public ManagedMember? DotNetMember => Member as ManagedMember;
 
     private static string Trim(string signature)
     {
@@ -130,15 +146,15 @@ public readonly record struct ManagedTarget(ManagedType? Type, ManagedMember? Me
 /// says so with the overloads listed rather than picking one — reading the wrong overload is a
 /// mistake nothing downstream can detect.
 /// </summary>
-public static class ManagedTargets
+public static class BytecodeTargets
 {
     private const int Suggestions = 4;
 
-    /// <summary>Resolves against the open assembly, or <see cref="ManagedTarget.None"/> if there is none.</summary>
-    public static ManagedTarget Resolve(BinarySession session, string? target)
+    /// <summary>Resolves against the open assembly, or <see cref="BytecodeTarget.None"/> if there is none.</summary>
+    public static BytecodeTarget Resolve(BinarySession session, string? target)
     {
         ArgumentNullException.ThrowIfNull(session);
-        return Resolve(session.ManagedIndex, target);
+        return Resolve(session.BytecodeIndex, target);
     }
 
     /// <summary>
@@ -146,18 +162,18 @@ public static class ManagedTargets
     /// what lets a name be looked for in a framework or dependency assembly when the opened one has no
     /// such type.
     /// </summary>
-    public static ManagedTarget Resolve(ManagedIndex? index, string? target)
+    public static BytecodeTarget Resolve(BytecodeIndex? index, string? target)
     {
         if (index is null || string.IsNullOrWhiteSpace(target))
         {
-            return ManagedTarget.None;
+            return BytecodeTarget.None;
         }
 
         string text = target.Trim();
 
         if (index.TryExact(text, out var whole))
         {
-            return ManagedTarget.OfType(whole);
+            return BytecodeTarget.OfType(whole);
         }
 
         // "::" is unambiguous, so it is tried before anything is guessed about dots.
@@ -174,7 +190,7 @@ public static class ManagedTargets
             // The separator said which half is the type, so the failure can be about that half
             // rather than about the whole string. Asking "did you mean PeImage" of
             // "Namespace.PeImagg::Load" finds nothing; asking it of "Namespace.PeImagg" finds it.
-            return ManagedTarget.Failed($"'{owner}' is not a type in this assembly{Near(index, owner)}");
+            return BytecodeTarget.Failed($"'{owner}' is not a type in this {index.Noun}{Near(index, owner)}");
         }
 
         // A dot could be the last namespace separator or the one before a member name. The search
@@ -193,22 +209,22 @@ public static class ManagedTargets
         var simple = index.BySimpleName(text);
         return simple.Count switch
         {
-            1 => ManagedTarget.OfType(simple[0]),
-            > 1 => ManagedTarget.Failed(
+            1 => BytecodeTarget.OfType(simple[0]),
+            > 1 => BytecodeTarget.Failed(
                 $"'{text}' names {simple.Count} types. Give the full one: {string.Join(", ", simple.Take(Suggestions).Select(t => t.FullName))}"),
-            _ => ManagedTarget.Failed($"'{text}' is not a type or member in this assembly{Near(index, text)}"),
+            _ => BytecodeTarget.Failed($"'{text}' is not a type or member in this {index.Noun}{Near(index, text)}"),
         };
     }
 
     /// <summary>The member of a named type, or why it is not one.</summary>
-    private static ManagedTarget InType(ManagedIndex index, string typeName, string memberName, string whole)
+    private static BytecodeTarget InType(BytecodeIndex index, string typeName, string memberName, string whole)
     {
         if (!index.TryExact(typeName, out var type))
         {
             var candidates = index.BySimpleName(typeName);
             if (candidates.Count != 1)
             {
-                return ManagedTarget.None;   // not a type, so the caller can try the text another way
+                return BytecodeTarget.None;   // not a type, so the caller can try the text another way
             }
 
             type = candidates[0];
@@ -216,7 +232,7 @@ public static class ManagedTargets
 
         if (memberName.Length == 0)
         {
-            return ManagedTarget.OfType(type);
+            return BytecodeTarget.OfType(type);
         }
 
         string wantedName = Bare(memberName);
@@ -228,7 +244,7 @@ public static class ManagedTargets
 
         if (byName.Count == 0)
         {
-            return ManagedTarget.Failed(
+            return BytecodeTarget.Failed(
                 $"{type.FullName} has no member '{Bare(memberName)}'{NearMember(type, Bare(memberName))}");
         }
 
@@ -240,21 +256,21 @@ public static class ManagedTargets
             string wanted = Normalise(Unreturned(memberName));
             var exact = byName.FirstOrDefault(m => Normalise(Unreturned(m.Signature)) == wanted);
             return exact is null
-                ? ManagedTarget.Failed(
+                ? BytecodeTarget.Failed(
                     $"{type.FullName}::{Bare(memberName)} has no overload taking that. It has: "
                     + string.Join(", ", byName.Select(m => Unreturned(m.Signature))))
-                : ManagedTarget.OfMember(type, exact);
+                : BytecodeTarget.OfMember(type, exact);
         }
 
         if (byName.Count > 1)
         {
-            return ManagedTarget.Failed(
+            return BytecodeTarget.Failed(
                 $"{type.FullName}::{Bare(memberName)} is overloaded {byName.Count} ways — name one: "
                 + string.Join(", ", byName.Take(Suggestions).Select(m => $"\"{type.FullName}::{Unreturned(m.Signature)}\"")));
         }
 
         _ = whole;
-        return ManagedTarget.OfMember(type, byName[0]);
+        return BytecodeTarget.OfMember(type, byName[0]);
     }
 
     /// <summary>
@@ -267,7 +283,7 @@ public static class ManagedTargets
     /// the metadata name meant the one form an agent could have copied from an answer was the one
     /// form that would not resolve.
     /// </summary>
-    private static bool Named(ManagedMember member, string wanted, StringComparison how)
+    private static bool Named(IBytecodeMember member, string wanted, StringComparison how)
         => string.Equals(member.Name, wanted, how) || string.Equals(Bare(member.Signature), wanted, how);
 
     /// <summary>A member name with any argument list taken off.</summary>
@@ -299,7 +315,7 @@ public static class ManagedTargets
     /// <c>PeImage</c> at six characters. Three is the floor, below which every type in a namespace
     /// would qualify and the suggestion would say nothing.
     /// </summary>
-    private static string Near(ManagedIndex index, string text)
+    private static string Near(BytecodeIndex index, string text)
     {
         if (text.Length < 3)
         {
@@ -328,7 +344,7 @@ public static class ManagedTargets
         return close.Count == 0 ? string.Empty : $". Did you mean: {string.Join(", ", close)}?";
     }
 
-    private static string NearMember(ManagedType type, string name)
+    private static string NearMember(IBytecodeType type, string name)
     {
         if (name.Length < 3)
         {

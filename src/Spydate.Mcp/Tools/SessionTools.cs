@@ -5,6 +5,7 @@ using ModelContextProtocol.Server;
 using Spydate.Core.Binary;
 using Spydate.Core.Elf;
 using Spydate.Core.PE;
+using Spydate.Core.Readings;
 using Spydate.Core.Strings;
 using Spydate.Mcp.Rendering;
 using Spydate.Mcp.Session;
@@ -204,7 +205,14 @@ public sealed class SessionTools
             Line(sb, "analysis", $"none - {image.Machine} is not a machine this disassembles, so only headers and strings are readable");
         }
 
-        Managed(sb, session);
+        if (session.ClrHeader is not null)
+        {
+            Managed(sb, session);
+        }
+        else
+        {
+            Bytecode(sb, session);
+        }
 
         if (image.Warnings.Count > 0)
         {
@@ -214,9 +222,9 @@ public sealed class SessionTools
         // Costs about twenty tokens and saves an agent that has never seen this server from guessing
         // where to start. Which start, though, depends on which reading of the file is the real one:
         // pointing at the function worklist for an IL-only assembly sends it to sweep up junk.
-        if (session.Managed is not null && image.ClrHeader?.IsILOnly == true)
+        if (session.BytecodeIsTheProgram)
         {
-            Line(sb, "next", "find_symbol(query=...) | read_function(target=\"Namespace.Type\") | read_function(target=\"Type::Member\", view=\"il\")");
+            Line(sb, "next", $"find_symbol(query=...) | read_function(target=\"Namespace.Type\") | read_function(target=\"Type::Member\", view=\"{session.Bytecode!.Views[^1]}\")");
         }
         else if (session.Analysis is not null)
         {
@@ -299,6 +307,37 @@ public sealed class SessionTools
     /// program will spend its whole budget naming compiler scaffolding. So the managed facts go in
     /// the same block rather than behind a tool call, and the note says plainly which is which.
     /// </summary>
+    /// <summary>
+    /// What every bytecode reading can say about itself — identity, size, where it starts, what it needs —
+    /// read through the seam, so a second reading's overview says the same things in the same lines.
+    /// </summary>
+    internal static void Bytecode(StringBuilder sb, BinarySession session)
+    {
+        if (session.Bytecode is not { } reading || session.BytecodeIndex is not { } index)
+        {
+            return;
+        }
+
+        string formatLabel = reading.Kind == BytecodeKind.DotNet ? "metadata" : "format";
+        Line(sb, reading.Noun, $"{reading.FullName}, {reading.Platform}, {formatLabel} {reading.FormatVersion}");
+        Line(sb, "types", $"{index.Types.Count} in {reading.Namespaces.Count} namespaces, {index.MemberCount} members");
+
+        if (reading.EntryPoint is { } entry)
+        {
+            Line(sb, "main", entry.Signature);
+        }
+
+        if (reading.Requires.Count > 0)
+        {
+            // "needs", not "references": the label column is ten wide and "references" fills it
+            // exactly, so the value ran straight into the label with no gap at all.
+            Line(sb, "needs", string.Join(", ", reading.Requires.Take(MaxReferencesListed))
+                                   + (reading.Requires.Count > MaxReferencesListed
+                                       ? $", +{reading.Requires.Count - MaxReferencesListed} more"
+                                       : string.Empty));
+        }
+    }
+
     private static void Managed(StringBuilder sb, BinarySession session)
     {
         if (session.ClrHeader is not { } clr)
@@ -314,24 +353,7 @@ public sealed class SessionTools
             return;
         }
 
-        var index = session.ManagedIndex!;
-        Line(sb, "assembly", $"{managed.FullName}, {managed.TargetFramework}, metadata {managed.RuntimeVersion}");
-        Line(sb, "types", $"{index.Types.Count} in {managed.Namespaces.Count} namespaces, {index.MemberCount} members");
-
-        if (managed.EntryPoint is { } entry)
-        {
-            Line(sb, "main", entry.Signature);
-        }
-
-        if (managed.AssemblyReferences.Count > 0)
-        {
-            // "needs", not "references": the label column is ten wide and "references" fills it
-            // exactly, so the value ran straight into the label with no gap at all.
-            Line(sb, "needs", string.Join(", ", managed.AssemblyReferences.Take(MaxReferencesListed))
-                                   + (managed.AssemblyReferences.Count > MaxReferencesListed
-                                       ? $", +{managed.AssemblyReferences.Count - MaxReferencesListed} more"
-                                       : string.Empty));
-        }
+        Bytecode(sb, session);
 
         if (managed.PInvokes.Count > 0)
         {

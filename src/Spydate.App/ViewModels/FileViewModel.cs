@@ -12,6 +12,7 @@ using Spydate.Core.Binary;
 using Spydate.Core.Elf;
 using Spydate.Core.PE;
 using Spydate.Core.Project;
+using Spydate.Core.Readings;
 using Spydate.Core.Text;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
@@ -1478,6 +1479,29 @@ public sealed partial class FileViewModel : ObservableObject
         }
     }
 
+    private static string ReadingKey(ReadingTarget target)
+        => $"reading:{target.Type.FullName}::{target.Member?.Signature}";
+
+    /// <summary>
+    /// A type or member of a bytecode reading that is not .NET, rendered by the reading itself in its first view
+    /// — the listing every reading can give, before any format has a document of its own.
+    /// </summary>
+    private static DocumentViewModel OpenReading(IBytecodeReading reading, ReadingTarget target)
+    {
+        string title = target.Member is { } member ? $"{target.Type.Name}.{member.Name}" : target.Type.Name;
+        string text;
+        try
+        {
+            text = reading.Render(target.Type, target.Member, reading.Views[0]);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            text = $"// {target.Type.FullName} could not be read as {reading.Views[0]}: {ex.Message}";
+        }
+
+        return CodeDocumentViewModel.ForText(ReadingKey(target), title, SymbolRegular.Code24, HighlightingService.Plain, text);
+    }
+
     /// <summary>Opens the code at an address, when there is an analysis to read it with.</summary>
     private void OpenCode(ulong va, string name)
     {
@@ -1538,6 +1562,7 @@ public sealed partial class FileViewModel : ObservableObject
             HexTarget h => OpenHex(h.Offset),
             DisassemblyTarget d when b.Analysis is { } a => Find($"disasm:{d.Va:X}") ?? CodeDocumentViewModel.ForFunctionDisassembly(a, a.GetOrDiscoverFunction(d.Va, d.Name), b.NativeDecompiler is null ? null : OpenFunctionPseudoC, b.NativeDecompiler is null ? null : OpenFunctionSplit, OpenFunctionGraph, b.Patches),
             RangeDisassemblyTarget r when b.Analysis is { } a => Find($"disasm-range:{r.Va:X}") ?? CodeDocumentViewModel.ForRangeDisassembly(a, r.Va, r.Bytes, r.Title, b.Patches),
+            ReadingTarget rt when b.Bytecode is { } reading => Find(ReadingKey(rt)) ?? OpenReading(reading, rt),
             ManagedAssemblyTarget when b.Managed is { } m => Find("managed:assembly") ?? ManagedCodeDocumentViewModel.ForAssembly(m),
 
             // The target may name a resolved reference to decompile through rather than this

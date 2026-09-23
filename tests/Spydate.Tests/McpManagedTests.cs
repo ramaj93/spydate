@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
 using Spydate.Core.PE;
+using Spydate.Core.Readings;
 using Spydate.Decompiler.Managed;
 using Spydate.Mcp;
 using Spydate.Mcp.Session;
@@ -132,7 +133,7 @@ public class McpManagedTests
     [Fact]
     public void AnOverloadedNameIsRefusedWithTheOverloadsListed()
     {
-        var index = Store().Current!.ManagedIndex!;
+        var index = Store().Current!.BytecodeIndex!;
         var overloaded = index.Types
             .SelectMany(t => t.Members.GroupBy(m => m.Name).Where(g => g.Count() > 1).Select(g => (Type: t, g.First().Name)))
             .FirstOrDefault();
@@ -150,7 +151,7 @@ public class McpManagedTests
     [Fact]
     public void NamingAnOverloadBySignatureReadsThatOne()
     {
-        var index = Store().Current!.ManagedIndex!;
+        var index = Store().Current!.BytecodeIndex!;
         var type = index.Types.First(t => t.Members.GroupBy(m => m.Name).Any(g => g.Count() > 1));
         var member = type.Members.First(m => type.Members.Count(o => o.Name == m.Name) > 1);
 
@@ -171,9 +172,9 @@ public class McpManagedTests
         // Metadata calls it ".ctor"; every row this server prints calls it by the type's name,
         // because that is what is written at the call site. Only the second form was ever visible
         // to an agent, so only the second form matters — and it has to work.
-        var index = Store().Current!.ManagedIndex!;
-        var type = index.Types.First(t => t.Members.Any(m => m.Kind == ManagedMemberKind.Constructor));
-        var ctor = type.Members.First(m => m.Kind == ManagedMemberKind.Constructor);
+        var index = Store().Current!.BytecodeIndex!;
+        var type = index.Types.First(t => t.Members.Any(m => m.Kind == BytecodeMemberKind.Constructor));
+        var ctor = type.Members.First(m => m.Kind == BytecodeMemberKind.Constructor);
 
         string text = Code().ReadFunction($"{type.FullName}::{ctor.Signature}");
 
@@ -402,11 +403,11 @@ public class McpManagedTests
     {
         var store = Store();
         var session = store.Current!;
-        var index = session.ManagedIndex!;
+        var index = session.BytecodeIndex!;
 
         // An unambiguous method with a body — one overload of its name in its type — so it resolves
         // without a signature and has an address to carry the note.
-        var (type, method) = index.Types
+        var (type, method) = index.Types.Cast<ManagedType>()
             .SelectMany(t => t.Members.Where(m => m.Kind == ManagedMemberKind.Method).Select(m => (t, m)))
             .First(tm => tm.t.Members.Count(x => x.Name == tm.m.Name) == 1
                          && session.Bodies!.Of(tm.m.Handle) is not null);
@@ -426,7 +427,7 @@ public class McpManagedTests
     public void AnnotatingAManagedTypeByNameSaysItHasNoSingleAddress()
     {
         var store = Store();
-        string typeName = store.Current!.ManagedIndex!.Types.First(t => t.FullName.Contains('.')).FullName;
+        string typeName = store.Current!.BytecodeIndex!.Types.First(t => t.FullName.Contains('.')).FullName;
 
         string result = new AnnotationTools(store, McpOptions.Default).Annotate(typeName, comment: "x");
 

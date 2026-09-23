@@ -60,7 +60,7 @@ public sealed class AnnotationTools
             {
                 resolved = TargetResult.Of(managedVa);
             }
-            else if (session.ManagedIndex is not null && ManagedTargets.Resolve(session, target) is { Found: true } named)
+            else if (session.BytecodeIndex is not null && BytecodeTargets.Resolve(session, target) is { Found: true } named)
             {
                 return $"{named.Describe()} has no single address to annotate; name a method as "
                        + "Namespace.Type::Method, or give an address";
@@ -350,7 +350,7 @@ public sealed class AnnotationTools
             {
                 resolved = TargetResult.Of(managedVa);
             }
-            else if (session.ManagedIndex is not null && ManagedTargets.Resolve(session, target) is { Found: true } named)
+            else if (session.BytecodeIndex is not null && BytecodeTargets.Resolve(session, target) is { Found: true } named)
             {
                 problem = $"{named.Describe()} has no single address; name a method as Namespace.Type::Method, or give an address";
                 return false;
@@ -527,8 +527,8 @@ public sealed class AnnotationTools
             return null;
         }
 
-        var resolved = ManagedTargets.Resolve(session, target);
-        return resolved.Member is { Handle: var handle } && bodies.Of(handle) is { } body
+        var resolved = BytecodeTargets.Resolve(session, target);
+        return resolved.DotNetMember is { Handle: var handle } && bodies.Of(handle) is { } body
             ? session.Image.ImageBase + body.RvaOf(0)
             : null;
     }

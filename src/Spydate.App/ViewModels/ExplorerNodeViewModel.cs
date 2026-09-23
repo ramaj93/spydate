@@ -33,6 +33,11 @@ public sealed record ManagedAssemblyTarget : NodeTarget;
 /// </param>
 public sealed record ManagedTypeTarget(Spydate.Decompiler.Managed.ManagedType Type, Spydate.Decompiler.Managed.ManagedAssembly? Assembly = null) : NodeTarget;
 public sealed record ManagedMemberTarget(Spydate.Decompiler.Managed.ManagedType Type, Spydate.Decompiler.Managed.ManagedMember Member, Spydate.Decompiler.Managed.ManagedAssembly? Assembly = null) : NodeTarget;
+/// <summary>
+/// A type or member of a bytecode reading that is not .NET: it opens as that reading's own rendering, in the first of
+/// its views. .NET keeps its richer targets above, with addresses and a debugger behind them.
+/// </summary>
+public sealed record ReadingTarget(Spydate.Core.Readings.IBytecodeType Type, Spydate.Core.Readings.IBytecodeMember? Member) : NodeTarget;
 
 /// <summary>A node in the explorer tree. Children may be materialised lazily via <see cref="ChildrenFactory"/>.</summary>
 public sealed partial class ExplorerNodeViewModel : ObservableObject

@@ -3,6 +3,7 @@ using ICSharpCode.Decompiler.TypeSystem;
 using Spydate.App.Services;
 using Spydate.Core.Elf;
 using Spydate.Core.PE;
+using Spydate.Core.Readings;
 using Spydate.Core.Symbols;
 using Spydate.Decompiler.Managed;
 using Spydate.Disassembly;
@@ -165,13 +166,20 @@ public static class ExplorerTreeBuilder
                 });
             }
 
-            var namespaces = root.Add(new ExplorerNodeViewModel("Namespaces", SymbolRegular.Braces24, new ManagedAssemblyTarget(), managed.Namespaces.Count.ToString()));
+        }
+
+        // The bytecode reading's namespaces, whatever the reading is: the tree is built through the seam, and only
+        // what a node opens depends on which reading it is.
+        if (binary.Bytecode is { } reading)
+        {
+            var namespaces = root.Add(new ExplorerNodeViewModel("Namespaces", SymbolRegular.Braces24, reading is DotNetReading ? new ManagedAssemblyTarget() : null, reading.Namespaces.Count.ToString()));
             namespaces.IsExpanded = true;
-            foreach (var ns in managed.Namespaces)
+            var targets = TargetsFor(reading);
+            foreach (var ns in reading.Namespaces)
             {
                 var n = ns;
                 var nsNode = namespaces.Add(new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString()));
-                nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t));
+                nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets));
             }
         }
 
@@ -225,7 +233,7 @@ public static class ExplorerTreeBuilder
         {
             var n = ns;
             var nsNode = new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString(CultureInfo.InvariantCulture));
-            nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, resolved));
+            nsNode.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, TargetsFor(new DotNetReading(resolved), resolved)));
             return nsNode;
         });
     }
@@ -236,31 +244,43 @@ public static class ExplorerTreeBuilder
     /// null for the opened assembly's own types, which the factory decompiles through the binary and
     /// draws the debugger's addresses against.
     /// </summary>
-    private static ExplorerNodeViewModel TypeNode(ManagedType type, ManagedAssembly? external = null)
+    /// <summary>
+    /// What opening a type or member of a reading means. A .NET one opens the C# and IL documents, through the
+    /// assembly it belongs to (<paramref name="external"/> for a resolved reference, null for the opened one);
+    /// any other reading opens its own rendering.
+    /// </summary>
+    private static Func<IBytecodeType, IBytecodeMember?, NodeTarget?> TargetsFor(IBytecodeReading reading, ManagedAssembly? external = null)
+        => reading is DotNetReading
+            ? (type, member) => member is ManagedMember m
+                ? new ManagedMemberTarget((ManagedType)type, m, external)
+                : new ManagedTypeTarget((ManagedType)type, external)
+            : (type, member) => new ReadingTarget(type, member);
+
+    private static ExplorerNodeViewModel TypeNode(IBytecodeType type, Func<IBytecodeType, IBytecodeMember?, NodeTarget?> targets)
     {
-        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), new ManagedTypeTarget(type, external), type.Kind.ToString().ToLowerInvariant());
+        var node = new ExplorerNodeViewModel(type.Name, IconFor(type.Kind), targets(type, null), type.KindName);
         node.ChildrenFactory = () =>
-            type.NestedTypes.Select(n => TypeNode(n, external))
-                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), new ManagedMemberTarget(type, m, external))));
+            type.NestedTypes.Select(n => TypeNode(n, targets))
+                .Concat(type.Members.Select(m => new ExplorerNodeViewModel(m.Signature, IconFor(m.Kind), targets(type, m))));
         return node;
     }
 
-    private static SymbolRegular IconFor(TypeKind kind) => kind switch
+    private static SymbolRegular IconFor(BytecodeTypeKind kind) => kind switch
     {
-        TypeKind.Interface => SymbolRegular.ShapeIntersect24,
-        TypeKind.Enum => SymbolRegular.TextBulletListSquare24,
-        TypeKind.Struct => SymbolRegular.Cube24,
-        TypeKind.Delegate => SymbolRegular.Flash24,
+        BytecodeTypeKind.Interface => SymbolRegular.ShapeIntersect24,
+        BytecodeTypeKind.Enum => SymbolRegular.TextBulletListSquare24,
+        BytecodeTypeKind.Struct => SymbolRegular.Cube24,
+        BytecodeTypeKind.Delegate => SymbolRegular.Flash24,
         _ => SymbolRegular.Class24,
     };
 
-    private static SymbolRegular IconFor(ManagedMemberKind kind) => kind switch
+    private static SymbolRegular IconFor(BytecodeMemberKind kind) => kind switch
     {
-        ManagedMemberKind.Method => SymbolRegular.Code24,
-        ManagedMemberKind.Constructor => SymbolRegular.Wrench24,
-        ManagedMemberKind.Field => SymbolRegular.Tag24,
-        ManagedMemberKind.Property => SymbolRegular.Settings24,
-        ManagedMemberKind.Event => SymbolRegular.Flash24,
+        BytecodeMemberKind.Method => SymbolRegular.Code24,
+        BytecodeMemberKind.Constructor => SymbolRegular.Wrench24,
+        BytecodeMemberKind.Field => SymbolRegular.Tag24,
+        BytecodeMemberKind.Property => SymbolRegular.Settings24,
+        BytecodeMemberKind.Event => SymbolRegular.Flash24,
         _ => SymbolRegular.Document24,
     };
 }

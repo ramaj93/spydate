@@ -605,7 +605,7 @@ public sealed partial class AssistantViewModel : ObservableObject, IDisposable
             // document, and one a person typed there is in front of the assistant.
             notes: binary.Notes,
 
-            // And the window's own managed assembly. Without it the session's ManagedIndex and Bodies
+            // And the window's own managed assembly. Without it the session's BytecodeIndex and Bodies
             // are null, so every managed target — a method to read, a method to break on — resolves as
             // "not in this assembly", which reads exactly like the metadata being unreadable when it is
             // not. ownsManaged is false because the window opened it and its views are still using it;

@@ -169,11 +169,11 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 new("Strong name", clr.StrongNameSignature.IsPresent ? $"RVA 0x{clr.StrongNameSignature.Rva:X}, size 0x{clr.StrongNameSignature.Size:X}" : "(none)"),
             };
 
-            if (binary.Managed is { } m)
+            if (binary.Bytecode is { } m)
             {
                 Managed.Add(new PropertyRow("Assembly", m.FullName));
-                Managed.Add(new PropertyRow("Target framework", m.TargetFramework));
-                Managed.Add(new PropertyRow("Metadata version", m.RuntimeVersion));
+                Managed.Add(new PropertyRow("Target framework", m.Platform));
+                Managed.Add(new PropertyRow("Metadata version", m.FormatVersion));
                 Managed.Add(new PropertyRow("Types", m.Namespaces.Sum(n => n.Types.Count).ToString(CultureInfo.InvariantCulture)));
             }
             else if (binary.ManagedLoadError is { } err)
