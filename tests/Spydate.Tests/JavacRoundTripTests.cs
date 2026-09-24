@@ -106,30 +106,35 @@ public sealed class JavacRoundTripTests
 
     /// <summary>
     /// The same fixtures as an Android build makes them: the JAR with debug information through D8 — keeping the
-    /// debug table or, as a release build does, dropping it — into an APK, read back from its Dalvik code, compiled
-    /// again with javac and run. Needs D8 as well as a JDK: <c>SPYDATE_D8</c> naming <c>r8.jar</c> or <c>d8.jar</c>,
-    /// or the one Android Studio ships; skipped without it.
+    /// debug table, dropping it as a release build does, or leaving lambdas and concatenations as the
+    /// <c>invoke-custom</c> call sites they were — into an APK, read back from its Dalvik code, compiled again with
+    /// javac and run. Needs D8 as well as a JDK: <c>SPYDATE_D8</c> naming <c>r8.jar</c> or <c>d8.jar</c>, or the one
+    /// Android Studio ships; skipped without it.
     /// </summary>
     [SkippableTheory]
-    [InlineData("Shapes", true)]
-    [InlineData("Shapes", false)]
-    [InlineData("Sugar", true)]
-    [InlineData("Sugar", false)]
-    [InlineData("Legacy", true)]
-    [InlineData("Legacy", false)]
-    [InlineData("Generics", true)]
-    [InlineData("Generics", false)]
-    public void TheClassFromAnApkCompilesAndBehavesLikeTheOriginal(string name, bool debug)
+    [InlineData("Shapes", "debug")]
+    [InlineData("Shapes", "release")]
+    [InlineData("Shapes", "nodesugar")]
+    [InlineData("Sugar", "debug")]
+    [InlineData("Sugar", "release")]
+    [InlineData("Sugar", "nodesugar")]
+    [InlineData("Legacy", "debug")]
+    [InlineData("Legacy", "release")]
+    [InlineData("Legacy", "nodesugar")]
+    [InlineData("Generics", "debug")]
+    [InlineData("Generics", "release")]
+    [InlineData("Generics", "nodesugar")]
+    public void TheClassFromAnApkCompilesAndBehavesLikeTheOriginal(string name, string mode)
     {
         var compiled = Require();
-        string? apk = (debug ? DebugApk : ReleaseApk).Value;
+        string? apk = Dexed[mode].Value;
         Skip.If(apk is null, "no D8 found (SPYDATE_D8, Android Studio's r8.jar)");
 
         var reading = new JvmReading(ApkImage.Load(apk!));
         Assert.Equal(BytecodeKind.Dalvik, reading.Kind);
         string java = reading.Render(reading.FindType($"fixtures/{name}")!, null, JvmReading.JavaView);
 
-        string work = Path.Combine(compiled.Root, $"dex-{name}-{(debug ? "debug" : "release")}");
+        string work = Path.Combine(compiled.Root, $"dex-{name}-{mode}");
         Directory.CreateDirectory(Path.Combine(work, "src", "fixtures"));
         string source = Path.Combine(work, "src", "fixtures", name + ".java");
         File.WriteAllText(source, java);
@@ -141,9 +146,9 @@ public sealed class JavacRoundTripTests
         Assert.Equal(compiled.Expected[name], output);
     }
 
-    private static readonly Lazy<string?> DebugApk = new(() => Dex("debug"), LazyThreadSafetyMode.ExecutionAndPublication);
-
-    private static readonly Lazy<string?> ReleaseApk = new(() => Dex("release"), LazyThreadSafetyMode.ExecutionAndPublication);
+    /// <summary>One APK per D8 mode, made on first use.</summary>
+    private static readonly Dictionary<string, Lazy<string?>> Dexed = new[] { "debug", "release", "nodesugar" }
+        .ToDictionary(m => m, m => new Lazy<string?>(() => Dex(m), LazyThreadSafetyMode.ExecutionAndPublication), StringComparer.Ordinal);
 
     /// <summary>The fixtures' JAR through D8 in one mode, as an APK of its DEX files; null without a JDK or D8.</summary>
     private static string? Dex(string mode)
@@ -159,7 +164,7 @@ public sealed class JavacRoundTripTests
         // --lib is the JDK itself: D8 resolves java.* against its modules. Min API 26 leaves lambdas to D8's own classes.
         string jdkHome = Path.GetDirectoryName(compiled.Jdk)!;
         var (exit, output) = Run(Path.Combine(compiled.Jdk, "java"),
-            $"-cp \"{d8}\" com.android.tools.r8.D8 --{mode} --min-api 26 --lib \"{jdkHome}\" --output \"{dex}\" \"{compiled.WithDebug}\"");
+            $"-cp \"{d8}\" com.android.tools.r8.D8 {(mode == "nodesugar" ? "--debug --no-desugaring" : "--" + mode)} --min-api 26 --lib \"{jdkHome}\" --output \"{dex}\" \"{compiled.WithDebug}\"");
         if (exit != 0)
         {
             throw new InvalidOperationException($"D8 failed on the fixtures: {output}");

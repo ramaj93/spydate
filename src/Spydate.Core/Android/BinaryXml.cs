@@ -46,10 +46,13 @@ public static class BinaryXml
     public static bool IsBinaryXml(ReadOnlySpan<byte> head)
         => head.Length >= 8 && BinaryPrimitives.ReadUInt16LittleEndian(head) == XmlType && BinaryPrimitives.ReadUInt16LittleEndian(head[2..]) == 8;
 
-    /// <summary>The document as text XML, indented, with the namespaces it declares.</summary>
-    public static string ToText(ReadOnlySpan<byte> data)
+    /// <summary>
+    /// The document as text XML, indented, with the namespaces it declares. With the package's resource table, a
+    /// reference is written by name — <c>@string/app_name</c> — rather than by id.
+    /// </summary>
+    public static string ToText(ReadOnlySpan<byte> data, Func<uint, string?>? names = null)
     {
-        var document = Read(data);
+        var document = Read(data, names);
         var settings = new XmlWriterSettings { Indent = true, IndentChars = "    ", OmitXmlDeclaration = false, Encoding = new UTF8Encoding(false) };
         var sb = new StringBuilder();
         try
@@ -65,11 +68,11 @@ public static class BinaryXml
         return sb.ToString().Replace("encoding=\"utf-16\"", "encoding=\"utf-8\"", StringComparison.Ordinal);
     }
 
-    public static XDocument Read(ReadOnlySpan<byte> data)
+    public static XDocument Read(ReadOnlySpan<byte> data, Func<uint, string?>? names = null)
     {
         try
         {
-            return ReadDocument(data);
+            return ReadDocument(data, names);
         }
         catch (Exception ex) when (ex is XmlException or ArgumentException or InvalidOperationException)
         {
@@ -78,7 +81,7 @@ public static class BinaryXml
         }
     }
 
-    private static XDocument ReadDocument(ReadOnlySpan<byte> data)
+    private static XDocument ReadDocument(ReadOnlySpan<byte> data, Func<uint, string?>? names)
     {
         if (!IsBinaryXml(data))
         {
@@ -144,7 +147,7 @@ public static class BinaryXml
                         throw new BinaryXmlException($"Elements nest more than {MaxDepth} deep.");
                     }
 
-                    var element = Element(chunk, headerSize, strings, resourceIds);
+                    var element = Element(chunk, headerSize, strings, resourceIds, names);
                     // A namespace is declared by its prefix; one without a prefix gets a made-up one, since the element's
                     // own name decides the default namespace.
                     foreach (var (prefix, uri) in pendingNamespaces)
@@ -202,7 +205,7 @@ public static class BinaryXml
         return document;
     }
 
-    private static XElement Element(ReadOnlySpan<byte> chunk, int headerSize, string[] strings, uint[] resourceIds)
+    private static XElement Element(ReadOnlySpan<byte> chunk, int headerSize, string[] strings, uint[] resourceIds, Func<uint, string?>? names)
     {
         string? ns = Text(strings, U4(chunk, headerSize));
         string name = XmlName(Text(strings, U4(chunk, headerSize + 4)) ?? "element");
@@ -238,7 +241,7 @@ public static class BinaryXml
             string? raw = Text(strings, U4(chunk, a + 8));
             byte dataType = chunk[a + 15];
             uint value = U4(chunk, a + 16);
-            string text = dataType == 0x03 ? Text(strings, value) ?? raw ?? string.Empty : raw ?? Typed(dataType, value);
+            string text = dataType == 0x03 ? Text(strings, value) ?? raw ?? string.Empty : raw ?? Named(dataType, value, names) ?? Typed(dataType, value);
             var xname = attributeNs is null ? XName.Get(XmlName(attributeName)) : XName.Get(XmlName(attributeName), attributeNs);
             if (element.Attribute(xname) is null)
             {
@@ -249,8 +252,16 @@ public static class BinaryXml
         return element;
     }
 
+    /// <summary>A reference or an attribute by the name the resource table gives it, when there is one.</summary>
+    private static string? Named(byte type, uint data, Func<uint, string?>? names) => type switch
+    {
+        0x01 or 0x07 when data != 0 && names?.Invoke(data) is { } name => "@" + name,
+        0x02 when names?.Invoke(data) is { } attribute => "?" + attribute,
+        _ => null,
+    };
+
     /// <summary>A typed attribute value, written as aapt writes it.</summary>
-    private static string Typed(byte type, uint data) => type switch
+    internal static string Typed(byte type, uint data) => type switch
     {
         0x00 => string.Empty,
         0x01 => $"@0x{data:X8}",
@@ -282,7 +293,7 @@ public static class BinaryXml
     }
 
     /// <summary>The string pool: UTF-16 or UTF-8 strings, found by offsets from where the strings start.</summary>
-    private static string[] StringPool(ReadOnlySpan<byte> chunk)
+    internal static string[] StringPool(ReadOnlySpan<byte> chunk)
     {
         if (chunk.Length < 28)
         {
@@ -385,6 +396,9 @@ public static class BinaryXml
 
     private static int U2(ReadOnlySpan<byte> chunk, int at)
         => at >= 0 && at + 2 <= chunk.Length ? BinaryPrimitives.ReadUInt16LittleEndian(chunk[at..]) : throw new BinaryXmlException($"A read at 0x{at:X} runs past its chunk.");
+
+    /// <summary>A common <c>android:</c> attribute's name by its resource id, or null.</summary>
+    internal static string? AndroidAttributeName(uint id) => AndroidAttributes.GetValueOrDefault(id);
 
     /// <summary>The manifest's common <c>android:</c> attributes by resource id, for when the pool's names are gone.</summary>
     private static readonly Dictionary<uint, string> AndroidAttributes = new()

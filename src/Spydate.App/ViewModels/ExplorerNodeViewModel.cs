@@ -45,6 +45,9 @@ public sealed record EntriesTarget : NodeTarget;
 /// <summary>One file inside an archive, by its name there, opened as its contents.</summary>
 public sealed record ArchiveEntryTarget(string Name) : NodeTarget;
 
+/// <summary>A binary inside an archive — an APK's native library — taken out and opened as the file it is, in a tab of its own.</summary>
+public sealed record NestedBinaryTarget(string Name) : NodeTarget;
+
 /// <summary>A node in the explorer tree. Children may be materialised lazily via <see cref="ChildrenFactory"/>.</summary>
 public sealed partial class ExplorerNodeViewModel : ObservableObject
 {

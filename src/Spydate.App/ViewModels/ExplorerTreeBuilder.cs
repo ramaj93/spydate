@@ -140,7 +140,8 @@ public static class ExplorerTreeBuilder
     private static ExplorerNodeViewModel BuildApk(OpenedBinary binary, ApkImage apk)
     {
         var reading = binary.Bytecode;
-        string subtitle = reading is null ? "APK" : $"APK · {reading.Platform} · {apk.Classes.Count:N0} classes";
+        string kind = apk.IsPackage ? "APK" : "DEX";
+        string subtitle = reading is null ? kind : $"{kind} · {reading.Platform} · {apk.Classes.Count:N0} classes";
         var root = new ExplorerNodeViewModel(apk.FileName, SymbolRegular.Phone24, new OverviewTarget(), subtitle)
         {
             IsExpanded = true,
@@ -164,10 +165,16 @@ public static class ExplorerTreeBuilder
             }
         }
 
-        if (apk.Archive.Find(ApkImage.ManifestEntry) is not null)
+        if (apk.Archive?.Find(ApkImage.ManifestEntry) is not null)
         {
             string facts = apk.Manifest is { } manifest ? $"{manifest.Package} · API {manifest.MinSdk ?? "?"}–{manifest.TargetSdk ?? "?"}" : "unreadable";
             root.Add(new ExplorerNodeViewModel("Manifest", SymbolRegular.DocumentText24, new ArchiveEntryTarget(ApkImage.ManifestEntry), facts));
+        }
+
+        if (apk.HasResourceTable)
+        {
+            string values = apk.Resources is { } table ? $"{table.Entries.Count:N0} values" : "unreadable";
+            root.Add(new ExplorerNodeViewModel("Resources", SymbolRegular.Image24, apk.Resources is null ? new ArchiveEntryTarget(ApkImage.ResourceTableEntry) : new ResourcesTarget(), values));
         }
 
         if (apk.NativeLibraries.Count > 0)
@@ -178,13 +185,17 @@ public static class ExplorerTreeBuilder
                 var abi = natives.Add(new ExplorerNodeViewModel(group.Key, SymbolRegular.Folder24, null, group.Count().ToString(CultureInfo.InvariantCulture)));
                 foreach (var library in group)
                 {
-                    abi.Add(new ExplorerNodeViewModel(library.Name, SymbolRegular.Document24, new ArchiveEntryTarget(library.Entry.Name), $"{library.Entry.Size:N0} bytes"));
+                    abi.Add(new ExplorerNodeViewModel(library.Name, SymbolRegular.Document24, new NestedBinaryTarget(library.Entry.Name), $"{library.Entry.Size:N0} bytes · opens as ELF"));
                 }
             }
         }
 
-        int files = apk.Archive.Entries.Count(e => !e.IsDirectory);
-        root.Add(new ExplorerNodeViewModel("Entries", SymbolRegular.FolderZip24, new EntriesTarget(), $"{files:N0} files"));
+        if (apk.Archive is { } archive)
+        {
+            int files = archive.Entries.Count(e => !e.IsDirectory);
+            root.Add(new ExplorerNodeViewModel("Entries", SymbolRegular.FolderZip24, new EntriesTarget(), $"{files:N0} files"));
+        }
+
         if (reading is not null)
         {
             root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "string constants"));

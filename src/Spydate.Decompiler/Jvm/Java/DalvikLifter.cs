@@ -1213,9 +1213,11 @@ internal sealed class DalvikLifter
             case (>= 0x6E and <= 0x72) or (>= 0x74 and <= 0x78):
                 Invoke(k, i);
                 return false;
-            case 0xFA or 0xFB or 0xFC or 0xFD:
-                Emit(new IrComment($"{i.Mnemonic}: not written as Java yet"));
-                _function.Warnings.Add($"{i.Mnemonic} at {i.Address:X4} is shown as a comment");
+            case 0xFA or 0xFB:
+                InvokePolymorphic(k, i);
+                return false;
+            case 0xFC or 0xFD:
+                InvokeCustom(k, i);
                 return false;
             case >= 0x7B and <= 0x80:
             {
@@ -1360,17 +1362,128 @@ internal sealed class DalvikLifter
                 ? new JCall(JCallKind.Static, null, Owner(forwarded.Target.Owner), forwarded.Target.Name, forwarded.Target.Proto.Descriptor, args)
                 : new JCall(forwarded.Kind, args[0], Owner(forwarded.Target.Owner), forwarded.Target.Name, forwarded.Target.Proto.Descriptor, args.Skip(1).ToList());
         }
+        Result(k, call);
+    }
+
+    /// <summary>What an invoke returns: stored by the move-result after it, or, with none, the call made for its effect.</summary>
+    private void Result(int k, JExpr value)
+    {
         if (k + 1 < _instructions.Count && _instructions[k + 1].Opcode is >= 0x0A and <= 0x0C)
         {
             var result = _instructions[k + 1];
             _pc = result.Address;
-            Write(k + 1, result.A, call);
-            _pc = i.Address;
+            Write(k + 1, result.A, value);
+            _pc = _instructions[k].Address;
         }
         else
         {
-            Emit(new JExprStmt(call));
+            Emit(new JExprStmt(value));
         }
+    }
+
+    /// <summary>
+    /// <c>invoke-polymorphic</c>: a call to a signature-polymorphic method — <c>MethodHandle.invokeExact</c>,
+    /// <c>VarHandle.get</c> — whose type is the call site's own, carried by the instruction as a proto, rather than the
+    /// method's declared <c>(Object...)Object</c>. It is the <c>invokevirtual</c> javac writes, with that type.
+    /// </summary>
+    private void InvokePolymorphic(int k, DalvikInstruction i)
+    {
+        var arguments = Arguments(i);
+        if (MethodAt(i.Index) is not { } target || ProtoAt(i.Proto) is not { } proto || arguments.Count == 0)
+        {
+            Emit(new IrComment($"{i.Mnemonic} names a method or type the file does not have"));
+            return;
+        }
+
+        var reads = arguments.Select(a => Coerce(Read(k, a.Register, a.Type), a.Type)).ToList();
+        Result(k, new JCall(JCallKind.Virtual, reads[0], Owner(target.Owner), target.Name, proto.Descriptor, reads.Skip(1).ToList()));
+    }
+
+    /// <summary>
+    /// <c>invoke-custom</c>: the <c>invokedynamic</c> it was, as the JVM lifter reads one — a lambda or method reference
+    /// when the bootstrap is LambdaMetafactory, a string concatenation for StringConcatFactory, otherwise a call site
+    /// named by its bootstrap. D8 leaves these in place when it is told not to desugar.
+    /// </summary>
+    private void InvokeCustom(int k, DalvikInstruction i)
+    {
+        if (_dex is not { } dex || i.Index < 0 || i.Index >= dex.CallSites.Count || dex.CallSites[i.Index] is not { Type: { } type } site)
+        {
+            Emit(new IrComment($"{i.Mnemonic} names call site {i.Index}, which the file does not have"));
+            return;
+        }
+
+        var args = Arguments(i).Select(a => Coerce(Read(k, a.Register, a.Type), a.Type)).ToList();
+        var dynamic = new JDynamic(site.Name, type.Descriptor, args);
+        string? bootstrap = site.Bootstrap?.Method is { } method ? $"{Owner(method.Owner)}.{method.Name}" : null;
+        if (bootstrap == "java/lang/invoke/StringConcatFactory.makeConcatWithConstants" && site.Arguments is [{ Value: string recipe }, ..])
+        {
+            dynamic = dynamic with { Concat = ConcatParts(recipe, site.Arguments.Skip(1).ToList()) };
+        }
+        else if (bootstrap is "java/lang/invoke/LambdaMetafactory.metafactory" or "java/lang/invoke/LambdaMetafactory.altMetafactory"
+                 && site.Arguments.Count > 1 && site.Arguments[1].Value is DexMethodHandle { Method: { } body } handle)
+        {
+            dynamic = dynamic with { Target = (Owner(body.Owner), body.Name, body.Proto.Descriptor), TargetKind = HandleKind(handle.Kind) };
+        }
+        else
+        {
+            dynamic = dynamic with { Bootstrap = bootstrap };
+        }
+
+        Result(k, dynamic);
+    }
+
+    /// <summary>A DEX method handle's kind as the JVM numbers it (JVMS §5.4.3.5), which is what <see cref="JDynamic.TargetKind"/> holds.</summary>
+    private static int HandleKind(int dexKind) => dexKind switch
+    {
+        0 => 4,   // static-put
+        1 => 2,   // static-get
+        2 => 3,   // instance-put
+        3 => 1,   // instance-get
+        4 => 6,   // invoke-static
+        5 => 5,   // invoke-instance
+        6 => 8,   // invoke-constructor
+        7 => 7,   // invoke-direct
+        _ => 9,   // invoke-interface
+    };
+
+    /// <summary>A concatenation recipe: <c>\u0001</c> is the next argument, <c>\u0002</c> the next constant, the rest literal text.</summary>
+    private static List<object> ConcatParts(string recipe, IReadOnlyList<DexValue> constants)
+    {
+        var parts = new List<object>();
+        var text = new System.Text.StringBuilder();
+        int argument = 0;
+        int constant = 0;
+        foreach (char c in recipe)
+        {
+            if (c is '\u0001' or '\u0002')
+            {
+                if (text.Length > 0)
+                {
+                    parts.Add(text.ToString());
+                    text.Clear();
+                }
+
+                if (c == '\u0001')
+                {
+                    parts.Add(argument++);
+                }
+                else if (constant < constants.Count && constants[constant++].Value is { } literal)
+                {
+                    parts.Add(Convert.ToString(literal, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty);
+                }
+            }
+            else
+            {
+                text.Append(c);
+            }
+        }
+
+        if (text.Length > 0)
+        {
+            parts.Add(text.ToString());
+        }
+
+        return parts;
     }
 
     /// <summary>
@@ -1691,7 +1804,8 @@ internal sealed class DalvikLifter
         int at = 0;
         if (i.Opcode is not (0x71 or 0x77 or 0xFC or 0xFD))
         {
-            string receiver = i.Opcode is 0xFA or 0xFB ? "Ljava/lang/invoke/MethodHandle;" : MethodAt(i.Index)?.Owner ?? Object;
+            // invoke-polymorphic's receiver is the handle: the owner of the method it names, MethodHandle or VarHandle.
+            string receiver = MethodAt(i.Index)?.Owner ?? Object;
             if (at < registers.Count)
             {
                 list.Add((registers[at++], receiver));

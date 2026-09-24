@@ -83,7 +83,8 @@ public sealed record ApkManifest(
 
 /// <summary>
 /// An Android package: a zip holding the app's code as DEX files, its manifest and resources compiled to binary
-/// XML and a resource table, and native libraries per ABI.
+/// XML and a resource table, and native libraries per ABI — or one DEX file on its own, which is the same program
+/// without the package around it (<see cref="IsPackage"/> false, no <see cref="Archive"/>).
 ///
 /// Like a JAR, it is an <see cref="IBinaryImage"/> without an address space — the architecture is
 /// <see cref="Architecture.Unknown"/>, which keeps native analysis from starting — and its program is its
@@ -103,12 +104,26 @@ public sealed class ApkImage : IBinaryImage
     private readonly List<string> _warnings = [];
     private readonly Lazy<CodeSet> _code;
 
-    private ApkImage(string? path, ReadOnlyMemory<byte> data, ZipArchiveFile archive)
+    private ApkImage(string? path, ReadOnlyMemory<byte> data, ZipArchiveFile? archive)
     {
         Path = path;
         FileName = path is null ? "(memory)" : System.IO.Path.GetFileName(path);
         Data = data;
         Archive = archive;
+        _code = new Lazy<CodeSet>(ReadCode, LazyThreadSafetyMode.ExecutionAndPublication);
+        _classFiles = new Lazy<IReadOnlyList<Jvm.JarClass>>(
+            () => Classes.Select(c => new Jvm.JarClass(c.Source.Entry, DexClasses.ToClassFile(c.Class))).ToList(),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+        _resources = new Lazy<ResourceTable?>(ReadResources, LazyThreadSafetyMode.ExecutionAndPublication);
+
+        // A DEX file on its own: its code, and a hash of it to key its project by.
+        if (archive is null)
+        {
+            Fingerprint = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data.Span)[..16]);
+            NativeLibraries = [];
+            return;
+        }
+
         _warnings.AddRange(archive.Warnings);
         Fingerprint = archive.DirectoryHash();
 
@@ -134,13 +149,10 @@ public sealed class ApkImage : IBinaryImage
             .Where(e => !e.IsDirectory && e.Name.StartsWith("lib/", StringComparison.Ordinal) && e.Name.EndsWith(".so", StringComparison.Ordinal) && e.Name.Count(c => c == '/') == 2)
             .Select(e => new NativeLibrary(e, e.Name.Split('/')[1], e.Name.Split('/')[2]))
             .ToList();
-        _code = new Lazy<CodeSet>(ReadCode, LazyThreadSafetyMode.ExecutionAndPublication);
-        _classFiles = new Lazy<IReadOnlyList<Jvm.JarClass>>(
-            () => Classes.Select(c => new Jvm.JarClass(c.Source.Entry, DexClasses.ToClassFile(c.Class))).ToList(),
-            LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     private readonly Lazy<IReadOnlyList<Jvm.JarClass>> _classFiles;
+    private readonly Lazy<ResourceTable?> _resources;
 
     public static ApkImage Load(string path)
     {
@@ -165,7 +177,52 @@ public sealed class ApkImage : IBinaryImage
         return new ApkImage(path, bytes, ZipArchiveFile.Open(bytes));
     }
 
-    public ZipArchiveFile Archive { get; }
+    /// <summary>A DEX file on its own, as <c>d8</c> writes one or a tool drops one: the app's code without its package.</summary>
+    public static ApkImage LoadDex(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new DexFormatException($"Cannot read '{path}': {ex.Message}");
+        }
+
+        return FromDexBytes(bytes, path);
+    }
+
+    /// <summary>A DEX file held in memory.</summary>
+    public static ApkImage FromDexBytes(byte[] bytes, string? path = null)
+    {
+        ArgumentNullException.ThrowIfNull(bytes);
+        if (bytes.Length > MaxDexSize)
+        {
+            throw new DexFormatException($"The file is {bytes.Length:N0} bytes, more than a DEX file can be.");
+        }
+
+        // Read now: a file that says it is DEX and is not one is refused as it is opened, not when its code is shown.
+        var image = new ApkImage(path, bytes, null);
+        _ = image.Classes;
+        return image;
+    }
+
+    /// <summary>The package's zip; null for a DEX file on its own.</summary>
+    public ZipArchiveFile? Archive { get; }
+
+    /// <summary>A package, rather than one DEX file on its own.</summary>
+    public bool IsPackage => Archive is not null;
+
+    /// <summary>
+    /// The resource table, <c>resources.arsc</c>: every resource's name and values. Read on first use; null when the
+    /// package has none or it could not be read (said in <see cref="Warnings"/>).
+    /// </summary>
+    public ResourceTable? Resources => _resources.Value;
+
+    /// <summary>The name a resource id is written with, <c>string/app_name</c>, from the resource table; null without one.</summary>
+    public string? ResourceName(uint id) => Resources?.NameOf(id);
 
     /// <summary>The manifest decoded from binary XML; null when it is missing or could not be read.</summary>
     public XDocument? ManifestDocument { get; }
@@ -195,9 +252,11 @@ public sealed class ApkImage : IBinaryImage
     /// <summary>The ABIs the native libraries are built for: <c>arm64-v8a</c>, <c>x86_64</c>…</summary>
     public IReadOnlyList<string> Abis => NativeLibraries.Select(l => l.Abi).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
 
-    public bool HasResourceTable => Archive.Find("resources.arsc") is not null;
+    public const string ResourceTableEntry = "resources.arsc";
 
-    public BinaryFormat Format => BinaryFormat.Apk;
+    public bool HasResourceTable => Archive?.Find(ResourceTableEntry) is not null;
+
+    public BinaryFormat Format => IsPackage ? BinaryFormat.Apk : BinaryFormat.Dex;
 
     public Architecture Architecture => Architecture.Unknown;
 
@@ -221,7 +280,7 @@ public sealed class ApkImage : IBinaryImage
 
     public ulong EntryPointVa => 0;
 
-    /// <summary>A library (an AAR-like package, a feature split) unless the manifest names an activity that launches.</summary>
+    /// <summary>A library (an AAR-like package, a feature split, a DEX file alone) unless the manifest names an activity that launches.</summary>
     public bool IsLibrary => Manifest?.MainActivity is null;
 
     public IReadOnlyList<IBinarySection> Sections => [];
@@ -250,13 +309,17 @@ public sealed class ApkImage : IBinaryImage
 
     public IReadOnlyList<ImportedSymbol> Imports => [];
 
-    /// <summary>What the archive, manifest and DEX files tolerated. Reading this reads the code.</summary>
+    /// <summary>What the archive, manifest, resource table and DEX files tolerated. Reading this reads the code and the resources.</summary>
     public IReadOnlyList<string> Warnings
     {
         get
         {
             _ = _code.Value;
-            return _warnings;
+            _ = _resources.Value;
+            lock (_warnings)
+            {
+                return [.. _warnings];
+            }
         }
     }
 
@@ -272,20 +335,53 @@ public sealed class ApkImage : IBinaryImage
         public Dictionary<string, ApkClass> ByName { get; } = new(StringComparer.Ordinal);
     }
 
+    private ResourceTable? ReadResources()
+    {
+        if (Archive?.Find(ResourceTableEntry) is not { } entry)
+        {
+            return null;
+        }
+
+        try
+        {
+            var table = ResourceTable.Parse(Archive.Read(entry, MaxDexSize));
+            lock (_warnings)
+            {
+                _warnings.AddRange(table.Warnings.Select(w => $"{ResourceTableEntry}: {w}"));
+            }
+
+            return table;
+        }
+        catch (BinaryParseException ex)
+        {
+            lock (_warnings)
+            {
+                _warnings.Add($"{ResourceTableEntry} could not be read: {ex.Message}");
+            }
+
+            return null;
+        }
+    }
+
     private CodeSet ReadCode()
     {
         var set = new CodeSet();
-        var dexEntries = Archive.Entries
-            .Where(e => !e.IsDirectory && DexOrder(e.Name) is not null)
-            .OrderBy(e => DexOrder(e.Name))
-            .ToList();
+
+        // A DEX file on its own is the one entry of a package that is not there.
+        var dexEntries = Archive is null
+            ? [new ArchiveEntry(0, FileName, Data.Length, Data.Length, 0, 0, null, false, 0)]
+            : Archive.Entries.Where(e => !e.IsDirectory && DexOrder(e.Name) is not null).OrderBy(e => DexOrder(e.Name)).ToList();
         foreach (var entry in dexEntries)
         {
             try
             {
-                var dex = new ApkDex(entry, DexFile.Parse(Archive.Read(entry, MaxDexSize)));
+                var dex = new ApkDex(entry, DexFile.Parse(Archive is null ? Data.ToArray() : Archive.Read(entry, MaxDexSize)));
                 set.Dex.Add(dex);
-                _warnings.AddRange(dex.File.Warnings.Select(w => $"{entry.Name}: {w}"));
+                lock (_warnings)
+                {
+                    _warnings.AddRange(dex.File.Warnings.Select(w => $"{entry.Name}: {w}"));
+                }
+
                 int duplicates = 0;
                 foreach (var definition in dex.File.Classes)
                 {
@@ -302,12 +398,24 @@ public sealed class ApkImage : IBinaryImage
 
                 if (duplicates > 0)
                 {
-                    _warnings.Add($"{entry.Name}: {duplicates} class(es) defined again; the first definition is the one that loads.");
+                    lock (_warnings)
+                    {
+                        _warnings.Add($"{entry.Name}: {duplicates} class(es) defined again; the first definition is the one that loads.");
+                    }
                 }
             }
             catch (BinaryParseException ex)
             {
-                _warnings.Add($"{entry.Name} could not be read: {ex.Message}");
+                // A DEX file alone that does not parse is not a DEX file: said as the error opening it, not a warning.
+                if (Archive is null)
+                {
+                    throw;
+                }
+
+                lock (_warnings)
+                {
+                    _warnings.Add($"{entry.Name} could not be read: {ex.Message}");
+                }
             }
         }
 

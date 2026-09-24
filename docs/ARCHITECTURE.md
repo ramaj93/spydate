@@ -190,8 +190,10 @@ shape — the zip, no address space, the zip directory's hash as fingerprint —
 bounds-checked `DexReader`; `Dalvik.Decode` decodes code. `BinaryXml` turns compiled XML back into text.
 `DexClasses.ToClassFile` presents a DEX class as a `ClassFile`, its system annotations as attributes, so
 `JvmReading` (built from an `ApkImage`, `Kind = Dalvik`) and the Java decompiler read it as they read a JAR's; a
-method's `JvmMethod.Dalvik` code is listed by `DalvikListing` and lifted by `DalvikLifter`. See DECISIONS, "An APK
-is read in-house".
+method's `JvmMethod.Dalvik` code is listed by `DalvikListing` and lifted by `DalvikLifter`. A DEX file on its own is
+an `ApkImage` with no archive (`IsPackage` false). `ResourceTable` reads `resources.arsc` and names the references
+`BinaryXml` writes. `NestedFile` (in `Spydate.Core/Archive`) takes a file out of an archive into a cache folder so
+that `app.apk!/lib/<abi>/libfoo.so` opens as the ELF it is. See DECISIONS, "An APK is read in-house".
 
 ### 3.2 `StringScanner`
 

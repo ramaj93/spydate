@@ -39,6 +39,7 @@ public sealed class UnsupportedFormatException : BinaryParseException
         BinaryFormat.Elf => "an ELF binary (a Linux, BSD or Android native program or library)",
         BinaryFormat.Jar => "a Java archive (JAR)",
         BinaryFormat.Apk => "an Android package (APK)",
+        BinaryFormat.Dex => "an Android DEX file",
         _ => "not a format Spydate recognises",
     };
 }
@@ -73,6 +74,13 @@ public static class BinaryImage
             return BinaryFormat.Jar;
         }
 
+        // "dex\n035\0": the magic, a three-digit version, a NUL.
+        if (head.Length >= 8 && head[0] == (byte)'d' && head[1] == (byte)'e' && head[2] == (byte)'x' && head[3] == (byte)'\n'
+            && char.IsAsciiDigit((char)head[4]) && char.IsAsciiDigit((char)head[5]) && char.IsAsciiDigit((char)head[6]) && head[7] == 0)
+        {
+            return BinaryFormat.Dex;
+        }
+
         return BinaryFormat.Unknown;
     }
 
@@ -102,7 +110,7 @@ public static class BinaryImage
     }
 
     /// <summary>
-    /// Opens a binary. A PE, an ELF, a JAR or an APK is parsed; a recognised format Spydate does not open yet is refused by name.
+    /// Opens a binary. A PE, an ELF, a JAR, an APK or a DEX file is parsed; a recognised format Spydate does not open yet is refused by name.
     /// A file nothing recognises still goes to the PE parser, whose error explains what it found where a header
     /// should be — the same answer opening an unknown file has always given.
     /// </summary>
@@ -126,6 +134,11 @@ public static class BinaryImage
             return ApkImage.Load(path);
         }
 
+        if (format == BinaryFormat.Dex)
+        {
+            return ApkImage.LoadDex(path);
+        }
+
         return PeImage.Load(path);
     }
 
@@ -145,7 +158,7 @@ public static class BinaryImage
         PeImage pe => pe.Is64Bit ? "PE32+" : "PE32",
         ElfImage elf => elf.Header.ClassName,
         JarImage => "JAR",
-        ApkImage => "APK",
+        ApkImage apk => apk.IsPackage ? "APK" : "DEX",
         _ => image.Format.ToString(),
     };
 

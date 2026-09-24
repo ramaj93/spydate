@@ -48,6 +48,9 @@ public interface IShell
     /// already has one. Null when the window declined to open it.
     /// </summary>
     FileViewModel? ShowModuleTab(OpenedBinary module);
+
+    /// <summary>Opens a file in a new tab of its own, without asking where: a binary taken out of the one in front.</summary>
+    Task OpenInNewTabAsync(string path);
 }
 
 /// <summary>
@@ -268,7 +271,7 @@ public sealed partial class FileViewModel : ObservableObject
         }
         else if (Binary.Image is ApkImage apk)
         {
-            Log($"{apk.Classes.Count:N0} classes in {Binary.Bytecode?.Namespaces.Count ?? 0} packages from {apk.DexFiles.Count} DEX file(s); nothing in an APK's code has an address, so there are no functions to discover.");
+            Log($"{apk.Classes.Count:N0} classes in {Binary.Bytecode?.Namespaces.Count ?? 0} packages from {apk.DexFiles.Count} DEX file(s); nothing in Dalvik code has an address, so there are no functions to discover.");
             foreach (string warning in apk.Warnings.Take(20))
             {
                 Warnings.Add(warning);
@@ -1718,7 +1721,35 @@ public sealed partial class FileViewModel : ObservableObject
             return;
         }
 
+        // An APK's native library opens as the ELF it is.
+        if (Binary.Image is ApkImage apk && apk.NativeLibraries.Any(l => ReferenceEquals(l.Entry, entry)))
+        {
+            OpenNested(entry.Name);
+            return;
+        }
+
         OpenTarget(new ArchiveEntryTarget(entry.Name));
+    }
+
+    /// <summary>Takes a file out of the package (<see cref="NestedFile"/>) and opens it in a tab of its own.</summary>
+    private void OpenNested(string name)
+    {
+        if (Binary.Image is not ApkImage { Archive: { } archive } apk || archive.Find(name) is not { } entry)
+        {
+            return;
+        }
+
+        try
+        {
+            string path = NestedFile.Extract(archive, entry);
+            _shell.Log($"Opening {apk.FileName}!/{name}, taken out to {path}");
+            _ = _shell.OpenInNewTabAsync(path);
+        }
+        catch (BinaryParseException ex)
+        {
+            _shell.StatusText = $"Cannot open {name}: {ex.Message}";
+            _shell.Log($"ERROR: {name} could not be taken out of {apk.FileName}: {ex.Message}");
+        }
     }
 
     /// <summary>Opens the code at an address, when there is an analysis to read it with.</summary>
@@ -1758,6 +1789,13 @@ public sealed partial class FileViewModel : ObservableObject
             return;
         }
 
+        // A library inside the package is a binary of its own: it opens in its own tab, not as a document of this one.
+        if (target is NestedBinaryTarget nested)
+        {
+            OpenNested(nested.Name);
+            return;
+        }
+
         DocumentViewModel? doc = target switch
         {
             OverviewTarget => Find("overview") ?? new OverviewDocumentViewModel(b),
@@ -1770,18 +1808,19 @@ public sealed partial class FileViewModel : ObservableObject
             SectionsTarget when b.Image is PeImage pe => Find("sections") ?? new SectionsDocumentViewModel(pe, s => OpenTarget(new HexTarget(s.PointerToRawData))),
             ImportsTarget when b.Image is ElfImage elf => Find("imports") ?? ElfDocuments.Imports(elf, OpenCode),
             ImportsTarget when b.Image is PeImage pe => Find("imports") ?? new ImportsDocumentViewModel(pe, b.Analysis),
+            ResourcesTarget when b.Image is ApkImage { Resources: { } table } => Find("resources") ?? JarDocuments.Resources(table),
             ResourcesTarget when b.Image is PeImage pe => Find("resources") ?? new ResourcesDocumentViewModel(pe, row => OpenTarget(new ResourcePreviewTarget(row.TypeId, row.Id, row.DataRva, row.DataSize, $"{row.Type}: {row.Name}"))),
             ResourcePreviewTarget preview => OpenResource(preview),
             StringsTarget when b.Bytecode is JvmReading jvm => Find("strings") ?? JarDocuments.Strings(jvm, (type, member) => OpenTarget(new ReadingTarget(type, member))),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(b.Image, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
             EntriesTarget when b.Image is JarImage jar => Find("entries") ?? JarDocuments.Entries(jar, OpenEntry),
-            EntriesTarget when b.Image is ApkImage apk => Find("entries") ?? JarDocuments.Entries(apk.Archive, OpenEntry),
-            ArchiveEntryTarget entry when b.Image is ApkImage apk && apk.Archive.Find(entry.Name) is { } found => Find($"entry:{entry.Name}") ?? CodeDocumentViewModel.ForText(
+            EntriesTarget when b.Image is ApkImage { Archive: { } archive } => Find("entries") ?? JarDocuments.Entries(archive, OpenEntry),
+            ArchiveEntryTarget entry when b.Image is ApkImage { Archive: { } archive } apk && archive.Find(entry.Name) is { } found => Find($"entry:{entry.Name}") ?? CodeDocumentViewModel.ForText(
                 $"entry:{entry.Name}",
                 entry.Name[(entry.Name.LastIndexOf('/') + 1)..],
                 SymbolRegular.Document24,
                 entry.Name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ? HighlightingService.Xml : HighlightingService.Plain,
-                JarDocuments.Contents(apk.Archive, found)),
+                JarDocuments.Contents(archive, found, apk.ResourceName)),
             ArchiveEntryTarget entry when b.Image is JarImage jar && jar.Archive.Find(entry.Name) is { } found => Find($"entry:{entry.Name}") ?? CodeDocumentViewModel.ForText(
                 $"entry:{entry.Name}",
                 entry.Name[(entry.Name.LastIndexOf('/') + 1)..],

@@ -49,7 +49,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         AssistantProvider = assistantProvider;
         Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
-        Log("Spydate started. Open a PE, ELF, JAR or APK to begin (Ctrl+O).");
+        Log("Spydate started. Open a PE, ELF, JAR, APK or DEX file to begin (Ctrl+O).");
     }
 
     /// <summary>
@@ -255,7 +255,11 @@ public sealed partial class MainViewModel : ObservableObject, IShell
     /// the command line — so they all behave the same way. Opening a file that is already open is
     /// not a question at all: it shows the tab that has it.
     /// </summary>
-    public async Task OpenPathAsync(string path)
+    public Task OpenInNewTabAsync(string path) => OpenPathAsync(path, OpenDestination.NewTab);
+
+    public async Task OpenPathAsync(string path) => await OpenPathAsync(path, null).ConfigureAwait(true);
+
+    private async Task OpenPathAsync(string path, OpenDestination? forced)
     {
         if (_workspace.FindByPath(path) is { } already
             && Files.FirstOrDefault(f => ReferenceEquals(f.Binary, already)) is { } openTab)
@@ -265,7 +269,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             return;
         }
 
-        if (WhereToOpen(path) is not { } destination)
+        if ((forced ?? WhereToOpen(path)) is not { } destination)
         {
             return;   // cancelled: nothing is opened, and what was open is untouched
         }
@@ -280,8 +284,9 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             var image = opened.Image;
             if (image is Core.Android.ApkImage apk)
             {
-                StatusText = $"{opened.DisplayName}  ·  APK  ·  {opened.Bytecode?.Platform}  ·  {apk.Classes.Count:N0} classes";
-                Log($"Loaded {opened.DisplayName}: APK, {image.Length:N0} bytes, {apk.Archive.Entries.Count:N0} entries, {apk.DexFiles.Count} DEX file(s), {apk.Classes.Count:N0} classes, needs {opened.Bytecode?.Platform}.");
+                string kind = apk.IsPackage ? "APK" : "DEX";
+                StatusText = $"{opened.DisplayName}  ·  {kind}  ·  {opened.Bytecode?.Platform}  ·  {apk.Classes.Count:N0} classes";
+                Log($"Loaded {opened.DisplayName}: {kind}, {image.Length:N0} bytes, {(apk.Archive is { } zip ? $"{zip.Entries.Count:N0} entries, {apk.DexFiles.Count} DEX file(s), " : string.Empty)}{apk.Classes.Count:N0} classes, needs {opened.Bytecode?.Platform}.");
             }
             else if (image is Core.Jvm.JarImage jar)
             {
@@ -329,6 +334,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
                 Core.Elf.ElfParseException => "Not a valid ELF file",
                 Core.Archive.ArchiveException => "Not a readable archive",
                 Core.Jvm.ClassFormatException => "Not a valid class file",
+                Core.Dex.DexFormatException => "Not a valid DEX file",
                 _ => "Not a valid PE file",
             };
             StatusText = $"Cannot open: {ex.Message}";

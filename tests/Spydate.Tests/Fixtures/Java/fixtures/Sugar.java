@@ -7,6 +7,10 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -292,7 +296,20 @@ public class Sugar {
         return c.get() + s.get() + new Local().twice() + log.size();
     }
 
-    public static void main(String[] args) throws Exception {
+    /** Signature-polymorphic calls: a handle is called with the call site's own types, so its results are cast. */
+    static String handles() throws Throwable {
+        MethodHandle max = MethodHandles.lookup().findStatic(Math.class, "max", MethodType.methodType(int.class, int.class, int.class));
+        int larger = (int) max.invokeExact(3, 9);
+        Object boxed = max.invoke(Integer.valueOf(4), 2);
+        int[] cells = new int[2];
+        VarHandle cell = MethodHandles.arrayElementVarHandle(int[].class);
+        cell.set(cells, 1, 5);
+        boolean swapped = cell.compareAndSet(cells, 1, 5, 6);
+        int before = (int) cell.getAndAdd(cells, 0, 3);
+        return larger + " " + boxed + swapped + before + cells[0] + cells[1];
+    }
+
+    public static void main(String[] args) throws Throwable {
         StringBuilder out = new StringBuilder();
         out.append(sumAll(PRIMES)).append(' ').append(sumAll(new int[] {1, 2, 3})).append('\n');
         out.append(joinAll(Arrays.asList("a", "b", "c"))).append('\n');
@@ -320,6 +337,7 @@ public class Sugar {
         }
         out.append(Sugar.class.getMethod("sumAll", int[].class).getAnnotation(Note.class).weight()).append('\n');
         out.append(overloads()).append('\n');
+        out.append(handles()).append('\n');
         System.out.print(out);
     }
 }

@@ -13,6 +13,8 @@ public sealed record JarEntryRow(int Index, string Name, string Size, string Pac
 
 public sealed record JarStringRow(string Text, string In, string At, JvmType Type, JvmMember Member);
 
+public sealed record ApkResourceRow(string Id, string Type, string Name, string Config, string Value);
+
 /// <summary>
 /// The documents a JAR has: the files in its archive, and the string constants its code loads. Double-clicking a
 /// class file opens the class; any other file opens its contents; a string opens the method that loads it.
@@ -88,10 +90,36 @@ public static class JarDocuments
     public static string Contents(JarImage jar, ArchiveEntry entry) => Contents(jar.Archive, entry);
 
     /// <summary>
-    /// A file from inside a JAR or an APK as text: compiled XML (an APK's manifest and resources) decoded back to
-    /// XML, text as itself, anything else a hex dump, and the reason when it cannot be read at all.
+    /// An APK's resource table: every value of every resource, by id, type, name and configuration, references written
+    /// by the names the table gives them.
     /// </summary>
-    public static string Contents(ZipArchiveFile archive, ArchiveEntry entry)
+    public static RecordsDocumentViewModel Resources(ResourceTable table)
+    {
+        var rows = table.Entries.Select(e => new ApkResourceRow(
+            e.Id.ToString("X8", CultureInfo.InvariantCulture),
+            e.Type,
+            e.Name,
+            e.Config.Length == 0 ? "default" : e.Config,
+            table.ValueText(e))).ToList();
+
+        return new RecordsDocumentViewModel(
+            "resources",
+            "Resources",
+            SymbolRegular.Image24,
+            "every value in resources.arsc: one row per resource and configuration; a style or array lists its items",
+            [
+                new("ID", nameof(ApkResourceRow.Id), 90), new("Type", nameof(ApkResourceRow.Type), 90), new("Name", nameof(ApkResourceRow.Name), 280),
+                new("Config", nameof(ApkResourceRow.Config), 120), new("Value", nameof(ApkResourceRow.Value), 0),
+            ],
+            rows);
+    }
+
+    /// <summary>
+    /// A file from inside a JAR or an APK as text: compiled XML (an APK's manifest and resources) decoded back to
+    /// XML — with the package's resource names when they are given — and its resource table as a listing, text as
+    /// itself, anything else a hex dump, and the reason when it cannot be read at all.
+    /// </summary>
+    public static string Contents(ZipArchiveFile archive, ArchiveEntry entry, Func<uint, string?>? names = null)
     {
         byte[] bytes;
         try
@@ -107,11 +135,23 @@ public static class JarDocuments
         {
             try
             {
-                return BinaryXml.ToText(bytes);
+                return BinaryXml.ToText(bytes, names);
             }
             catch (BinaryParseException ex)
             {
                 return $"Compiled XML that does not read: {ex.Message}";
+            }
+        }
+
+        if (ResourceTable.IsResourceTable(bytes))
+        {
+            try
+            {
+                return ResourceTable.Parse(bytes).ToText();
+            }
+            catch (BinaryParseException ex)
+            {
+                return $"A resource table that does not read: {ex.Message}";
             }
         }
 

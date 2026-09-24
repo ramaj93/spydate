@@ -209,6 +209,18 @@ public sealed class JvmReferences
             case DalvikIndex.MethodHandle when index >= 0 && index < dex.MethodHandles.Count && dex.MethodHandles[index].Method is { } handled:
                 Add(new JvmReference(type, member, instruction.Address, JvmReferenceKind.Handle, DexFile.InternalName(handled.Owner), handled.Name, handled.Proto.Descriptor, instruction.Mnemonic));
                 break;
+
+            // invoke-custom, as an invokedynamic: the methods its bootstrap arguments hand over — a lambda's body.
+            case DalvikIndex.CallSite when index >= 0 && index < dex.CallSites.Count:
+                foreach (var argument in dex.CallSites[index].Arguments)
+                {
+                    if (argument.Value is DexMethodHandle { Method: { } target })
+                    {
+                        Add(new JvmReference(type, member, instruction.Address, JvmReferenceKind.Handle, DexFile.InternalName(target.Owner), target.Name, target.Proto.Descriptor, instruction.Mnemonic));
+                    }
+                }
+
+                break;
         }
     }
 

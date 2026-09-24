@@ -56,6 +56,12 @@ constant pool resolved to Java names and local slots named — and cross-referen
 loads, and `annotate` names a class, method or field, saved by member rather than by address. The tools
 that need addresses (`list_functions`, `disassemble`, `read_data`, `patch`) say so and name these instead.
 
+An APK, or a DEX file on its own, opens the same way: its Dalvik classes are read as Java or, with
+`view="bytecode"`, as a smali-like listing. The screen adds the manifest (package, SDK levels, launcher,
+components, permissions), the resource table's size, and the native libraries by ABI. A library opens as
+the ELF it is by the same spelling `read_file` uses: `open_binary("app.apk!/lib/x86_64/libfoo.so")` takes
+it out to a cache folder and opens that copy, replacing the APK as any open does.
+
 `read_file` is the way past the one thing `open_binary` cannot do: it parses a PE or an ELF into an
 image, so a file that is neither — a resource, a `.inx`, an unknown container beside the binary — is a wall.
 `read_file` reads any file's raw bytes, a window of at most 4096 by offset, as a hex dump with an
@@ -63,7 +69,9 @@ ASCII column or decoded as UTF-8 or UTF-16, and reports the file's size so the w
 is bound by `--root` exactly as `open_binary` is, and reads more than PEs, so the root matters more
 with it than without. With a JAR open, `read_file("app.jar!/META-INF/MANIFEST.MF")` reads one file inside
 it — the JVM's own spelling — and `read_file("app.jar!/")` (or any folder ending in `/`) lists the files,
-a hundred at a time, with their sizes and compression.
+a hundred at a time, with their sizes and compression. In an APK, compiled XML (the manifest, `res/*.xml`)
+reads back as XML with references written by name (`@string/app_name`), and `resources.arsc` as a listing of
+every resource value; `as="hex"` gives their bytes instead.
 
 **Finding something worth reading** — `list_functions` · `find_symbol` · `list_imports` · `xrefs` ·
 `find_strings`

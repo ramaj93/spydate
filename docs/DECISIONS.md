@@ -1410,5 +1410,25 @@ fields reordered by the constructor's stores, final fields copied to locals, and
 APK, are read back as Java, compiled by javac and run against the originals (`JavacRoundTripTests`, skipped without
 a JDK or D8; `SPYDATE_D8` names another).
 
-**Not yet:** a bare `.dex` does not open on its own; a `.so` inside is listed with its ABI but not opened as an ELF;
-`resources.arsc` is listed, not read; `invoke-custom` and `invoke-polymorphic` are shown as comments.
+**A DEX file on its own is an `ApkImage` without a package** (`IsPackage` false, no `Archive`, format `Dex`, its
+fingerprint a hash of the file): the same classes, reading and tree, less the manifest, resources, libraries and
+entries. A file with the DEX magic that does not parse is refused as it opens, not when its first class is shown.
+
+**The resource table is read** (`ResourceTable`): packages, types, every entry in every configuration — 32- and 16-bit
+and sparse offset tables, Android 14's compact entries, bags for styles, arrays and plurals — with the configuration
+written as its resource-directory qualifiers (`fr-rCA-xhdpi-v21`). It has its own document, `read_file` decodes it,
+and its names are what compiled XML is now written with: `@string/app_name` rather than `@0x7F0F001E`. The
+framework's own ids (`@0x01030128`) stay numbers, since the framework's table is not in the package.
+
+**A native library opens as the ELF it is**, in a tab of its own (double-click it in the tree or the entries) and for
+the agent as `open_binary("app.apk!/lib/x86_64/libfoo.so")`. It is taken out to a file under
+`%TEMP%\Spydate\extracted\<zip directory hash>\` (`NestedFile`), so every analysis, project and tool works on it
+unchanged and the same library is the same path again; the entry's name is untrusted, and one that would climb out
+of that folder is refused rather than written.
+
+**`invoke-custom` is the `invokedynamic` it was**: a `JDynamic` built from the DEX call site as the JVM lifter builds
+one from `BootstrapMethods` — a lambda for LambdaMetafactory, a concatenation for StringConcatFactory, otherwise the
+bootstrap named. D8 only leaves them when told not to desugar, so the round trip runs a third D8 mode,
+`--no-desugaring`, which also keeps records extending `java.lang.Record` with ObjectMethods (read as records too).
+**`invoke-polymorphic`** is the call javac wrote with the call site's type; the emitter casts a signature-polymorphic
+call's result and any argument of another type, which `MethodHandle.invokeExact` and `VarHandle` need on either path.

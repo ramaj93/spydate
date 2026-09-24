@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Xml.Linq;
 using Spydate.Core.Android;
+using Spydate.Core.Archive;
 using Spydate.Core.Binary;
 using Spydate.Core.Readings;
 using Spydate.Decompiler.Jvm;
@@ -32,8 +33,8 @@ public sealed class ApkTests : IDisposable
         }
     }
 
-    /// <summary>The hand-built manifest and DEX file, and a native library for each of two ABIs.</summary>
-    private string WriteApk()
+    /// <summary>The hand-built manifest, DEX file and resource table, and a native library for each of two ABIs — the x86-64 one a real ELF.</summary>
+    private string WriteApk(params (string Name, byte[] Bytes)[] extra)
     {
         string path = Path.Combine(_directory, "app.apk");
         using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
@@ -46,8 +47,13 @@ public sealed class ApkTests : IDisposable
         Add(ApkImage.ManifestEntry, BinaryXmlTests.Manifest());
         Add("classes.dex", DexTests.GreeterDex());
         Add("lib/arm64-v8a/libnative.so", [0x7F, (byte)'E', (byte)'L', (byte)'F']);
-        Add("lib/x86_64/libnative.so", [0x7F, (byte)'E', (byte)'L', (byte)'F']);
-        Add("resources.arsc", [2, 0, 12, 0]);
+        Add("lib/x86_64/libnative.so", new SyntheticElf { Type = 3, Interpreter = null, Imports = ["puts"], Functions = [("native_hello", 0, 1)] }.Build());
+        Add(ApkImage.ResourceTableEntry, ResourceTableTests.Table());
+        foreach (var (name, bytes) in extra)
+        {
+            Add(name, bytes);
+        }
+
         return path;
     }
 
@@ -119,6 +125,95 @@ public sealed class ApkTests : IDisposable
         // What the Dalvik code names, as a class's bytecode does.
         Assert.Contains(reading.References.To("java/io/PrintStream", "println"), r => r.FromMember == greet);
         Assert.Contains(reading.References.Strings, s => s.Text == "hello" && s.Member == greet);
+    }
+
+    [Fact]
+    public void ItsResourceTableNamesWhatTheManifestAndTheResourcesReferTo()
+    {
+        string path = WriteApk();
+        var apk = Assert.IsType<ApkImage>(BinaryImage.Load(path));
+        Assert.Equal("string/app_name", apk.ResourceName(ResourceTableTests.AppName));
+        Assert.Equal(3, apk.Resources!.Entries.Count);
+
+        using var store = new SessionStore();
+        store.Set(BinarySession.Open(path, McpOptions.Default));
+        var session = new SessionTools(store, McpOptions.Default);
+        Assert.Contains("resources 3 values of 2 resources in 2 types", session.GetOverview(), StringComparison.Ordinal);
+        Assert.Contains("android:label=\"@string/app_name\"", session.ReadFile("app.apk!/AndroidManifest.xml"), StringComparison.Ordinal);
+
+        string table = session.ReadFile("app.apk!/resources.arsc");
+        Assert.Contains("resource table", table, StringComparison.Ordinal);
+        Assert.Contains("0x7F0E0000 style/Theme.Demo = parent @0x01030128", table, StringComparison.Ordinal);
+        Assert.Contains("0x0  02 00 0C 00", session.ReadFile("app.apk!/resources.arsc", @as: "hex"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADexFileOnItsOwnOpensAsTheAppsCodeWithoutItsPackage()
+    {
+        string path = Path.Combine(_directory, "classes.dex");
+        File.WriteAllBytes(path, DexTests.GreeterDex());
+
+        Assert.Equal(BinaryFormat.Dex, BinaryImage.Detect(path));
+        var dex = Assert.IsType<ApkImage>(BinaryImage.Load(path));
+        Assert.False(dex.IsPackage);
+        Assert.Null(dex.Archive);
+        Assert.Equal("DEX", BinaryImage.ContainerName(dex));
+        Assert.Empty(dex.Warnings);
+
+        var reading = new JvmReading(dex);
+        Assert.Equal("DEX file", reading.Noun);
+        Assert.Contains("public class Greeter implements Runnable", reading.Render(reading.FindType("com/example/Greeter")!, null, JvmReading.JavaView), StringComparison.Ordinal);
+
+        using var store = new SessionStore();
+        store.Set(BinarySession.Open(path, McpOptions.Default));
+        string overview = new SessionTools(store, McpOptions.Default).GetOverview();
+        Assert.Contains("DEX 035, 1 classes", overview, StringComparison.Ordinal);
+        Assert.DoesNotContain("manifest", overview, StringComparison.Ordinal);
+        Assert.Contains("out.println(\"hello\");", new CodeTools(store).ReadFunction("com.example.Greeter::greet"), StringComparison.Ordinal);
+
+        // A file that says it is DEX and is not one is refused as it opens.
+        string broken = Path.Combine(_directory, "broken.dex");
+        File.WriteAllBytes(broken, [.. "dex\n035\0"u8, .. new byte[40]]);
+        Assert.Throws<Spydate.Core.Dex.DexFormatException>(() => BinaryImage.Load(broken));
+    }
+
+    [Fact]
+    public void ANativeLibraryInsideIsTakenOutAndOpensAsTheElfItIs()
+    {
+        string path = WriteApk(("../escape.so", [1, 2, 3]));
+        var apk = ApkImage.Load(path);
+        string cache = Path.Combine(_directory, "cache");
+
+        Assert.True(NestedFile.TrySplit($"{path}!/lib/x86_64/libnative.so", out string archive, out string entry));
+        Assert.Equal((path, "lib/x86_64/libnative.so"), (archive, entry));
+        Assert.False(NestedFile.TrySplit(path, out _, out _));
+
+        string library = NestedFile.Extract(apk.Archive!, apk.Archive!.Find(entry)!, cache);
+        Assert.StartsWith(cache, library, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(Path.Combine("lib", "x86_64", "libnative.so"), library, StringComparison.Ordinal);
+        Assert.IsType<Spydate.Core.Elf.ElfImage>(BinaryImage.Load(library));
+        Assert.Equal(library, NestedFile.Extract(path, entry, cache));
+
+        // A name that would climb out of the archive's folder is refused, not written.
+        Assert.Throws<Spydate.Core.Archive.ArchiveException>(() => NestedFile.Extract(apk.Archive, apk.Archive.Find("../escape.so")!, cache));
+        Assert.False(File.Exists(Path.Combine(cache, "escape.so")));
+
+        // The agent opens it by the JVM's spelling, and reads it as the ELF it is.
+        using var store = new SessionStore();
+        var tools = new SessionTools(store, McpOptions.Default);
+        string opened = tools.OpenBinaryAsync($"{path}!/lib/x86_64/libnative.so").GetAwaiter().GetResult();
+        try
+        {
+            Assert.Contains("libnative.so", opened, StringComparison.Ordinal);
+            Assert.IsType<Spydate.Core.Elf.ElfImage>(store.Current!.Image);
+            Assert.Contains("no entry lib/none.so", tools.OpenBinaryAsync($"{path}!/lib/none.so").GetAwaiter().GetResult(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            string extracted = store.Current!.Path;
+            store.Dispose();
+            Directory.Delete(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(extracted)))!, recursive: true);
+        }
     }
 
     [Fact]

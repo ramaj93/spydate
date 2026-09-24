@@ -14,6 +14,9 @@ public enum BinaryFormat
     /// <summary>A zip-based Java archive. An APK is a zip too; <see cref="BinaryImage.Detect"/> tells them apart.</summary>
     Jar,
 
+    /// <summary>A Dalvik executable on its own: an Android app's code, as <c>d8</c> writes it, without its package.</summary>
+    Dex,
+
     /// <summary>An Android package: a zip holding <c>AndroidManifest.xml</c>, Dalvik bytecode and native libraries.</summary>
     Apk,
 }

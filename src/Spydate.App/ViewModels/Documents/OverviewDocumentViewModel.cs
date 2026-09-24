@@ -107,25 +107,36 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
         {
             FileName = apk.FileName;
             FilePath = apk.Path ?? "(memory)";
-            var files = apk.Archive.Entries.Where(e => !e.IsDirectory).ToList();
+            var files = apk.Archive?.Entries.Where(e => !e.IsDirectory).ToList() ?? [];
             var manifest = apk.Manifest;
-            Kind = apk.IsLibrary ? "Android package (APK), no launcher activity" : "Android app (APK)";
+            Kind = !apk.IsPackage ? "Android DEX file: an app's code without its package"
+                : apk.IsLibrary ? "Android package (APK), no launcher activity" : "Android app (APK)";
             General = new List<PropertyRow>
             {
                 new("File", apk.Path ?? "(memory)"),
                 new("Size", $"{apk.Length:N0} bytes"),
-                new("Entries", $"{files.Count:N0} files", $"{apk.DexFiles.Count} DEX file(s), {apk.NativeLibraries.Count} native libraries{(apk.HasResourceTable ? ", a resource table" : string.Empty)}"),
-                new("Package", manifest?.Package ?? "(no readable manifest)", manifest?.VersionName is { } versionName ? $"version {versionName} (code {manifest.VersionCode})" : null),
-                new("Launches", manifest?.MainActivity ?? "(none)", "the activity the launcher starts"),
-                new("Fingerprint", apk.Fingerprint, "a hash of the zip directory; the project file is matched on it"),
             };
+            if (apk.IsPackage)
+            {
+                General.Add(new("Entries", $"{files.Count:N0} files", $"{apk.DexFiles.Count} DEX file(s), {apk.NativeLibraries.Count} native libraries{(apk.HasResourceTable ? ", a resource table" : string.Empty)}"));
+                General.Add(new("Package", manifest?.Package ?? "(no readable manifest)", manifest?.VersionName is { } versionName ? $"version {versionName} (code {manifest.VersionCode})" : null));
+                General.Add(new("Launches", manifest?.MainActivity ?? "(none)", "the activity the launcher starts"));
+            }
+
+            if (apk.Resources is { } resources)
+            {
+                General.Add(new("Resources", $"{resources.Entries.Select(e => e.Id).Distinct().Count():N0} resources",
+                    $"{resources.Entries.Count:N0} values in {resources.Entries.Select(e => e.Type).Distinct(StringComparer.Ordinal).Count()} types"));
+            }
+
+            General.Add(new("Fingerprint", apk.Fingerprint, apk.IsPackage ? "a hash of the zip directory; the project file is matched on it" : "a hash of the file; the project file is matched on it"));
 
             ManagedTitle = "Android";
             Managed = new List<PropertyRow>();
             if (binary.Bytecode is { } reading)
             {
                 Managed.Add(new PropertyRow("App", reading.FullName));
-                Managed.Add(new PropertyRow("Needs", reading.Platform, $"target SDK {manifest?.TargetSdk ?? "?"}, compiled against {manifest?.CompileSdk ?? "?"}"));
+                Managed.Add(new PropertyRow("Needs", reading.Platform, manifest is null ? "what its DEX version needs; there is no manifest to say more" : $"target SDK {manifest.TargetSdk ?? "?"}, compiled against {manifest.CompileSdk ?? "?"}"));
                 Managed.Add(new PropertyRow("Code", $"{apk.Classes.Count:N0} classes", $"{reading.Namespaces.Count} packages, {reading.FormatVersion}"));
                 if (reading.EntryPoint is { } main)
                 {
@@ -146,7 +157,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             VersionTitle = "Permissions";
             Version = manifest?.Permissions.Select(p => new PropertyRow("uses-permission", p)).ToList() ?? new List<PropertyRow>();
             Security = new List<PropertyRow>();
-            Signature = apk.Archive.Entries
+            Signature = (apk.Archive?.Entries ?? [])
                 .Where(e => e.Name.StartsWith("META-INF/", StringComparison.OrdinalIgnoreCase)
                             && (e.Name.EndsWith(".SF", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".RSA", StringComparison.OrdinalIgnoreCase)
                                 || e.Name.EndsWith(".DSA", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".EC", StringComparison.OrdinalIgnoreCase)))

@@ -64,7 +64,7 @@ public sealed class BinaryXmlTests
         return Chunk(0x0102, 16, [.. Node(), .. ext]);
     }
 
-    private static byte[] StringPool(string[] strings)
+    internal static byte[] StringPool(string[] strings)
     {
         var offsets = new List<byte>();
         var data = new List<byte>();
@@ -92,12 +92,12 @@ public sealed class BinaryXmlTests
 
     private static byte[] Node() => [.. U4(1), .. U4(0xFFFFFFFF)];
 
-    private static byte[] Chunk(ushort type, ushort headerSize, byte[] rest)
+    internal static byte[] Chunk(ushort type, ushort headerSize, byte[] rest)
         => [.. U2(type), .. U2(headerSize), .. U4((uint)(8 + rest.Length)), .. rest];
 
-    private static byte[] U2(int v) => BitConverter.GetBytes((ushort)v);
+    internal static byte[] U2(int v) => BitConverter.GetBytes((ushort)v);
 
-    private static byte[] U4(uint v) => BitConverter.GetBytes(v);
+    internal static byte[] U4(uint v) => BitConverter.GetBytes(v);
 
     [Fact]
     public void AManifestReadsBackWithItsTypedValues()

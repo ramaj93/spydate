@@ -29,7 +29,7 @@ public sealed class SessionTools
     }
 
     [McpServerTool(Name = "open_binary")]
-    [Description("Open a PE (exe/dll/sys), ELF (Linux program or .so) or JAR for analysis and return an orientation summary. Replaces whatever was open. Run this first.")]
+    [Description("Open a PE, ELF (program or .so), JAR, APK or DEX and return an orientation summary; \"x.apk!/lib/<abi>/y.so\" opens a library inside. Replaces what was open. Run this first.")]
     public async Task<string> OpenBinaryAsync(
         [Description("Full path to the file, e.g. C:\\\\Windows\\\\System32\\\\notepad.exe")] string path,
         CancellationToken cancellationToken = default)
@@ -39,14 +39,30 @@ public sealed class SessionTools
             return "give a path to a binary to open";
         }
 
-        if (!_options.Allows(path))
+        // app.apk!/lib/x86_64/libfoo.so: the library taken out of the package, then opened as the file it is. The copy is
+        // outside --root, but it came from a file inside it.
+        bool nested = NestedFile.TrySplit(path, out string archivePath, out string entryName);
+        string checkedPath = nested ? archivePath : path;
+        if (!_options.Allows(checkedPath))
         {
             return $"this server was started with --root {_options.Root} and will not open files outside it";
         }
 
-        if (!File.Exists(path))
+        if (!File.Exists(checkedPath))
         {
-            return $"there is no file at {path}";
+            return $"there is no file at {checkedPath}";
+        }
+
+        if (nested)
+        {
+            try
+            {
+                path = NestedFile.Extract(archivePath, entryName);
+            }
+            catch (BinaryParseException ex)
+            {
+                return $"{entryName} could not be taken out of {Path.GetFileName(archivePath)}: {ex.Message}";
+            }
         }
 
         try
@@ -209,23 +225,25 @@ public sealed class SessionTools
             return ex.Message;
         }
 
-        // An APK's manifest and resource XML are compiled: read as the XML they were, unless bytes are asked for.
-        if (@as != "hex" && BinaryXml.IsBinaryXml(bytes))
+        // An APK's manifest and resource XML are compiled, and its resource table is binary: read as the text they
+        // stand for — references by name — unless bytes are asked for.
+        bool xml = BinaryXml.IsBinaryXml(bytes);
+        if (@as != "hex" && (xml || ResourceTable.IsResourceTable(bytes)))
         {
-            string xml;
+            string text;
             try
             {
-                xml = BinaryXml.ToText(bytes);
+                text = xml ? BinaryXml.ToText(bytes, jar.Names) : ResourceTable.Parse(bytes).ToText();
             }
             catch (BinaryParseException ex)
             {
-                return $"{jar.FileName}!/{name}: compiled XML that does not read: {ex.Message}";
+                return $"{jar.FileName}!/{name}: {(xml ? "compiled XML" : "a resource table")} that does not read: {ex.Message}";
             }
 
-            int from = (int)Math.Clamp(offset, 0, xml.Length);
-            int count = Math.Min(Math.Clamp(length, 1, 16384), xml.Length - from);
-            return Budget.Clip($"{jar.FileName}!/{name}: compiled XML ({bytes.Length} bytes), decoded to {xml.Length} characters; showing {count} from {from}"
-                               + (from + count < xml.Length ? " (more follows)" : string.Empty) + "\n" + xml.Substring(from, count));
+            int from = (int)Math.Clamp(offset, 0, text.Length);
+            int count = Math.Min(Math.Clamp(length, 1, 16384), text.Length - from);
+            return Budget.Clip($"{jar.FileName}!/{name}: {(xml ? "compiled XML" : "resource table")} ({bytes.Length} bytes), decoded to {text.Length} characters; showing {count} from {from}"
+                               + (from + count < text.Length ? " (more follows)" : string.Empty) + "\n" + text.Substring(from, count));
         }
 
         offset = Math.Clamp(offset, 0, bytes.Length);
@@ -254,8 +272,11 @@ public sealed class SessionTools
     {
         JarImage jar => $"{jar.FileName} is a Java archive: its code is JVM bytecode, with no addresses or machine code. "
                         + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the bytecode), and list its files with read_file(\"" + jar.FileName + "!/\")",
+        ApkImage { IsPackage: false } dex => $"{dex.FileName} is an Android DEX file: its code is Dalvik bytecode, with no addresses or machine code. "
+                        + "Browse it with find_symbol and read it as Java with read_function (view=\"bytecode\" for the Dalvik code)",
         ApkImage apk => $"{apk.FileName} is an Android package: its code is Dalvik bytecode, with no addresses or machine code. "
-                        + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the Dalvik code), and list its files with read_file(\"" + apk.FileName + "!/\")",
+                        + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the Dalvik code), and list its files with read_file(\"" + apk.FileName + "!/\")"
+                        + (apk.NativeLibraries.Count > 0 ? $"; its native code is in libraries open_binary opens as \"{apk.FileName}!/{apk.NativeLibraries[0].Entry.Name}\"" : string.Empty),
         _ => $"{session.MachineName} is not a machine this disassembles",
     };
 
@@ -263,11 +284,12 @@ public sealed class SessionTools
     private static ArchiveView? OpenArchive(IBinaryImage image) => image switch
     {
         JarImage jar => new ArchiveView(jar.FileName, jar.Archive),
-        ApkImage apk => new ArchiveView(apk.FileName, apk.Archive),
+        ApkImage { Archive: { } archive } apk => new ArchiveView(apk.FileName, archive, apk.ResourceName),
         _ => null,
     };
 
-    private sealed record ArchiveView(string FileName, ZipArchiveFile Archive);
+    /// <summary>An archive, and for an APK the names its resource table gives references in its compiled XML.</summary>
+    private sealed record ArchiveView(string FileName, ZipArchiveFile Archive, Func<uint, string?>? Names = null);
 
     /// <summary>Width of the label column, wide enough for the longest label with a gap after it.</summary>
     private const int LabelWidth = 10;
@@ -510,9 +532,22 @@ public sealed class SessionTools
         var sb = new StringBuilder();
         Line(sb, opened ? "opened" : "open", apk.FileName);
         Line(sb, "path", session.Path);
-        var files = apk.Archive.Entries.Where(e => !e.IsDirectory).ToList();
-        Line(sb, "format", $"APK (zip), {files.Count} files: {apk.DexFiles.Count} DEX file(s) with {apk.Classes.Count} classes, "
-                           + $"{apk.NativeLibraries.Count} native libraries, {(apk.HasResourceTable ? "a resource table" : "no resource table")}, {Size(apk.Length)}");
+        if (apk.Archive is not { } archive)
+        {
+            Line(sb, "format", $"DEX {apk.DexVersion:D3}, {apk.Classes.Count} classes, {Size(apk.Length)} - an Android app's code without its package");
+        }
+        else
+        {
+            var files = archive.Entries.Where(e => !e.IsDirectory).ToList();
+            Line(sb, "format", $"APK (zip), {files.Count} files: {apk.DexFiles.Count} DEX file(s) with {apk.Classes.Count} classes, "
+                               + $"{apk.NativeLibraries.Count} native libraries, {(apk.HasResourceTable ? "a resource table" : "no resource table")}, {Size(apk.Length)}");
+        }
+
+        if (apk.Resources is { } resources)
+        {
+            Line(sb, "resources", $"{resources.Entries.Count} values of {resources.Entries.Select(e => e.Id).Distinct().Count()} resources in "
+                                  + $"{resources.Entries.Select(e => e.Type).Distinct(StringComparer.Ordinal).Count()} types (read_file(\"{apk.FileName}!/{ApkImage.ResourceTableEntry}\"))");
+        }
 
         if (apk.Manifest is { } manifest)
         {
@@ -535,25 +570,27 @@ public sealed class SessionTools
                 + $" ({manifest.Components.Count(c => c.Exported)} exported)");
             Line(sb, "permissions", manifest.Permissions.Count == 0 ? "none" : string.Join(", ", manifest.Permissions.Take(8)) + (manifest.Permissions.Count > 8 ? $", +{manifest.Permissions.Count - 8} more" : string.Empty));
         }
-        else
+        else if (apk.IsPackage)
         {
             Line(sb, "manifest", "none readable");
         }
 
         if (apk.Abis.Count > 0)
         {
-            Line(sb, "native", $"{string.Join(", ", apk.Abis)}: {string.Join(", ", apk.NativeLibraries.Select(l => l.Name).Distinct(StringComparer.Ordinal).Take(6))}");
+            Line(sb, "native", $"{string.Join(", ", apk.Abis)}: {string.Join(", ", apk.NativeLibraries.Select(l => l.Name).Distinct(StringComparer.Ordinal).Take(6))}"
+                               + $" - open_binary(\"{session.Path}!/{apk.NativeLibraries[0].Entry.Name}\") opens one as the ELF it is");
         }
 
         Bytecode(sb, session);
         Line(sb, "project", Project(session) + ((session.MemberAnnotations?.Count ?? 0) > 0 ? " (list_annotations)" : string.Empty));
-        Line(sb, "debug", "not available - the debugger runs Windows programs; this package is read, not run");
+        Line(sb, "debug", $"not available - the debugger runs Windows programs; this {(apk.IsPackage ? "package" : "DEX file")} is read, not run");
         if (apk.Warnings.Count > 0)
         {
             Line(sb, "warnings", string.Join("; ", apk.Warnings.Take(3)) + (apk.Warnings.Count > 3 ? $"; +{apk.Warnings.Count - 3} more" : string.Empty));
         }
 
-        Line(sb, "next", $"find_symbol(query=...) | read_function(target=\"package.Class\") | read_function(target=\"Class::method\", view=\"bytecode\") | read_file(\"{apk.FileName}!/AndroidManifest.xml\") | read_file(\"{apk.FileName}!/\")");
+        Line(sb, "next", $"find_symbol(query=...) | read_function(target=\"package.Class\") | read_function(target=\"Class::method\", view=\"bytecode\")"
+                         + (apk.IsPackage ? $" | read_file(\"{apk.FileName}!/AndroidManifest.xml\") | read_file(\"{apk.FileName}!/\")" : string.Empty));
         Notes(sb, session);
         return Budget.Clip(sb.ToString());
     }

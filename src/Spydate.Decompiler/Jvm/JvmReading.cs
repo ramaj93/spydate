@@ -222,7 +222,7 @@ public sealed class JvmReading : IBytecodeReading
     {
         Apk = apk;
         Kind = BytecodeKind.Dalvik;
-        Noun = "package";
+        Noun = apk.IsPackage ? "package" : "DEX file";
         string? minSdk = apk.Manifest?.MinSdk;
         Platform = minSdk is null ? (apk.DexFiles.Count == 0 ? "no code" : apk.DexFiles[0].File.AndroidVersion) : $"Android API {minSdk}+";
         FormatVersion = apk.DexVersion == 0 ? "-" : string.Create(CultureInfo.InvariantCulture, $"DEX {apk.DexVersion:D3}");

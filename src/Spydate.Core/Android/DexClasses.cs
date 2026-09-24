@@ -64,6 +64,13 @@ public static class DexClasses
             methods = methods.Where(m => !helpers.Contains(m.Name)
                 && !(m.Name is "equals" or "hashCode" or "toString" && ((m.Access & JvmAccess.Final) != 0 || CallsAny(definition, m, helpers)))).ToList();
         }
+        else if (super == "java/lang/Record")
+        {
+            // Not desugared: a record still, but DEX has no Record attribute. Its instance fields are its components,
+            // and the equals, hashCode and toString javac left to ObjectMethods are Java's own again.
+            components = definition.InstanceFields.Select(f => new RecordComponent(f.Ref.Name, f.Ref.Type, SignatureOf(f.Annotations))).ToList();
+            methods = methods.Where(m => !(m.Name is "equals" or "hashCode" or "toString" && CallsObjectMethods(definition, m))).ToList();
+        }
 
         return ClassFile.Create(
             definition.Name,
@@ -115,6 +122,14 @@ public static class DexClasses
         }
 
         return [.. ByStores(definition.StaticFields, "<clinit>", true), .. ByStores(definition.InstanceFields, "<init>", false)];
+    }
+
+    /// <summary>Whether a method's code is a call site bootstrapped by <c>ObjectMethods</c>, as a record's generated methods are.</summary>
+    private static bool CallsObjectMethods(DexClass definition, JvmMethod method)
+    {
+        var code = definition.Methods.FirstOrDefault(m => m.Ref.Name == method.Name && m.Ref.Proto.Descriptor == method.Descriptor)?.Code;
+        return code?.File is { } file && Dalvik.Decode(code.Insns.Span).Any(i => i.IndexKind == DalvikIndex.CallSite && i.Index >= 0
+            && i.Index < file.CallSites.Count && file.CallSites[i.Index].Bootstrap?.Method?.Owner == "Ljava/lang/runtime/ObjectMethods;");
     }
 
     /// <summary>Whether a method's code calls one of the named methods of its own class.</summary>

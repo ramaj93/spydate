@@ -1023,6 +1023,9 @@ internal sealed partial class JavaEmitter
         JField field => (FieldText(field), Precedence.Primary),
         JArrayElement element => ($"{Expr(element.Array, Precedence.Primary)}[{Expr(element.Index)}]", Precedence.Primary),
         JArrayLength length => ($"{Expr(length.Array, Precedence.Primary)}.length", Precedence.Primary),
+        // A signature-polymorphic call returns what the call site says only when a cast says it: without one, javac
+        // takes it for the declared Object and looks for a different method.
+        JCall call when PolymorphicResult(call) is { } result => ($"({CastTypeText(result)}) {CallText(call)}", Precedence.Cast),
         JCall call => (CallText(call), Precedence.Primary),
         JNew created => (Created(created, null), Precedence.Primary),
         JUninitialized fresh => ($"new {_naming.ClassName(fresh.Owner)} /* not yet constructed */", Precedence.Primary),
@@ -1169,6 +1172,33 @@ internal sealed partial class JavaEmitter
             : $"{Expr(field.Instance, Precedence.Primary)}.{name}";
     }
 
+    /// <summary>
+    /// The methods the JVM calls with the call site's own type (JLS §15.12.3): <c>MethodHandle.invoke</c> and
+    /// <c>invokeExact</c>, and <c>VarHandle</c>'s access modes.
+    /// </summary>
+    private static bool IsSignaturePolymorphic(string owner, string name) => owner switch
+    {
+        "java/lang/invoke/MethodHandle" => name is "invoke" or "invokeExact",
+        "java/lang/invoke/VarHandle" => name is "get" or "set" or "getVolatile" or "setVolatile" or "getAcquire" or "setRelease"
+            or "getOpaque" or "setOpaque" or "compareAndSet" or "compareAndExchange" or "compareAndExchangeAcquire"
+            or "compareAndExchangeRelease" or "weakCompareAndSetPlain" or "weakCompareAndSet" or "weakCompareAndSetAcquire"
+            or "weakCompareAndSetRelease" or "getAndSet" or "getAndSetAcquire" or "getAndSetRelease" or "getAndAdd"
+            or "getAndAddAcquire" or "getAndAddRelease" or "getAndBitwiseOr" or "getAndBitwiseOrAcquire" or "getAndBitwiseOrRelease"
+            or "getAndBitwiseAnd" or "getAndBitwiseAndAcquire" or "getAndBitwiseAndRelease" or "getAndBitwiseXor"
+            or "getAndBitwiseXorAcquire" or "getAndBitwiseXorRelease",
+        _ => false,
+    };
+
+    /// <summary>
+    /// The cast a signature-polymorphic call's value needs: its call site's return type, unless that is what the method
+    /// declares anyway — Object, void, or the boolean of VarHandle's compare-and-set.
+    /// </summary>
+    private static string? PolymorphicResult(JCall call)
+        => IsSignaturePolymorphic(call.Owner, call.Name) && JCall.ReturnType(call.Descriptor) is { } result
+           && result is not ("V" or "Ljava/lang/Object;") && !(result == "Z" && call.Owner == "java/lang/invoke/VarHandle")
+            ? result
+            : null;
+
     private string CallText(JCall call)
     {
         if (_naming.Scope?.Accessor(call) is { } accessed)
@@ -1200,6 +1230,20 @@ internal sealed partial class JavaEmitter
     private string Arguments(IReadOnlyList<JExpr> args, string descriptor, string owner, string name)
     {
         var parameters = Descriptors.ParameterDescriptors(descriptor);
+
+        // A signature-polymorphic call's type is made from its arguments' types: each one of another type, or null,
+        // is cast to what the call site had.
+        if (IsSignaturePolymorphic(owner, name))
+        {
+            return string.Join(", ", args.Select((a, i) =>
+            {
+                string? parameter = i < parameters.Count ? parameters[i] : null;
+                var argument = Argument(a, parameter);
+                return parameter is not null && (argument is JConst { Value: null } || argument is JExpr { Type: { } type } && type != parameter)
+                    ? $"({CastTypeText(parameter)}) {Expr(argument, Precedence.Unary)}"
+                    : Expr(argument, Precedence.Assignment + 1);
+            }));
+        }
 
         // A varargs call given nothing for its varargs: javac passes an empty array, the source passed nothing — unless
         // a method without that last parameter would then be the one called.
