@@ -8,6 +8,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Spydate.App.Services;
 using Spydate.App.ViewModels.Documents;
+using Spydate.Core.Android;
 using Spydate.Core.Archive;
 using Spydate.Core.Binary;
 using Spydate.Core.Elf;
@@ -249,7 +250,7 @@ public sealed partial class FileViewModel : ObservableObject
             Warnings.Add($"Managed decompiler could not load the assembly: {managedError}");
         }
 
-        if (Binary.Analysis is null && !Binary.IsManaged && Binary.Image is not JarImage)
+        if (Binary.Analysis is null && !Binary.IsManaged && Binary.Image is not (JarImage or ApkImage))
         {
             Warnings.Add($"Machine type {Binary.MachineName} is not supported by the native disassembler (x86/x64 only).");
         }
@@ -264,6 +265,14 @@ public sealed partial class FileViewModel : ObservableObject
         else if (Binary.Image is JarImage jar)
         {
             Log($"{jar.Classes.Count:N0} classes in {Binary.Bytecode?.Namespaces.Count ?? 0} packages; nothing in a JAR has an address, so there are no functions to discover.");
+        }
+        else if (Binary.Image is ApkImage apk)
+        {
+            Log($"{apk.Classes.Count:N0} classes in {Binary.Bytecode?.Namespaces.Count ?? 0} packages from {apk.DexFiles.Count} DEX file(s); nothing in an APK's code has an address, so there are no functions to discover.");
+            foreach (string warning in apk.Warnings.Take(20))
+            {
+                Warnings.Add(warning);
+            }
         }
         else if (Binary.Analysis?.Pdb is { } pdb)
         {
@@ -307,6 +316,10 @@ public sealed partial class FileViewModel : ObservableObject
         else if (Binary.Image is JarImage)
         {
             AnalysisText = "Java · bytecode";
+        }
+        else if (Binary.Image is ApkImage)
+        {
+            AnalysisText = "Android · Dalvik bytecode";
         }
         else
         {
@@ -1762,6 +1775,13 @@ public sealed partial class FileViewModel : ObservableObject
             StringsTarget when b.Bytecode is JvmReading jvm => Find("strings") ?? JarDocuments.Strings(jvm, (type, member) => OpenTarget(new ReadingTarget(type, member))),
             StringsTarget => Find("strings") ?? new StringsDocumentViewModel(b.Image, b.Analysis, offset => OpenTarget(new HexTarget(offset))),
             EntriesTarget when b.Image is JarImage jar => Find("entries") ?? JarDocuments.Entries(jar, OpenEntry),
+            EntriesTarget when b.Image is ApkImage apk => Find("entries") ?? JarDocuments.Entries(apk.Archive, OpenEntry),
+            ArchiveEntryTarget entry when b.Image is ApkImage apk && apk.Archive.Find(entry.Name) is { } found => Find($"entry:{entry.Name}") ?? CodeDocumentViewModel.ForText(
+                $"entry:{entry.Name}",
+                entry.Name[(entry.Name.LastIndexOf('/') + 1)..],
+                SymbolRegular.Document24,
+                entry.Name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ? HighlightingService.Xml : HighlightingService.Plain,
+                JarDocuments.Contents(apk.Archive, found)),
             ArchiveEntryTarget entry when b.Image is JarImage jar && jar.Archive.Find(entry.Name) is { } found => Find($"entry:{entry.Name}") ?? CodeDocumentViewModel.ForText(
                 $"entry:{entry.Name}",
                 entry.Name[(entry.Name.LastIndexOf('/') + 1)..],

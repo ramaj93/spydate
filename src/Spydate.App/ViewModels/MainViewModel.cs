@@ -49,7 +49,7 @@ public sealed partial class MainViewModel : ObservableObject, IShell
         AssistantProvider = assistantProvider;
         Files.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasFiles));
         RefreshRecent(RecentFiles.Load());
-        Log("Spydate started. Open a PE, ELF or JAR to begin (Ctrl+O).");
+        Log("Spydate started. Open a PE, ELF, JAR or APK to begin (Ctrl+O).");
     }
 
     /// <summary>
@@ -278,7 +278,12 @@ public sealed partial class MainViewModel : ObservableObject, IShell
             var opened = await _workspace.OpenAsync(path).ConfigureAwait(true);
 
             var image = opened.Image;
-            if (image is Core.Jvm.JarImage jar)
+            if (image is Core.Android.ApkImage apk)
+            {
+                StatusText = $"{opened.DisplayName}  ·  APK  ·  {opened.Bytecode?.Platform}  ·  {apk.Classes.Count:N0} classes";
+                Log($"Loaded {opened.DisplayName}: APK, {image.Length:N0} bytes, {apk.Archive.Entries.Count:N0} entries, {apk.DexFiles.Count} DEX file(s), {apk.Classes.Count:N0} classes, needs {opened.Bytecode?.Platform}.");
+            }
+            else if (image is Core.Jvm.JarImage jar)
             {
                 // An archive has no sections or imports to count; its classes and files are what it holds.
                 StatusText = $"{opened.DisplayName}  ·  JAR  ·  {opened.Bytecode?.Platform}  ·  {jar.Classes.Count:N0} classes";

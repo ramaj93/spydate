@@ -1,5 +1,6 @@
 using System.Globalization;
 using Spydate.App.Services;
+using Spydate.Core.Android;
 using Spydate.Core.Binary;
 using Spydate.Core.Elf;
 using Spydate.Core.Jvm;
@@ -99,6 +100,62 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
 
             Debug = new List<PropertyRow>();
             Warnings = jar.Warnings.ToList();
+            return;
+        }
+
+        if (binary.Image is ApkImage apk)
+        {
+            FileName = apk.FileName;
+            FilePath = apk.Path ?? "(memory)";
+            var files = apk.Archive.Entries.Where(e => !e.IsDirectory).ToList();
+            var manifest = apk.Manifest;
+            Kind = apk.IsLibrary ? "Android package (APK), no launcher activity" : "Android app (APK)";
+            General = new List<PropertyRow>
+            {
+                new("File", apk.Path ?? "(memory)"),
+                new("Size", $"{apk.Length:N0} bytes"),
+                new("Entries", $"{files.Count:N0} files", $"{apk.DexFiles.Count} DEX file(s), {apk.NativeLibraries.Count} native libraries{(apk.HasResourceTable ? ", a resource table" : string.Empty)}"),
+                new("Package", manifest?.Package ?? "(no readable manifest)", manifest?.VersionName is { } versionName ? $"version {versionName} (code {manifest.VersionCode})" : null),
+                new("Launches", manifest?.MainActivity ?? "(none)", "the activity the launcher starts"),
+                new("Fingerprint", apk.Fingerprint, "a hash of the zip directory; the project file is matched on it"),
+            };
+
+            ManagedTitle = "Android";
+            Managed = new List<PropertyRow>();
+            if (binary.Bytecode is { } reading)
+            {
+                Managed.Add(new PropertyRow("App", reading.FullName));
+                Managed.Add(new PropertyRow("Needs", reading.Platform, $"target SDK {manifest?.TargetSdk ?? "?"}, compiled against {manifest?.CompileSdk ?? "?"}"));
+                Managed.Add(new PropertyRow("Code", $"{apk.Classes.Count:N0} classes", $"{reading.Namespaces.Count} packages, {reading.FormatVersion}"));
+                if (reading.EntryPoint is { } main)
+                {
+                    Managed.Add(new PropertyRow("Entry point", main.Signature));
+                }
+            }
+
+            if (manifest is not null)
+            {
+                Managed.Add(new PropertyRow("Debuggable", manifest.Debuggable ? "yes" : "no", manifest.Debuggable ? "android:debuggable is set: anyone can attach a debugger" : null));
+                foreach (var group in manifest.Components.GroupBy(c => c.Kind))
+                {
+                    Managed.Add(new PropertyRow(char.ToUpperInvariant(group.Key[0]) + group.Key[1..] + "s", group.Count().ToString(CultureInfo.InvariantCulture),
+                        string.Join(", ", group.Where(c => c.Exported).Select(c => c.Name.Split('.')[^1] + " (exported)").Take(4))));
+                }
+            }
+
+            VersionTitle = "Permissions";
+            Version = manifest?.Permissions.Select(p => new PropertyRow("uses-permission", p)).ToList() ?? new List<PropertyRow>();
+            Security = new List<PropertyRow>();
+            Signature = apk.Archive.Entries
+                .Where(e => e.Name.StartsWith("META-INF/", StringComparison.OrdinalIgnoreCase)
+                            && (e.Name.EndsWith(".SF", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".RSA", StringComparison.OrdinalIgnoreCase)
+                                || e.Name.EndsWith(".DSA", StringComparison.OrdinalIgnoreCase) || e.Name.EndsWith(".EC", StringComparison.OrdinalIgnoreCase)))
+                .Select(e => new PropertyRow("Signature file", e.Name, "a v1 (JAR) signature; listed, not verified — newer APKs sign in a block this does not read"))
+                .ToList();
+            BuildTitle = "Native libraries";
+            Build = apk.NativeLibraries.Select(l => new PropertyRow(l.Abi, l.Name, $"{l.Entry.Size:N0} bytes")).ToList();
+            Debug = new List<PropertyRow>();
+            Warnings = apk.Warnings.ToList();
             return;
         }
 
@@ -243,7 +300,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 Managed.Add(new PropertyRow("Decompiler", $"failed to load: {err}"));
             }
         }
-        else if (binary.Bytecode is Decompiler.Jvm.JvmReading { Jar: var embedded } java)
+        else if (binary.Bytecode is Decompiler.Jvm.JvmReading { Jar: { } embedded } java)
         {
             // A launcher: the native code only starts a JVM, and the program is the JAR appended to it.
             Kind = $"Java application in a native launcher ({ArchitectureName(pe)})";

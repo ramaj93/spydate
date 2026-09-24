@@ -182,6 +182,17 @@ into `JvmInstruction`s and reports bad code as a last instruction with a `Proble
 `bytecode` (rendered by `BytecodeListing`) — and `JvmReferences` — every reference and string constant, indexed
 once, which `xrefs`, `list_imports` and `find_strings` answer from. See DECISIONS, "A JAR is parsed in-house".
 
+### 3.1e `ApkImage`, `DexFile` and `DexClasses`
+
+An Android package, in `Spydate.Core/Android` and `Spydate.Core/Dex`. `ApkImage : IBinaryImage` is a JAR's
+shape — the zip, no address space, the zip directory's hash as fingerprint — with the decoded `ApkManifest`,
+`DexFiles` in multidex order, `Classes` and `NativeLibraries` by ABI. `DexFile` parses one DEX through the
+bounds-checked `DexReader`; `Dalvik.Decode` decodes code. `BinaryXml` turns compiled XML back into text.
+`DexClasses.ToClassFile` presents a DEX class as a `ClassFile`, its system annotations as attributes, so
+`JvmReading` (built from an `ApkImage`, `Kind = Dalvik`) and the Java decompiler read it as they read a JAR's; a
+method's `JvmMethod.Dalvik` code is listed by `DalvikListing` and lifted by `DalvikLifter`. See DECISIONS, "An APK
+is read in-house".
+
 ### 3.2 `StringScanner`
 
 Finds printable ASCII and UTF-16LE runs in the raw file bytes (so the overlay is

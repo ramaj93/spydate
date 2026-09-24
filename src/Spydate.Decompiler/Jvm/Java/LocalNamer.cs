@@ -100,6 +100,23 @@ internal sealed class LocalNamer
     /// </summary>
     public bool IsUntabled(string name) => _untabledNames.Contains(name);
 
+    /// <summary>
+    /// A new local no table describes, under a name nothing else uses: a variable a lifter told apart itself, which
+    /// folds and splits like any untabled one.
+    /// </summary>
+    public JLocal Untabled(string name, string? type)
+    {
+        string unique = name;
+        for (int i = 2; _byName.ContainsKey(unique) || _declared.ContainsKey(unique) || unique == "this"; i++)
+        {
+            unique = $"{name}_{i}";
+        }
+
+        var local = Local(unique, type);
+        _untabledNames.Add(local.Name);
+        return local;
+    }
+
     /// <summary>A new local for another variable that shared a slot with <paramref name="name"/>: <c>var3_2</c>.</summary>
     public JLocal Split(string name, string? type)
     {
@@ -143,9 +160,12 @@ internal sealed class LocalNamer
 
     private JLocal Resolve(int slot, string kind, int pc, string? valueType)
     {
-        // A parameter's slot holds the parameter until the table says another variable took it over.
-        var entry = Entry(slot, pc);
-        if (entry is null && _parameterSlots.TryGetValue(slot, out var parameter) && !Reassigned(slot))
+        // A parameter's slot holds the parameter until the table says another variable took it over. A table entry
+        // of another kind of value — a reference where an int is stored — is not this variable: D8's debug tables keep
+        // a variable live a little past the register's reuse.
+        var entry = Entry(slot, pc, kind);
+
+        if (entry is null && _parameterSlots.TryGetValue(slot, out var parameter) && !Reassigned(slot) && Category(parameter.Type ?? "I") == Category(kind))
         {
             return parameter;
         }
@@ -184,6 +204,16 @@ internal sealed class LocalNamer
         return Local(name, type);
     }
 
+    /// <summary>A type's kind of value: a reference, a long, a double, a float, or a 32-bit integer (int, boolean, char, byte, short).</summary>
+    private static char Category(string type) => type[0] switch
+    {
+        'L' or '[' => 'a',
+        'J' => 'j',
+        'D' => 'd',
+        'F' => 'f',
+        _ => 'i',
+    };
+
     private JLocal Local(string name, string? type)
     {
         if (!_byName.TryGetValue(name, out var local))
@@ -196,12 +226,16 @@ internal sealed class LocalNamer
         return local;
     }
 
-    /// <summary>The table's entry for a slot at a point, when the class kept one.</summary>
-    private LocalVariable? Entry(int slot, int pc)
+    /// <summary>
+    /// The table's entry for a slot at a point, when the class kept one, of the kind of value <paramref name="kind"/>
+    /// is: where two ranges meet at the point — one variable ending as the next starts in the same register — the
+    /// one holding that kind of value is the one meant.
+    /// </summary>
+    private LocalVariable? Entry(int slot, int pc, string kind)
     {
         foreach (var local in _code.Locals)
         {
-            if (local.Slot == slot && pc >= local.StartPc && pc <= local.StartPc + local.Length)
+            if (local.Slot == slot && pc >= local.StartPc && pc <= local.StartPc + local.Length && Category(local.Descriptor) == Category(kind))
             {
                 return local;
             }

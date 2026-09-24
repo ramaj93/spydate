@@ -1,4 +1,5 @@
 using System.IO;
+using Spydate.Core.Android;
 using Spydate.Core.Binary;
 using Spydate.Core.Jvm;
 using Spydate.Core.PE;
@@ -289,14 +290,14 @@ public sealed class WorkspaceService : IDisposable
     {
         var image = BinaryImage.Load(path);
 
-        // A JAR is only bytecode: no native analysis, annotations keyed by member. Its classes are parsed here,
-        // off the UI thread, where the rest of opening happens.
-        if (image is JarImage jar)
+        // A JAR or an APK is only bytecode: no native analysis, annotations keyed by member. Its classes are parsed
+        // here, off the UI thread, where the rest of opening happens.
+        if (image is JarImage or ApkImage)
         {
             var members = new MemberAnnotationStore();
             var jarNotes = new NoteStore();
             var jarProject = SpydateProject.LoadFor(image, new AnnotationStore(), notes: jarNotes, members: members);
-            var reading = new JvmReading(jar, members);
+            var reading = image is JarImage jar ? new JvmReading(jar, members) : new JvmReading((ApkImage)image, members);
 
             // Every reference and string in the archive, which the Strings document asks for on the UI thread:
             // decoded now, in the background, so a large JAR's first look at its strings does not stall the window.

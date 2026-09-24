@@ -530,9 +530,10 @@ public sealed class ElfTests : IDisposable
     }
 
     [Fact]
-    public async Task AnApkIsStillNamedAndPointedAtReadFile()
+    public async Task AnApkOpensForAnAgentToo()
     {
-        // A JAR opens now (JarTests); an APK is the recognised format that is still refused by name.
+        // A JAR opens (JarTests), and so does an APK (ApkTests): even one whose manifest and code are not real is
+        // opened and said to be unreadable, not refused.
         string path = Path.Combine(_directory, "app.apk");
         using (var zip = System.IO.Compression.ZipFile.Open(path, System.IO.Compression.ZipArchiveMode.Create))
         {
@@ -543,8 +544,8 @@ public sealed class ElfTests : IDisposable
         using var store = new SessionStore();
         string answer = await new SessionTools(store, McpOptions.Default).OpenBinaryAsync(path);
 
-        Assert.Contains("Android package", answer, StringComparison.Ordinal);
-        Assert.Contains("read_file", answer, StringComparison.Ordinal);
+        Assert.Contains("APK (zip)", answer, StringComparison.Ordinal);
+        Assert.Contains("manifest", answer, StringComparison.Ordinal);
     }
 
     /// <summary>A debugger that fails the test if anything reaches it: the refusal must come first.</summary>

@@ -182,11 +182,14 @@ internal static class JavaLocals
         }
     }
 
-    /// <summary>A store to a reference local of a value of another type than the one it reads from it.</summary>
+    /// <summary>
+    /// A store to a reference local of a value of another type than the one it reads from it — and a cast of the
+    /// local stored back into it, <c>x = (Entry) x</c>, which Dalvik writes for every checked cast.
+    /// </summary>
     private static bool Retyped(IrStmt statement, string name)
         => statement is IrAssign { Dst: JLocal { Type: ['L' or '[', ..] }, Src: JExpr { Type: ['L' or '[', ..] and var stored } value }
            && JavaRewrite.PostOrder(value).OfType<JLocal>().FirstOrDefault(l => l.Name == name) is { Type: ['L' or '[', ..] and var read }
-           && read != stored && read != "Ljava/lang/Object;";
+           && read != stored && (read != "Ljava/lang/Object;" || value is JCast { Operand: JLocal { } cast } && cast.Name == name);
 
     private static void SplitWebs(LiftedMethod lifted, Graph graph, string name)
     {

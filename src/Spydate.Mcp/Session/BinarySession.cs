@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Spydate.Core.Android;
 using Spydate.Core.Binary;
 using Spydate.Core.Jvm;
 using Spydate.Core.PE;
@@ -292,6 +293,16 @@ public sealed class BinarySession : IDisposable
             var jarProject = SpydateProject.LoadFor(image, new AnnotationStore(), notes: jarNotes, members: members);
             var reading = new JvmReading(jar, members);
             return new BinarySession(full, image, null, jarProject, DiscoveryState.None, notes: jarNotes, bytecode: reading, members: members);
+        }
+
+        // An Android package likewise: its DEX classes read as a JVM reading does, keyed by member.
+        if (image is ApkImage apk)
+        {
+            var members = new MemberAnnotationStore { Source = AnnotationSource.Agent };
+            var apkNotes = new NoteStore { Source = AnnotationSource.Agent };
+            var apkProject = SpydateProject.LoadFor(image, new AnnotationStore(), notes: apkNotes, members: members);
+            var reading = new JvmReading(apk, members);
+            return new BinarySession(full, image, null, apkProject, DiscoveryState.None, notes: apkNotes, bytecode: reading, members: members);
         }
 
         // A native launcher with the application's JAR appended: the JVM reading goes beside the native one, and

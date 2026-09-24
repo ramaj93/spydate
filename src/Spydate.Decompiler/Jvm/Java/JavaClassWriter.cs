@@ -185,9 +185,11 @@ internal sealed class JavaClassWriter
 
         // javac 8's access constructor, which lets a nested class call a private one: the same parameters and a
         // last one of a class of the compiler's — an empty one, or any anonymous class it had anyway — always passed
-        // null, only to tell the two apart.
+        // null, only to tell the two apart. D8 does the same with a -IA class it never even writes out.
         if ((ctor.Access & JvmAccess.Synthetic) != 0 && parameters.Count > 0 && parameters[^1] is ['L', .., ';'] last
-            && _reading.FindType(last[1..^1]) is { } marker && (IsCompilerClass(marker) || (string.IsNullOrEmpty(marker.Nesting?.SimpleName) && marker.Outer is not null)))
+            && (_reading.FindType(last[1..^1]) is { } marker
+                ? IsCompilerClass(marker) || (string.IsNullOrEmpty(marker.Nesting?.SimpleName) && marker.Outer is not null)
+                : last.EndsWith("-IA;", StringComparison.Ordinal)))
         {
             shape.Synthetic.Add(parameters.Count - 1);
         }
@@ -284,6 +286,8 @@ internal sealed class JavaClassWriter
                 result.Lifted = Prepare(facts.File, method, code, reserved);
                 var lifted = result.Lifted;
                 RemoveNullChecks(lifted.Function);
+                EnumComparisons(lifted);
+                FinalFieldCopies(facts.File, method, lifted.Function);
                 result.Body = JavaShaping.Run(
                     JavaRegions.Structure(lifted),
                     lifted.Locals.IsUntabled,
@@ -580,7 +584,11 @@ internal sealed class JavaClassWriter
     private static bool IsLambdaBody(JvmMethod method) => method.Name.StartsWith("lambda$", StringComparison.Ordinal);
 
     private static bool IsAccessor(JvmMethod method)
-        => method.Name.StartsWith("access$", StringComparison.Ordinal) && (method.Access & (JvmAccess.Static | JvmAccess.Synthetic)) == (JvmAccess.Static | JvmAccess.Synthetic);
+        => IsAccessorName(method.Name) && (method.Access & (JvmAccess.Static | JvmAccess.Synthetic)) == (JvmAccess.Static | JvmAccess.Synthetic);
+
+    /// <summary>javac 8 calls its accessors <c>access$000</c>; D8, desugaring nestmates for Android, <c>-$$Nest$fgetlog</c>.</summary>
+    private static bool IsAccessorName(string name)
+        => name.StartsWith("access$", StringComparison.Ordinal) || name.StartsWith("-$$Nest$", StringComparison.Ordinal);
 
     /// <summary>Accessors some call could not be written out for, which must then be printed for it to compile.</summary>
     private readonly HashSet<string> _accessorsNeeded = new(StringComparer.Ordinal);
@@ -595,7 +603,7 @@ internal sealed class JavaClassWriter
     /// </summary>
     internal JExpr? AccessorExpression(JCall call)
     {
-        if (call is not { Kind: JCallKind.Static } || !call.Name.StartsWith("access$", StringComparison.Ordinal)
+        if (call is not { Kind: JCallKind.Static } || !IsAccessorName(call.Name)
             || _reading.FindType(call.Owner) is not { } owner
             || owner.File.Methods.FirstOrDefault(m => m.Name == call.Name && m.Descriptor == call.Descriptor) is not { } method || !IsAccessor(method))
         {
@@ -812,6 +820,16 @@ internal sealed class JavaClassWriter
         Pad(sb, level).Append(constant.Name);
         var args = constant.Creation.Args.Skip(2).ToList();
         var types = Descriptors.ParameterDescriptors(constant.Creation.Descriptor).Skip(2).ToList();
+
+        // Past the name and ordinal, only what the source passed: a constant with a body is made through its class's
+        // access constructor, whose marker argument is the compiler's (javac 8's, or D8's -IA).
+        if (_reading.FindType(constant.Creation.Owner) is { } created && FactsOf(created).Ctors.GetValueOrDefault(constant.Creation.Descriptor) is { } shape
+            && shape.Parameters.Count == constant.Creation.Args.Count)
+        {
+            var keep = Enumerable.Range(2, constant.Creation.Args.Count - 2).Where(i => !shape.Synthetic.Contains(i)).ToList();
+            args = keep.Select(i => constant.Creation.Args[i]).ToList();
+            types = keep.Select(i => shape.Parameters[i]).ToList();
+        }
         if (args.Count > 0)
         {
             var emitter = new JavaEmitter(scope.Naming);
@@ -1551,6 +1569,161 @@ internal sealed class JavaClassWriter
     }
 
     /// <summary>
+    /// D8 keeps what it stored in a final field in its register and goes on using the register: <c>x = new
+    /// HashMap(); NAMES = x; x.put(…)</c>. The field holds that very object from then on, so after the store the
+    /// register reads as the field — <c>NAMES.put(…)</c> — as javac writes it, and the store becomes the field's
+    /// initialiser. Only in the static initialiser for a static field, or a constructor for one of this object's.
+    /// </summary>
+    private static void FinalFieldCopies(ClassFile file, JvmMethod method, IrFunction function)
+    {
+        if (!method.IsStaticInitializer && !method.IsConstructor)
+        {
+            return;
+        }
+
+        var definitions = function.AllStatements.OfType<IrAssign>().Where(a => a.Dst is JLocal)
+            .GroupBy(a => ((JLocal)a.Dst).Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+        foreach (var block in function.Blocks)
+        {
+            for (int i = 0; i < block.Statements.Count; i++)
+            {
+                if (block.Statements[i] is not IrAssign { Dst: JField field, Src: JLocal { Kind: JLocalKind.Local or JLocalKind.Temp } copy }
+                    || definitions.GetValueOrDefault(copy.Name) != 1 || field.Owner != file.Name
+                    || (method.IsStaticInitializer ? field.Instance is not null : field.Instance is not JLocal { Kind: JLocalKind.This })
+                    || file.Fields.FirstOrDefault(f => f.Name == field.Name && f.Descriptor == field.FieldType) is not { } declared
+                    || (declared.Access & JvmAccess.Final) == 0 || ((declared.Access & JvmAccess.Static) != 0) != method.IsStaticInitializer)
+                {
+                    continue;
+                }
+
+                // Its definition must be in this block, before the store: then every read after the store is after it.
+                int definedAt = block.Statements.FindIndex(st => st is IrAssign { Dst: JLocal d } && d.Name == copy.Name);
+                if (definedAt < 0 || definedAt > i)
+                {
+                    continue;
+                }
+
+                for (int j = i + 1; j < block.Statements.Count; j++)
+                {
+                    block.Statements[j] = JavaRewrite.Replace(block.Statements[j], l => l.Name == copy.Name ? field : null);
+                }
+
+                foreach (var other in function.Blocks.Where(b => !ReferenceEquals(b, block)))
+                {
+                    for (int j = 0; j < other.Statements.Count; j++)
+                    {
+                        other.Statements[j] = JavaRewrite.Replace(other.Statements[j], l => l.Name == copy.Name ? field : null);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// D8 writes a switch on an enum with few cases as comparisons of the switch map's number with each case's —
+    /// <c>x = $SwitchMap$…[e.ordinal()]; if (x == 1) …</c> — which the switch map's hidden class would have to be
+    /// printed for. They are comparisons of the enum: <c>e == TimeUnit.SECONDS</c>, the number read back as its
+    /// constant through the switch map, and the local that held it holds the enum.
+    /// </summary>
+    private void EnumComparisons(LiftedMethod lifted)
+    {
+        var statements = lifted.Function.Blocks.SelectMany(b => b.Statements).ToList();
+
+        // Dalvik reads the map and the ordinal into registers of their own: a local stored once is what was stored.
+        var single = statements.OfType<IrAssign>().Where(a => a.Dst is JLocal)
+            .GroupBy(a => ((JLocal)a.Dst).Name, StringComparer.Ordinal).Where(g => g.Count() == 1)
+            .ToDictionary(g => g.Key, g => g.First().Src, StringComparer.Ordinal);
+        IrExpr Resolve(IrExpr expression, int depth)
+            => depth > 4 ? expression : JavaRewrite.Replace(expression, l => single.TryGetValue(l.Name, out var v) && v is JExpr value and (JField or JCall { Name: "ordinal" }) ? (JExpr)Resolve(value, depth + 1) : null);
+
+        var holders = new Dictionary<string, (JExpr Receiver, IReadOnlyDictionary<int, string> Names)>(StringComparer.Ordinal);
+        foreach (var statement in statements)
+        {
+            if (statement is IrAssign { Dst: JLocal local, Src: JArrayElement raw } && Resolve(raw, 0) is JArrayElement { Array: JField { Name: var map } } element
+                && map.StartsWith("$SwitchMap$", StringComparison.Ordinal) && EnumSwitch(element) is { } found
+                && statements.Count(x => x is IrAssign { Dst: JLocal other } && other.Name == local.Name) == 1)
+            {
+                holders[local.Name] = found;
+            }
+        }
+
+        // Only a local read nowhere else than in such comparisons becomes the enum.
+        foreach (string name in holders.Keys.ToList())
+        {
+            int reads = statements.SelectMany(JavaRewrite.Evaluated).SelectMany(JavaRewrite.PostOrder).Count(e => e is JLocal l && l.Name == name);
+            int compared = statements.OfType<IrBranch>().Count(b => Compared(b.Condition, name, holders[name].Names) is not null);
+            if (reads != compared)
+            {
+                holders.Remove(name);
+            }
+        }
+
+        bool rewritten = false;
+        foreach (var block in lifted.Function.Blocks)
+        {
+            for (int i = 0; i < block.Statements.Count; i++)
+            {
+                switch (block.Statements[i])
+                {
+                    case IrAssign { Dst: JLocal local } when holders.TryGetValue(local.Name, out var holder) && holder.Receiver is JLocal:
+                        // A local or parameter: the comparisons read it directly, and the holder goes.
+                        block.Statements.RemoveAt(i--);
+                        break;
+                    case IrAssign { Dst: JLocal local } assign when holders.TryGetValue(local.Name, out var holder):
+                    {
+                        var retyped = lifted.Locals.Retype(local, holder.Receiver.Type);
+                        block.Statements[i] = assign with { Dst = retyped, Src = holder.Receiver };
+                        break;
+                    }
+
+                    case IrBranch { Condition: IrCondition { Cc: IrCondCode.Equal or IrCondCode.NotEqual } condition } branch:
+                    {
+                        // The holder, or the map's element read in place.
+                        (JExpr Value, IReadOnlyDictionary<int, string> Names)? subject =
+                            condition.Left is JLocal l && holders.TryGetValue(l.Name, out var held)
+                                ? (held.Receiver is JLocal ? held.Receiver : lifted.Locals.Retype(l, held.Receiver.Type), held.Names)
+                            : condition.Left is JArrayElement { Array: JField { Name: var map } } element && map.StartsWith("$SwitchMap$", StringComparison.Ordinal) && EnumSwitch(element) is { } direct ? direct
+                            : null;
+                        if (subject is { } s2 && condition.Right is JConst { Value: int k } && s2.Names.TryGetValue(k, out var constant)
+                            && s2.Value.Type is ['L', .. var enumName, ';'] enumType)
+                        {
+                            block.Statements[i] = branch with { Condition = condition with { Left = s2.Value, Right = new JField(null, enumName, constant, enumType) } };
+                            rewritten = true;
+                        }
+
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (rewritten)
+        {
+            RemoveUnread(lifted.Function);
+        }
+    }
+
+    /// <summary>
+    /// What reading the switch map left behind once nothing reads it — the map in a register, the ordinal in
+    /// another — goes: a field read and <c>ordinal()</c> do nothing else.
+    /// </summary>
+    private static void RemoveUnread(IrFunction function)
+    {
+        var reads = function.AllStatements.SelectMany(JavaRewrite.Evaluated).SelectMany(JavaRewrite.PostOrder).OfType<JLocal>()
+            .GroupBy(l => l.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+        foreach (var block in function.Blocks)
+        {
+            block.Statements.RemoveAll(st => st is IrAssign { Dst: JLocal { Kind: not (JLocalKind.Parameter or JLocalKind.This) } local, Src: var value }
+                                             && reads.GetValueOrDefault(local.Name) == 0
+                                             && value is JCall { Name: "ordinal", Args.Count: 0 } or JField { Name: ['$', 'S', 'w', 'i', 't', 'c', 'h', 'M', 'a', 'p', '$', ..] });
+        }
+    }
+
+    /// <summary>The case number a condition compares a local with, when it is an equality with a number the switch map names.</summary>
+    private static int? Compared(IrExpr condition, string name, IReadOnlyDictionary<int, string> names)
+        => condition is IrCondition { Cc: IrCondCode.Equal or IrCondCode.NotEqual, Left: JLocal { } l, Right: JConst { Value: int k } } && l.Name == name && names.ContainsKey(k) ? k : null;
+
+    /// <summary>
     /// A switch on an enum, from what javac made of it: <c>e.ordinal()</c> for an enum of the same compilation, whose
     /// constants' order is their ordinals', or <c>$SwitchMap$…[e.ordinal()]</c>, whose case numbers the switch map's
     /// class assigns in its static initialiser.
@@ -1593,11 +1766,26 @@ internal sealed class JavaClassWriter
         {
             var lifted = JvmLifter.Lift(file, clinit, code);
             JavaInliner.Run(lifted.Function);
+
+            // Dalvik keeps each value in a register: a local stored once is read as what was stored in it.
+            var single = lifted.Function.AllStatements.OfType<IrAssign>().Where(a => a.Dst is JLocal)
+                .GroupBy(a => ((JLocal)a.Dst).Name, StringComparer.Ordinal).Where(g => g.Count() == 1)
+                .ToDictionary(g => g.Key, g => g.First().Src, StringComparer.Ordinal);
+            IrExpr Resolve(IrExpr expression, int depth)
+                => depth > 8 ? expression : JavaRewrite.Replace(expression, l => single.TryGetValue(l.Name, out var v) && v is JExpr value ? (JExpr)Resolve(value, depth + 1) : null);
+
+            // D8 may keep the new array in its register and store through it rather than read the field back.
+            var holders = lifted.Function.AllStatements
+                .Select(st => st is IrAssign { Dst: JField { Name: var stored }, Src: JLocal holder } && stored == field ? holder.Name : null)
+                .OfType<string>().ToHashSet(StringComparer.Ordinal);
+
             var names = new Dictionary<int, string>();
-            foreach (var statement in lifted.Function.AllStatements)
+            foreach (var original in lifted.Function.AllStatements)
             {
-                if (statement is IrAssign { Dst: JArrayElement { Array: JField { Name: var name }, Index: JCall { Name: "ordinal", Receiver: JField { Instance: null } constant } }, Src: JConst { Value: int k } }
-                    && name == field)
+                bool throughHolder = original is IrAssign { Dst: JArrayElement { Array: JLocal array } } && holders.Contains(array.Name);
+                var statement = original is IrAssign assign ? assign with { Dst = Resolve(assign.Dst, 0), Src = Resolve(assign.Src, 0) } : original;
+                if (statement is IrAssign { Dst: JArrayElement { Array: var target, Index: JCall { Name: "ordinal", Receiver: JField { Instance: null } constant } }, Src: JConst { Value: int k } }
+                    && (throughHolder || target is JField { Name: var name } && name == field))
                 {
                     names[k] = constant.Name;
                 }

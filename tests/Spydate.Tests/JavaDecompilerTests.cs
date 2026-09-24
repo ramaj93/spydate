@@ -166,7 +166,7 @@ public sealed class JavaDecompilerTests
         Assert.Equal([JvmReading.JavaView, JvmReading.BytecodeView], reading.Views);
 
         var store = new SessionStore();
-        store.Set(new BinarySession("loops.jar", reading.Jar, null, null, DiscoveryState.None, bytecode: reading));
+        store.Set(new BinarySession("loops.jar", reading.Jar!, null, null, DiscoveryState.None, bytecode: reading));
         var code = new CodeTools(store);
         Assert.Contains("for (int i = 0; i < a.length && a[i] < limit; i++) {", code.ReadFunction("demo.Loops::count"), StringComparison.Ordinal);
         Assert.Contains("if_icmpge", code.ReadFunction("demo.Loops::count", view: "bytecode"), StringComparison.Ordinal);

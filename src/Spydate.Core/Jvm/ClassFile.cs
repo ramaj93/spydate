@@ -96,6 +96,12 @@ public sealed record JvmMethod(JvmAccess Access, string Name, string Descriptor)
     /// <summary>An annotation interface element's default value (<c>int weight() default 1</c>), or null.</summary>
     public JvmElementValue? AnnotationDefault { get; init; }
 
+    /// <summary>
+    /// For a method translated from DEX, its Dalvik code: <see cref="Code"/> then carries only its try ranges and
+    /// debug tables, by code-unit address and register, and the instructions are these.
+    /// </summary>
+    public Dex.DexCode? Dalvik { get; init; }
+
     public bool IsConstructor => Name == "<init>";
 
     public bool IsStaticInitializer => Name == "<clinit>";
@@ -186,6 +192,48 @@ public sealed class ClassFile
 
     /// <summary>The package, as an internal name with slashes: <c>com/example</c>, or empty for the default package.</summary>
     public string PackageName => Name.LastIndexOf('/') is var slash and >= 0 ? Name[..slash] : string.Empty;
+
+    /// <summary>
+    /// A class built rather than parsed: one of an APK's DEX classes, with what DEX keeps in annotations — generic
+    /// signatures, nesting, thrown exceptions — back in the places a class file keeps them.
+    /// </summary>
+    internal static ClassFile Create(
+        string name,
+        JvmAccess access,
+        string? superName,
+        IReadOnlyList<string> interfaces,
+        IReadOnlyList<JvmField> fields,
+        IReadOnlyList<JvmMethod> methods,
+        ConstantPool pool,
+        string? sourceFile = null,
+        string? signature = null,
+        IReadOnlyList<InnerClassEntry>? innerClasses = null,
+        string? enclosingClass = null,
+        (string Name, string Descriptor)? enclosingMethod = null,
+        IReadOnlyList<JvmAnnotation>? annotations = null,
+        ushort majorVersion = 52,
+        IReadOnlyList<RecordComponent>? recordComponents = null)
+    {
+        return new ClassFile
+        {
+            MajorVersion = majorVersion,
+            Pool = pool,
+            Access = access,
+            Name = name,
+            SuperName = superName,
+            Interfaces = interfaces,
+            Fields = fields,
+            Methods = methods,
+            SourceFile = sourceFile,
+            Signature = signature,
+            InnerClasses = innerClasses ?? [],
+            EnclosingClass = enclosingClass,
+            EnclosingMethod = enclosingMethod,
+            Annotations = annotations ?? [],
+            IsDeprecated = annotations?.Any(a => a.Type == "Ljava/lang/Deprecated;") == true,
+            RecordComponents = recordComponents,
+        };
+    }
 
     /// <summary>
     /// Parses one class file. Throws <see cref="ClassFormatException"/> when the bytes are not a class file or

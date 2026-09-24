@@ -509,7 +509,7 @@ public sealed class DexFile
             }
         }
 
-        return new DexCode(registers, ins, outs, insns, tries, debug);
+        return new DexCode(registers, ins, outs, insns, tries, debug) { File = this };
     }
 
     /// <summary>The debug table is a little state machine: it moves an address and a line, and starts and ends locals.</summary>

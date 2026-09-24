@@ -1,6 +1,7 @@
 using System.Globalization;
 using ICSharpCode.Decompiler.TypeSystem;
 using Spydate.App.Services;
+using Spydate.Core.Android;
 using Spydate.Core.Elf;
 using Spydate.Core.Jvm;
 using Spydate.Core.PE;
@@ -21,6 +22,7 @@ public static class ExplorerTreeBuilder
         ElfImage elf => BuildElf(binary, elf),
         PeImage pe => BuildPe(binary, pe),
         JarImage jar => BuildJar(binary, jar),
+        ApkImage apk => BuildApk(binary, apk),
         var other => throw new NotSupportedException($"No explorer for {other.Format}."),
     };
 
@@ -126,6 +128,69 @@ public static class ExplorerTreeBuilder
         }
 
         root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{jar.Length:N0} bytes"));
+        return root;
+
+        static IEnumerable<IBytecodeType> Flatten(IBytecodeType type) => type.NestedTypes.SelectMany(Flatten).Prepend(type);
+    }
+
+    /// <summary>
+    /// An APK's tree: like a JAR's — its launcher, its classes by package, its files, strings and bytes — with its
+    /// manifest decoded from binary XML and its native libraries by ABI.
+    /// </summary>
+    private static ExplorerNodeViewModel BuildApk(OpenedBinary binary, ApkImage apk)
+    {
+        var reading = binary.Bytecode;
+        string subtitle = reading is null ? "APK" : $"APK · {reading.Platform} · {apk.Classes.Count:N0} classes";
+        var root = new ExplorerNodeViewModel(apk.FileName, SymbolRegular.Phone24, new OverviewTarget(), subtitle)
+        {
+            IsExpanded = true,
+        };
+
+        root.Add(new ExplorerNodeViewModel("Overview", SymbolRegular.Info24, new OverviewTarget()));
+        if (reading is { EntryPoint: { } main } && reading.Namespaces.SelectMany(n => n.Types).SelectMany(Flatten).FirstOrDefault(t => t.Members.Contains(main)) is { } mainType)
+        {
+            root.Add(new ExplorerNodeViewModel("Launches", SymbolRegular.Play24, new ReadingTarget(mainType, main), $"{mainType.FullName}.{main.Name}"));
+        }
+
+        if (reading is not null)
+        {
+            var packages = root.Add(new ExplorerNodeViewModel("Packages", SymbolRegular.Braces24, null, reading.Namespaces.Count.ToString(CultureInfo.InvariantCulture)));
+            var targets = TargetsFor(reading);
+            foreach (var ns in reading.Namespaces)
+            {
+                var n = ns;
+                var node = packages.Add(new ExplorerNodeViewModel(n.DisplayName, SymbolRegular.Braces24, null, n.Types.Count.ToString(CultureInfo.InvariantCulture)));
+                node.ChildrenFactory = () => n.Types.Select(t => TypeNode(t, targets, NamesFor(binary)));
+            }
+        }
+
+        if (apk.Archive.Find(ApkImage.ManifestEntry) is not null)
+        {
+            string facts = apk.Manifest is { } manifest ? $"{manifest.Package} · API {manifest.MinSdk ?? "?"}–{manifest.TargetSdk ?? "?"}" : "unreadable";
+            root.Add(new ExplorerNodeViewModel("Manifest", SymbolRegular.DocumentText24, new ArchiveEntryTarget(ApkImage.ManifestEntry), facts));
+        }
+
+        if (apk.NativeLibraries.Count > 0)
+        {
+            var natives = root.Add(new ExplorerNodeViewModel("Native libraries", SymbolRegular.Code24, null, string.Join(", ", apk.Abis)));
+            foreach (var group in apk.NativeLibraries.GroupBy(l => l.Abi))
+            {
+                var abi = natives.Add(new ExplorerNodeViewModel(group.Key, SymbolRegular.Folder24, null, group.Count().ToString(CultureInfo.InvariantCulture)));
+                foreach (var library in group)
+                {
+                    abi.Add(new ExplorerNodeViewModel(library.Name, SymbolRegular.Document24, new ArchiveEntryTarget(library.Entry.Name), $"{library.Entry.Size:N0} bytes"));
+                }
+            }
+        }
+
+        int files = apk.Archive.Entries.Count(e => !e.IsDirectory);
+        root.Add(new ExplorerNodeViewModel("Entries", SymbolRegular.FolderZip24, new EntriesTarget(), $"{files:N0} files"));
+        if (reading is not null)
+        {
+            root.Add(new ExplorerNodeViewModel("Strings", SymbolRegular.TextT24, new StringsTarget(), "string constants"));
+        }
+
+        root.Add(new ExplorerNodeViewModel("Hex dump", SymbolRegular.Grid24, new HexTarget(0), $"{apk.Length:N0} bytes"));
         return root;
 
         static IEnumerable<IBytecodeType> Flatten(IBytecodeType type) => type.NestedTypes.SelectMany(Flatten).Prepend(type);

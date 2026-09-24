@@ -149,7 +149,7 @@ public sealed class BinaryImageTests : IDisposable
     }
 
     [Fact]
-    public void AJarOpensAndAnApkIsNamedAndRefused()
+    public void AJarAndAnApkOpen()
     {
         string jar = Zip("lib.jar", "META-INF/MANIFEST.MF", "a/B.class");
         var image = Assert.IsType<Spydate.Core.Jvm.JarImage>(BinaryImage.Load(jar));
@@ -159,10 +159,14 @@ public sealed class BinaryImageTests : IDisposable
         Assert.Empty(image.Classes);
         Assert.Contains(image.Warnings, w => w.Contains("a/B.class", StringComparison.Ordinal));
 
+        // Neither the manifest nor the DEX file here is real: each is said to be unreadable, never thrown on.
         string apk = Zip("app.apk", "AndroidManifest.xml", "classes.dex");
-        var ex = Assert.Throws<UnsupportedFormatException>(() => BinaryImage.Load(apk));
-        Assert.Equal(BinaryFormat.Apk, ex.Format);
-        Assert.Contains("Android package", ex.Message);
+        var package = Assert.IsType<Spydate.Core.Android.ApkImage>(BinaryImage.Load(apk));
+        Assert.Equal(BinaryFormat.Apk, package.Format);
+        Assert.Null(package.Manifest);
+        Assert.Empty(package.Classes);
+        Assert.Contains(package.Warnings, w => w.Contains("manifest", StringComparison.Ordinal));
+        Assert.Contains(package.Warnings, w => w.Contains("classes.dex", StringComparison.Ordinal));
     }
 
     [Fact]

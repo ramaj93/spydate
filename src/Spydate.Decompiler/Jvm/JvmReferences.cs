@@ -1,3 +1,4 @@
+using Spydate.Core.Dex;
 using Spydate.Core.Jvm;
 
 namespace Spydate.Decompiler.Jvm;
@@ -97,6 +98,17 @@ public sealed class JvmReferences
                 _strings.Add(new JvmStringUse(value, type, member, -1));
             }
 
+            // A class from an APK: its methods' Dalvik code names things by the DEX file's tables.
+            if (member.Method?.Dalvik is { File: { } dex } dalvik)
+            {
+                foreach (var instruction in Dalvik.Decode(dalvik.Insns.Span))
+                {
+                    RecordDalvik(type, member, instruction, dex);
+                }
+
+                continue;
+            }
+
             if (member.Method?.Code is not { } code)
             {
                 continue;
@@ -164,6 +176,38 @@ public sealed class JvmReferences
                 break;
             case { Tag: ConstantTag.MethodHandle, B: var target } when pool.Member(target) is { } handled:
                 Add(new JvmReference(type, member, instruction.Offset, JvmReferenceKind.Handle, handled.Owner, handled.Name, handled.Descriptor, instruction.Mnemonic));
+                break;
+        }
+    }
+
+    private void RecordDalvik(JvmType type, JvmMember member, DalvikInstruction instruction, DexFile dex)
+    {
+        int index = instruction.Index;
+        switch (instruction.IndexKind)
+        {
+            case DalvikIndex.String when index >= 0 && index < dex.Strings.Count:
+                _strings.Add(new JvmStringUse(dex.Strings[index], type, member, instruction.Address));
+                break;
+            case DalvikIndex.Type when index >= 0 && index < dex.Types.Count:
+                Add(new JvmReference(type, member, instruction.Address, JvmReferenceKind.Type, ElementClass(DexFile.InternalName(dex.Types[index])), null, null, instruction.Mnemonic));
+                break;
+            case DalvikIndex.Field when index >= 0 && index < dex.FieldRefs.Count:
+            {
+                var field = dex.FieldRefs[index];
+                bool write = instruction.Opcode is (>= 0x59 and <= 0x5F) or (>= 0x67 and <= 0x6D);
+                Add(new JvmReference(type, member, instruction.Address, write ? JvmReferenceKind.Write : JvmReferenceKind.Read, DexFile.InternalName(field.Owner), field.Name, field.Type, instruction.Mnemonic));
+                break;
+            }
+
+            case DalvikIndex.Method when index >= 0 && index < dex.MethodRefs.Count:
+            {
+                var method = dex.MethodRefs[index];
+                Add(new JvmReference(type, member, instruction.Address, JvmReferenceKind.Call, DexFile.InternalName(method.Owner), method.Name, method.Proto.Descriptor, instruction.Mnemonic));
+                break;
+            }
+
+            case DalvikIndex.MethodHandle when index >= 0 && index < dex.MethodHandles.Count && dex.MethodHandles[index].Method is { } handled:
+                Add(new JvmReference(type, member, instruction.Address, JvmReferenceKind.Handle, DexFile.InternalName(handled.Owner), handled.Name, handled.Proto.Descriptor, instruction.Mnemonic));
                 break;
         }
     }

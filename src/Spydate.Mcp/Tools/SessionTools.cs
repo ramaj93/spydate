@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Text;
 using ModelContextProtocol.Server;
+using Spydate.Core.Android;
 using Spydate.Core.Binary;
 using Spydate.Core.Archive;
 using Spydate.Core.Elf;
@@ -76,12 +77,12 @@ public sealed class SessionTools
         => _store.Current is { } session ? Overview(session, opened: false) : NothingOpen;
 
     [McpServerTool(Name = "read_file")]
-    [Description("Read raw bytes of any file on disk as hex or text, to probe a blob open_binary cannot open (a resource, a .inx, an unknown container). At most 4096 bytes; within --root. In the open JAR, \"x.jar!/path\" reads an entry and \"x.jar!/\" lists them.")]
+    [Description("Read raw bytes of a file as hex or text, to probe a blob open_binary cannot open. At most 4096 bytes; within --root. In the open JAR or APK, \"x.jar!/path\" reads an entry (compiled XML as XML) and \"x.jar!/\" lists them.")]
     public string ReadFile(
         [Description("Full path to the file.")] string path,
         [Description("Byte offset to start at.")] long offset = 0,
         [Description("Bytes to read, at most 4096.")] int length = 256,
-        [Description("\"hex\" (default), \"utf8\" or \"utf16\".")] string @as = "hex")
+        [Description("\"hex\" (default), \"utf8\" or \"utf16\".")] string? @as = null)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -165,9 +166,9 @@ public sealed class SessionTools
     /// name included), the entries under it. Only the archive that is open: its entries are already indexed, and
     /// it has already passed the --root check.
     /// </summary>
-    private string ReadEntry(string archive, string name, long offset, int length, string @as)
+    private string ReadEntry(string archive, string name, long offset, int length, string? @as)
     {
-        if (_store.Current is not { Image: JarImage jar } session
+        if (_store.Current is not { } session || OpenArchive(session.Image) is not { } jar
             || !(string.Equals(archive, jar.FileName, StringComparison.OrdinalIgnoreCase)
                  || string.Equals(archive.Replace('/', '\\'), session.Path, StringComparison.OrdinalIgnoreCase)))
         {
@@ -208,6 +209,25 @@ public sealed class SessionTools
             return ex.Message;
         }
 
+        // An APK's manifest and resource XML are compiled: read as the XML they were, unless bytes are asked for.
+        if (@as != "hex" && BinaryXml.IsBinaryXml(bytes))
+        {
+            string xml;
+            try
+            {
+                xml = BinaryXml.ToText(bytes);
+            }
+            catch (BinaryParseException ex)
+            {
+                return $"{jar.FileName}!/{name}: compiled XML that does not read: {ex.Message}";
+            }
+
+            int from = (int)Math.Clamp(offset, 0, xml.Length);
+            int count = Math.Min(Math.Clamp(length, 1, 16384), xml.Length - from);
+            return Budget.Clip($"{jar.FileName}!/{name}: compiled XML ({bytes.Length} bytes), decoded to {xml.Length} characters; showing {count} from {from}"
+                               + (from + count < xml.Length ? " (more follows)" : string.Empty) + "\n" + xml.Substring(from, count));
+        }
+
         offset = Math.Clamp(offset, 0, bytes.Length);
         int take = (int)Math.Min(Math.Clamp(length, 1, 4096), bytes.Length - offset);
         var window = bytes.AsSpan((int)offset, take).ToArray();
@@ -230,10 +250,24 @@ public sealed class SessionTools
     /// Why a native-code tool has nothing to say about the open file, in words that point at what does. A JAR is
     /// not an unsupported machine — it has no machine code at all, and its program is read another way.
     /// </summary>
-    internal static string WhyNoNative(BinarySession session) => session.Image is JarImage jar
-        ? $"{jar.FileName} is a Java archive: its code is JVM bytecode, with no addresses or machine code. "
-          + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the bytecode), and list its files with read_file(\"" + jar.FileName + "!/\")"
-        : $"{session.MachineName} is not a machine this disassembles";
+    internal static string WhyNoNative(BinarySession session) => session.Image switch
+    {
+        JarImage jar => $"{jar.FileName} is a Java archive: its code is JVM bytecode, with no addresses or machine code. "
+                        + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the bytecode), and list its files with read_file(\"" + jar.FileName + "!/\")",
+        ApkImage apk => $"{apk.FileName} is an Android package: its code is Dalvik bytecode, with no addresses or machine code. "
+                        + "Browse it with find_symbol, read it as Java with read_function (view=\"bytecode\" for the Dalvik code), and list its files with read_file(\"" + apk.FileName + "!/\")",
+        _ => $"{session.MachineName} is not a machine this disassembles",
+    };
+
+    /// <summary>The archive an open file is, when it is one: a JAR or an APK.</summary>
+    private static ArchiveView? OpenArchive(IBinaryImage image) => image switch
+    {
+        JarImage jar => new ArchiveView(jar.FileName, jar.Archive),
+        ApkImage apk => new ArchiveView(apk.FileName, apk.Archive),
+        _ => null,
+    };
+
+    private sealed record ArchiveView(string FileName, ZipArchiveFile Archive);
 
     /// <summary>Width of the label column, wide enough for the longest label with a gap after it.</summary>
     private const int LabelWidth = 10;
@@ -257,6 +291,11 @@ public sealed class SessionTools
         if (session.Image is JarImage jar)
         {
             return JarOverview(session, jar, opened);
+        }
+
+        if (session.Image is ApkImage apk)
+        {
+            return ApkOverview(session, apk, opened);
         }
 
         var image = (PeImage)session.Image;
@@ -462,6 +501,59 @@ public sealed class SessionTools
         }
 
         Line(sb, "next", $"find_symbol(query=...) | read_function(target=\"package.Class\") | read_function(target=\"Class::method\", view=\"bytecode\") | xrefs | find_strings | read_file(\"{jar.FileName}!/\")");
+        Notes(sb, session);
+        return Budget.Clip(sb.ToString());
+    }
+
+    private static string ApkOverview(BinarySession session, ApkImage apk, bool opened)
+    {
+        var sb = new StringBuilder();
+        Line(sb, opened ? "opened" : "open", apk.FileName);
+        Line(sb, "path", session.Path);
+        var files = apk.Archive.Entries.Where(e => !e.IsDirectory).ToList();
+        Line(sb, "format", $"APK (zip), {files.Count} files: {apk.DexFiles.Count} DEX file(s) with {apk.Classes.Count} classes, "
+                           + $"{apk.NativeLibraries.Count} native libraries, {(apk.HasResourceTable ? "a resource table" : "no resource table")}, {Size(apk.Length)}");
+
+        if (apk.Manifest is { } manifest)
+        {
+            var facts = new List<string>();
+            if (manifest.Package is { } package)
+            {
+                facts.Add(manifest.VersionName is { } version ? $"{package} {version} (code {manifest.VersionCode})" : package);
+            }
+
+            facts.Add($"min SDK {manifest.MinSdk ?? "?"}, target SDK {manifest.TargetSdk ?? "?"}");
+            if (manifest.Debuggable)
+            {
+                facts.Add("debuggable");
+            }
+
+            Line(sb, "manifest", string.Join(", ", facts));
+            Line(sb, "launches", manifest.MainActivity ?? "no launcher activity");
+            var components = manifest.Components.GroupBy(c => c.Kind).Select(g => $"{g.Count()} {g.Key}{(g.Count() == 1 ? string.Empty : "s")}");
+            Line(sb, "components", manifest.Components.Count == 0 ? "none" : string.Join(", ", components)
+                + $" ({manifest.Components.Count(c => c.Exported)} exported)");
+            Line(sb, "permissions", manifest.Permissions.Count == 0 ? "none" : string.Join(", ", manifest.Permissions.Take(8)) + (manifest.Permissions.Count > 8 ? $", +{manifest.Permissions.Count - 8} more" : string.Empty));
+        }
+        else
+        {
+            Line(sb, "manifest", "none readable");
+        }
+
+        if (apk.Abis.Count > 0)
+        {
+            Line(sb, "native", $"{string.Join(", ", apk.Abis)}: {string.Join(", ", apk.NativeLibraries.Select(l => l.Name).Distinct(StringComparer.Ordinal).Take(6))}");
+        }
+
+        Bytecode(sb, session);
+        Line(sb, "project", Project(session) + ((session.MemberAnnotations?.Count ?? 0) > 0 ? " (list_annotations)" : string.Empty));
+        Line(sb, "debug", "not available - the debugger runs Windows programs; this package is read, not run");
+        if (apk.Warnings.Count > 0)
+        {
+            Line(sb, "warnings", string.Join("; ", apk.Warnings.Take(3)) + (apk.Warnings.Count > 3 ? $"; +{apk.Warnings.Count - 3} more" : string.Empty));
+        }
+
+        Line(sb, "next", $"find_symbol(query=...) | read_function(target=\"package.Class\") | read_function(target=\"Class::method\", view=\"bytecode\") | read_file(\"{apk.FileName}!/AndroidManifest.xml\") | read_file(\"{apk.FileName}!/\")");
         Notes(sb, session);
         return Budget.Clip(sb.ToString());
     }

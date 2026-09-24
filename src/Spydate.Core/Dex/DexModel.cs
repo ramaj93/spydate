@@ -104,7 +104,11 @@ public sealed record DexDebugInfo(int LineStart, IReadOnlyList<string?> Paramete
 /// A method's code: its register count (the last <see cref="Ins"/> registers hold the arguments), its
 /// instructions in 16-bit code units, its try ranges and its debug information.
 /// </summary>
-public sealed record DexCode(int Registers, int Ins, int Outs, ReadOnlyMemory<ushort> Insns, IReadOnlyList<DexTry> Tries, DexDebugInfo? Debug);
+public sealed record DexCode(int Registers, int Ins, int Outs, ReadOnlyMemory<ushort> Insns, IReadOnlyList<DexTry> Tries, DexDebugInfo? Debug)
+{
+    /// <summary>The file whose tables the instructions' indices refer to.</summary>
+    public DexFile? File { get; init; }
+}
 
 public sealed record DexField(DexAccess Access, DexFieldRef Ref)
 {

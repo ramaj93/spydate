@@ -1376,3 +1376,39 @@ shown the old way.
 enters a try at its start. The fix is the same copying, of the protected code from the resume point and of its
 handlers, as a second try with its own exception entries; it is left for later, and such methods are still shown
 with gotos, saying why.
+
+## An APK is read in-house, and its DEX classes become class files
+
+An Android package opens like a JAR: `ApkImage : IBinaryImage` (in `Spydate.Core/Android`) holds the zip, its
+manifest, its `classes*.dex` in multidex order and its `lib/<abi>/*.so`, with no address space and its fingerprint
+a hash of the zip directory. The DEX parser (`Spydate.Core/Dex`) reads every table, the code items with their
+tries and debug state machine, annotations and encoded values; `Dalvik.Decode` turns code into instructions,
+formats 10x to 51l and the three payloads, and bad code into a last instruction with a problem, never a throw. The
+manifest and resource XML are compiled (AXML); `BinaryXml` turns them back into an `XDocument`, printing typed
+values the way aapt does, and `read_file` decodes them unless `as="hex"`.
+
+**No `DalvikReading`.** The plan had a reading of its own; instead `DexClasses.ToClassFile` presents each DEX class
+as the `ClassFile` model, and `JvmReading` gets a second constructor with `Kind = Dalvik`. The system annotations
+carry what the class-file attributes carry — `Signature`, `InnerClass`/`EnclosingClass`/`EnclosingMethod`,
+`Throws`, `AnnotationDefault`, `MethodParameters` — and static values become constant-pool entries, so the tree,
+references, strings, generics, records, enums, lambdas and nesting (stages 1 to 5) apply unchanged. Each method
+keeps its `DexCode`: the `bytecode` view is a smali-like listing (`DalvikListing`), and the `java` view lifts it.
+
+**A second lifter into the same IR.** `DalvikLifter` maps registers to slots (arguments first) and, since a
+register has no type — `const/4 v0, 0` is an int, a null or false — types every definition by reaching definitions
+and its uses; definitions joined by uses are one variable (a web), named from the debug table when its category
+matches, else like a local javac left unnamed. Constants are rematerialised at their uses; `new-instance` with its
+`<init>`, invoke with `move-result`, `filled-new-array` and `fill-array-data` become the Java they were.
+
+D8 makes shapes javac never does, and each is undone where it appears: monitor ranges that cover their own handler
+(`WidenMonitors`), a handler block shared by two catches, lambda classes (known by their shape, and their `INSTANCE`) written back as
+lambdas, `-$$Nest$` accessors and `-IA` marker constructors, synthetic forwarding helpers, `RecordTag` records,
+fields reordered by the constructor's stores, final fields copied to locals, and enum switches compiled to
+`if` chains over switch-map ordinals.
+
+**Verified by D8.** The four javac fixtures go through Android Studio's `r8.jar` in debug and release mode into an
+APK, are read back as Java, compiled by javac and run against the originals (`JavacRoundTripTests`, skipped without
+a JDK or D8; `SPYDATE_D8` names another).
+
+**Not yet:** a bare `.dex` does not open on its own; a `.so` inside is listed with its ABI but not opened as an ELF;
+`resources.arsc` is listed, not read; `invoke-custom` and `invoke-polymorphic` are shown as comments.

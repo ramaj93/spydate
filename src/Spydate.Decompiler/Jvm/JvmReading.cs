@@ -1,4 +1,5 @@
 using System.Globalization;
+using Spydate.Core.Android;
 using Spydate.Core.Jvm;
 using Spydate.Core.Project;
 using Spydate.Core.Readings;
@@ -193,13 +194,53 @@ public sealed class JvmReading : IBytecodeReading
     private readonly Dictionary<string, JvmType> _byInternalName = new(StringComparer.Ordinal);
 
     public JvmReading(JarImage jar, MemberAnnotationStore? annotations = null)
+        : this(jar.Classes, annotations)
     {
-        ArgumentNullException.ThrowIfNull(jar);
         Jar = jar;
+        int newest = jar.Classes.Count == 0 ? 0 : jar.Classes.Max(c => c.File.MajorVersion);
+        var sample = jar.Classes.FirstOrDefault(c => c.File.MajorVersion == newest)?.File;
+        Platform = newest == 0 ? "no classes" : ClassFile.JavaRelease(newest);
+        FormatVersion = sample is null ? "-" : string.Create(CultureInfo.InvariantCulture, $"{sample.MajorVersion}.{sample.MinorVersion}");
+
+        if (jar.Manifest?.MainClass is { } main && _byInternalName.TryGetValue(main, out var mainType))
+        {
+            EntryPoint = mainType.Members.OfType<JvmMember>()
+                .FirstOrDefault(m => m.Method is { Name: "main" } method
+                                     && (method.Access & JvmAccess.Static) != 0
+                                     && method.Descriptor == "([Ljava/lang/String;)V")
+                         ?? mainType.Members.OfType<JvmMember>().FirstOrDefault(m => m.Name == "main");
+            MainType = mainType;
+        }
+    }
+
+    /// <summary>
+    /// An Android package's classes: its DEX classes as class files (<see cref="DexClasses"/>). What launches is the
+    /// manifest's main activity, from its <c>onCreate</c>.
+    /// </summary>
+    public JvmReading(ApkImage apk, MemberAnnotationStore? annotations = null)
+        : this(apk.ClassFiles, annotations)
+    {
+        Apk = apk;
+        Kind = BytecodeKind.Dalvik;
+        Noun = "package";
+        string? minSdk = apk.Manifest?.MinSdk;
+        Platform = minSdk is null ? (apk.DexFiles.Count == 0 ? "no code" : apk.DexFiles[0].File.AndroidVersion) : $"Android API {minSdk}+";
+        FormatVersion = apk.DexVersion == 0 ? "-" : string.Create(CultureInfo.InvariantCulture, $"DEX {apk.DexVersion:D3}");
+
+        if (apk.Manifest?.MainActivity is { } main && _byInternalName.TryGetValue(main.Replace('.', '/'), out var mainType))
+        {
+            EntryPoint = mainType.Members.OfType<JvmMember>().FirstOrDefault(m => m.Name == "onCreate")
+                         ?? mainType.Members.OfType<JvmMember>().FirstOrDefault(m => m.Method?.IsConstructor == true);
+            MainType = mainType;
+        }
+    }
+
+    private JvmReading(IReadOnlyList<JarClass> classes, MemberAnnotationStore? annotations)
+    {
         Annotations = annotations;
         _references = new Lazy<JvmReferences>(() => JvmReferences.Build(this), LazyThreadSafetyMode.ExecutionAndPublication);
 
-        foreach (var jarClass in jar.Classes)
+        foreach (var jarClass in classes)
         {
             _byInternalName[jarClass.File.Name] = new JvmType(jarClass);
         }
@@ -227,37 +268,31 @@ public sealed class JvmReading : IBytecodeReading
             .OrderBy(g => g.Key, StringComparer.Ordinal)
             .Select(g => (IBytecodeNamespace)new JvmPackage(g.Key, g.OrderBy(t => t.Name, StringComparer.Ordinal).ToList<IBytecodeType>()))
             .ToList();
-
-        int newest = jar.Classes.Count == 0 ? 0 : jar.Classes.Max(c => c.File.MajorVersion);
-        var sample = jar.Classes.FirstOrDefault(c => c.File.MajorVersion == newest)?.File;
-        Platform = newest == 0 ? "no classes" : ClassFile.JavaRelease(newest);
-        FormatVersion = sample is null ? "-" : string.Create(CultureInfo.InvariantCulture, $"{sample.MajorVersion}.{sample.MinorVersion}");
-
-        if (jar.Manifest?.MainClass is { } main && _byInternalName.TryGetValue(main, out var mainType))
-        {
-            EntryPoint = mainType.Members.OfType<JvmMember>()
-                .FirstOrDefault(m => m.Method is { Name: "main" } method
-                                     && (method.Access & JvmAccess.Static) != 0
-                                     && method.Descriptor == "([Ljava/lang/String;)V")
-                         ?? mainType.Members.OfType<JvmMember>().FirstOrDefault(m => m.Name == "main");
-            MainType = mainType;
-        }
     }
 
-    public JarImage Jar { get; }
+    /// <summary>The Java archive read; null for an Android package.</summary>
+    public JarImage? Jar { get; }
+
+    /// <summary>The Android package read; null for a Java archive.</summary>
+    public ApkImage? Apk { get; }
 
     public MemberAnnotationStore? Annotations { get; }
 
-    public BytecodeKind Kind => BytecodeKind.Jvm;
+    public BytecodeKind Kind { get; } = BytecodeKind.Jvm;
 
-    public string Name => Jar.FileName;
+    public string Name => Jar?.FileName ?? Apk!.FileName;
 
     /// <summary>What the manifest calls it, with its version, falling back to the module name and then the file name.</summary>
     public string FullName
     {
         get
         {
-            var manifest = Jar.Manifest;
+            if (Apk is { } apk)
+            {
+                return apk.Manifest?.Package is { } package ? apk.Manifest.VersionName is { } versionName ? $"{package} {versionName}" : package : apk.FileName;
+            }
+
+            var manifest = Jar!.Manifest;
             string? title = manifest?["Implementation-Title"] ?? manifest?["Bundle-Name"] ?? manifest?["Automatic-Module-Name"] ?? Jar.ModuleName;
             string? version = manifest?["Implementation-Version"] ?? manifest?["Bundle-Version"];
             return title is null ? Jar.FileName : version is null ? title : $"{title} {version}";
@@ -265,15 +300,15 @@ public sealed class JvmReading : IBytecodeReading
     }
 
     /// <summary>The newest Java release any class needs: the archive runs on nothing older.</summary>
-    public string Platform { get; }
+    public string Platform { get; } = "no classes";
 
-    public string FormatVersion { get; }
+    public string FormatVersion { get; } = "-";
 
-    public string Noun => "archive";
+    public string Noun { get; } = "archive";
 
     public IReadOnlyList<IBytecodeNamespace> Namespaces { get; }
 
-    public IReadOnlyList<string> Requires => Jar.Manifest?.ClassPath ?? [];
+    public IReadOnlyList<string> Requires => Jar?.Manifest?.ClassPath ?? [];
 
     public IBytecodeMember? EntryPoint { get; }
 

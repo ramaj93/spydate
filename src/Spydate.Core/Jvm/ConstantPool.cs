@@ -47,6 +47,9 @@ public sealed class ConstantPool
 
     private ConstantPool(Constant[] entries) => _entries = entries;
 
+    /// <summary>A pool built rather than read — for a class translated from DEX — its entries from index 1 on.</summary>
+    internal static ConstantPool Of(IEnumerable<Constant> entries) => new([default, .. entries]);
+
     /// <summary>The declared count, one more than the highest index, as the class file states it.</summary>
     public int Count => _entries.Length;
 

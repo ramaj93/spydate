@@ -46,7 +46,7 @@ public sealed class DexTests
             .Method("<init>", "V", [], 0x10001, new SyntheticDex.Code(1, 1, 0, [0x000E]))
             .Method("greet", "V", ["Ljava/lang/String;"], 0x0001, code)
             .Method("run", "V", [], 0x0401, null)
-            .Annotate(dex.Annotate("Ldalvik/annotation/Signature;", 2, ("value", SyntheticDex.Value.Array(SyntheticDex.Value.Str(dex, "Ljava/lang/Object;")))))
+            .Annotate(dex.Annotate("Ldalvik/annotation/Signature;", 2, ("value", SyntheticDex.Value.Array(SyntheticDex.Value.Str(dex, "Ljava/lang/Object;"), SyntheticDex.Value.Str(dex, "Ljava/lang/Runnable;")))))
             .Annotate(dex.Annotate("Ldalvik/annotation/InnerClass;", 2, ("accessFlags", SyntheticDex.Value.Int(9)), ("name", SyntheticDex.Value.Null())));
         return dex.Build();
     }
@@ -89,7 +89,7 @@ public sealed class DexTests
         Assert.Null(greeter.VirtualMethods.Single(m => m.Ref.Name == "run").Code);
         var signature = greeter.Annotations.Single(a => a.Type == "Ldalvik/annotation/Signature;");
         Assert.Equal(DexVisibility.System, signature.Visibility);
-        Assert.Equal("Ljava/lang/Object;", Assert.Single((IReadOnlyList<DexValue>)signature["value"]!.Value!).Value);
+        Assert.Equal(["Ljava/lang/Object;", "Ljava/lang/Runnable;"], ((IReadOnlyList<DexValue>)signature["value"]!.Value!).Select(v => (string?)v.Value));
         var inner = greeter.Annotations.Single(a => a.Type == "Ldalvik/annotation/InnerClass;");
         Assert.Equal(DexValueKind.Null, inner["name"]!.Kind);
     }

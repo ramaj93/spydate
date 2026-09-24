@@ -1,4 +1,6 @@
+using Spydate.Core.Android;
 using Spydate.Core.Jvm;
+using Spydate.Core.Readings;
 using Spydate.Decompiler.Jvm;
 using Xunit.Abstractions;
 
@@ -100,6 +102,84 @@ public sealed class JavacRoundTripTests
             Assert.Equal(0, exit);
             Assert.Equal(compiled.Expected[name], output);
         }
+    }
+
+    /// <summary>
+    /// The same fixtures as an Android build makes them: the JAR with debug information through D8 — keeping the
+    /// debug table or, as a release build does, dropping it — into an APK, read back from its Dalvik code, compiled
+    /// again with javac and run. Needs D8 as well as a JDK: <c>SPYDATE_D8</c> naming <c>r8.jar</c> or <c>d8.jar</c>,
+    /// or the one Android Studio ships; skipped without it.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("Shapes", true)]
+    [InlineData("Shapes", false)]
+    [InlineData("Sugar", true)]
+    [InlineData("Sugar", false)]
+    [InlineData("Legacy", true)]
+    [InlineData("Legacy", false)]
+    [InlineData("Generics", true)]
+    [InlineData("Generics", false)]
+    public void TheClassFromAnApkCompilesAndBehavesLikeTheOriginal(string name, bool debug)
+    {
+        var compiled = Require();
+        string? apk = (debug ? DebugApk : ReleaseApk).Value;
+        Skip.If(apk is null, "no D8 found (SPYDATE_D8, Android Studio's r8.jar)");
+
+        var reading = new JvmReading(ApkImage.Load(apk!));
+        Assert.Equal(BytecodeKind.Dalvik, reading.Kind);
+        string java = reading.Render(reading.FindType($"fixtures/{name}")!, null, JvmReading.JavaView);
+
+        string work = Path.Combine(compiled.Root, $"dex-{name}-{(debug ? "debug" : "release")}");
+        Directory.CreateDirectory(Path.Combine(work, "src", "fixtures"));
+        string source = Path.Combine(work, "src", "fixtures", name + ".java");
+        File.WriteAllText(source, java);
+        var (javacExit, javacOutput) = Run(Path.Combine(compiled.Jdk, "javac"), $"-nowarn -encoding UTF-8 -d \"{Path.Combine(work, "out")}\" \"{source}\"");
+        Assert.True(javacExit == 0, $"the class read from Dalvik code does not compile:\n{javacOutput}\n{java}");
+
+        var (exit, output) = Run(Path.Combine(compiled.Jdk, "java"), $"-cp \"{Path.Combine(work, "out")}\" fixtures.{name}");
+        Assert.Equal(0, exit);
+        Assert.Equal(compiled.Expected[name], output);
+    }
+
+    private static readonly Lazy<string?> DebugApk = new(() => Dex("debug"), LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static readonly Lazy<string?> ReleaseApk = new(() => Dex("release"), LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>The fixtures' JAR through D8 in one mode, as an APK of its DEX files; null without a JDK or D8.</summary>
+    private static string? Dex(string mode)
+    {
+        if (Built.Value is not { } compiled || FindD8() is not { } d8)
+        {
+            return null;
+        }
+
+        string dex = Path.Combine(compiled.Root, "d8-" + mode);
+        Directory.CreateDirectory(dex);
+
+        // --lib is the JDK itself: D8 resolves java.* against its modules. Min API 26 leaves lambdas to D8's own classes.
+        string jdkHome = Path.GetDirectoryName(compiled.Jdk)!;
+        var (exit, output) = Run(Path.Combine(compiled.Jdk, "java"),
+            $"-cp \"{d8}\" com.android.tools.r8.D8 --{mode} --min-api 26 --lib \"{jdkHome}\" --output \"{dex}\" \"{compiled.WithDebug}\"");
+        if (exit != 0)
+        {
+            throw new InvalidOperationException($"D8 failed on the fixtures: {output}");
+        }
+
+        var entries = Directory.EnumerateFiles(dex, "classes*.dex").Select(f => (Path.GetFileName(f), File.ReadAllBytes(f)));
+        string apk = Path.Combine(compiled.Root, $"fixtures-{mode}.apk");
+        File.WriteAllBytes(apk, SyntheticClass.Jar(entries));
+        return apk;
+    }
+
+    /// <summary>D8's JAR: <c>SPYDATE_D8</c>, or the <c>r8.jar</c> in Android Studio's Android plugin (R8 carries D8).</summary>
+    private static string? FindD8()
+    {
+        string[] candidates =
+        [
+            Environment.GetEnvironmentVariable("SPYDATE_D8") ?? string.Empty,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Android", "Android Studio", "plugins", "android", "lib", "r8.jar"),
+        ];
+        return candidates.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c) && File.Exists(c));
     }
 
     /// <summary>

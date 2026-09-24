@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text;
+using Spydate.Core.Android;
 using Spydate.Core.Archive;
+using Spydate.Core.Binary;
 using Spydate.Core.Jvm;
 using Spydate.Decompiler.Jvm;
 using Wpf.Ui.Controls;
@@ -23,8 +25,12 @@ public static class JarDocuments
     /// <summary>The most a file is inflated to be shown; a larger one is refused by size rather than read into memory.</summary>
     private const int MaxRead = 64 * 1024 * 1024;
 
-    public static RecordsDocumentViewModel Entries(JarImage jar, Action<ArchiveEntry> open)
+    public static RecordsDocumentViewModel Entries(JarImage jar, Action<ArchiveEntry> open) => Entries(jar.Archive, open);
+
+    /// <summary>Every file in a JAR's or an APK's zip, in directory order.</summary>
+    public static RecordsDocumentViewModel Entries(ZipArchiveFile archive, Action<ArchiveEntry> open)
     {
+        var jar = new { Archive = archive };
         var rows = jar.Archive.Entries.Where(e => !e.IsDirectory).Select(e => new JarEntryRow(
             e.Index,
             e.Name,
@@ -69,7 +75,7 @@ public static class JarDocuments
             "strings",
             "Strings",
             SymbolRegular.TextT24,
-            "every string constant the code loads (ldc), and each static final String's value; double-click to read the member",
+            $"every string constant the code loads ({(reading.Apk is null ? "ldc" : "const-string")}), and each static final String's value; double-click to read the member",
             [new("String", nameof(JarStringRow.Text), 480), new("In", nameof(JarStringRow.In), 0), new("At", nameof(JarStringRow.At), 70)],
             rows,
             row => open(((JarStringRow)row).Type, ((JarStringRow)row).Member));
@@ -79,16 +85,34 @@ public static class JarDocuments
     /// A file from inside the archive as text: itself when it reads as text, a hex dump when it does not, and the
     /// reason when it cannot be read at all.
     /// </summary>
-    public static string Contents(JarImage jar, ArchiveEntry entry)
+    public static string Contents(JarImage jar, ArchiveEntry entry) => Contents(jar.Archive, entry);
+
+    /// <summary>
+    /// A file from inside a JAR or an APK as text: compiled XML (an APK's manifest and resources) decoded back to
+    /// XML, text as itself, anything else a hex dump, and the reason when it cannot be read at all.
+    /// </summary>
+    public static string Contents(ZipArchiveFile archive, ArchiveEntry entry)
     {
         byte[] bytes;
         try
         {
-            bytes = jar.Archive.Read(entry, MaxRead);
+            bytes = archive.Read(entry, MaxRead);
         }
         catch (ArchiveException ex)
         {
             return ex.Message;
+        }
+
+        if (BinaryXml.IsBinaryXml(bytes))
+        {
+            try
+            {
+                return BinaryXml.ToText(bytes);
+            }
+            catch (BinaryParseException ex)
+            {
+                return $"Compiled XML that does not read: {ex.Message}";
+            }
         }
 
         var shown = bytes.AsSpan(0, Math.Min(bytes.Length, MaxShown));
@@ -148,6 +172,9 @@ public static class JarDocuments
             ".jar" or ".war" or ".zip" => "nested archive",
             ".so" or ".dll" or ".dylib" or ".jnilib" => "native library",
             ".mf" => "manifest",
+            ".dex" => "Dalvik code",
+            ".arsc" => "resource table",
+            ".xml" when name == "AndroidManifest.xml" || name.StartsWith("res/", StringComparison.Ordinal) => "compiled XML",
             ".sf" or ".rsa" or ".dsa" or ".ec" => "signature",
             ".properties" or ".xml" or ".json" or ".yml" or ".yaml" or ".txt" or ".md" or ".html" => "text",
             _ => extension.Length > 0 ? extension[1..] : "file",

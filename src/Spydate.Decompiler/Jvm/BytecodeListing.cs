@@ -70,7 +70,10 @@ internal sealed class BytecodeListing
     private void Header(JvmType type)
     {
         var file = type.File;
-        var facts = new List<string> { type.Class.Entry.Name, file.JavaVersion, $"class file {file.MajorVersion}.{file.MinorVersion}" };
+        // A class translated from DEX says which DEX file holds it; a class file its version.
+        var facts = _reading.Apk is null
+            ? new List<string> { type.Class.Entry.Name, file.JavaVersion, $"class file {file.MajorVersion}.{file.MinorVersion}" }
+            : new List<string> { type.Class.Entry.Name, _reading.FormatVersion };
         if (file.SourceFile is { } source)
         {
             facts.Add($"from {source}");
@@ -251,7 +254,11 @@ internal sealed class BytecodeListing
         }
 
         _sb.Append('\n');
-        if (method.Code is { } code)
+        if (method.Dalvik is { } dalvik)
+        {
+            DalvikListing.Code(_sb, method, dalvik, indent + "  ");
+        }
+        else if (method.Code is { } code)
         {
             Code(code, indent + "  ");
         }

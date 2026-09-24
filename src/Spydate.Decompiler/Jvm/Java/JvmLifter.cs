@@ -84,6 +84,12 @@ internal sealed class JvmLifter
     /// <param name="reserved">Names the method's locals must not take — a lambda's, those of the method it is written in.</param>
     public static LiftedMethod Lift(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlySet<string>? reserved = null)
     {
+        // A method translated from DEX has Dalvik code, which lifts into the same IR its own way.
+        if (method.Dalvik is { } dalvik)
+        {
+            return DalvikLifter.Lift(file, method, dalvik, reserved);
+        }
+
         // Again while a join is handed values: each pass learns which slots every path fills with the same local or
         // constant, and the next carries those as they are instead of through a variable per path — which can make
         // the paths into a later join agree too.
