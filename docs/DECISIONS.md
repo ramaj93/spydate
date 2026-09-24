@@ -1305,6 +1305,7 @@ slot a shrinker reused is two variables, not an update of one.
 All 535,752 classes of Android Studio's JARs still decompile with no crash and no failed method, and
 the methods shown with gotos went from 6,308 to 6,200 (counted once each: nested classes are now written inside
 their outer class, so a sweep that also renders each nested class alone counts them again).
+jd-gui cannot be measured this way: its obfuscated names overload by return type and clash with packages.
 
 ## Erased generics are written back, and the Java view is measured by compiling it again
 
@@ -1351,4 +1352,27 @@ whole, with and without debug information, and each fixture's `main` then runs f
 local cast to `L[]` whose type only its later uses reveal. The four fixtures round-trip with and without debug
 information, one at a time and as one tree. Android Studio's 921 JARs still decompile with no crash, no failed method and
 the same 6,200 methods shown with gotos.
-jd-gui cannot be measured this way: its obfuscated names overload by return type and clash with packages.
+
+## Loops Kotlin's coroutines enter twice are copied into shape; dead code goes
+
+The Java structurer fell back to gotos for 6,200 methods of Android Studio's JARs, nearly all Kotlin coroutine
+state machines. Two causes are fixed; the third is not.
+
+**A loop entered in its middle is split.** A coroutine's `switch` resumes a suspended call inside a loop, so the
+loop has two entries and no goto-free form. `JavaSplitter` copies the part of such a region that its second entry
+reaches without passing the head (node splitting): the originals stay the loop, the copies are the resume path, and
+they enter the loop at its head like any code before it. The entry reached first in reverse post-order is kept as
+head; the copies get addresses past the method's code, their jumps, switch targets and try exits renamed, and each
+copied statement is a new object (declarations are placed by statement). Growth is capped at twice the method or
+400 statements; past that the method falls back as before. A reducible graph costs one dominance check. The check
+that it still means the same is a hand-assembled class with two irreducible loops, decompiled, compiled by javac
+and run against the original over a range of inputs.
+
+**Blocks nothing reaches are dropped** (Kotlin leaves code after calls that never return, and a split can orphan
+an original) — unless a handler is among them, which means a try could not be made a region and the method is
+shown the old way.
+
+**Not fixed: a jump into the middle of a try.** A coroutine that suspends inside `try` resumes there; Java only
+enters a try at its start. The fix is the same copying, of the protected code from the resume point and of its
+handlers, as a second try with its own exception entries; it is left for later, and such methods are still shown
+with gotos, saying why.

@@ -170,6 +170,8 @@ internal sealed class JavaStructurer
             return CSeq.Empty;
         }
 
+        // Kotlin's coroutines resume inside loops; copying the code up to the loop's head gives each loop one way in.
+        JavaSplitter.MakeReducible(function);
         var structurer = new JavaStructurer(function, labels);
         var items = new List<CStmt>();
         structurer.DoTree(0, null, items);

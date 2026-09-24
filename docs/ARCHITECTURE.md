@@ -388,8 +388,9 @@ See `DECOMPILER-DESIGN.md`. Summary:
   switches, switch expressions and `assert`; `JavaEmitter` prints Java, with
   `JavaGenerics` for generic types — the tables and signatures that say what a
   value's generic type is, locals typed from their stores, casts erasure took
-  out written back — and `JavaNaming` for names. An
-  irreducible method falls back to the native `Structurer`. `JavaClassWriter`
+  out written back — and `JavaNaming` for names. `JavaSplitter` copies
+  the code of a loop entered twice (Kotlin's coroutines) so each loop has one way
+  in; a method still irreducible falls back to the native `Structurer`. `JavaClassWriter`
   decompiles a class's methods first, then writes the class as a whole: enum
   constants, field initialisers, records, and nested, anonymous and local classes
   and lambdas in place through `IJavaScope`; `JavaImports` resolves the class-name

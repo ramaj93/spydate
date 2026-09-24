@@ -46,6 +46,7 @@ internal static class JavaRegions
             return Structurer.Structure(function);
         }
 
+        DropDeadCode(function, lifted);
         var body = JavaStructurer.Structure(function, labels);
         if (JavaTree.Descendants(body).OfType<JExit>().FirstOrDefault() is { } stray)
         {
@@ -53,6 +54,42 @@ internal static class JavaRegions
         }
 
         return body;
+    }
+
+    /// <summary>
+    /// Blocks nothing reaches — code after a call Kotlin knows never returns, a resume state no path sets — cannot
+    /// run, and Java rejects unreachable code, so they go. Unless a handler is among them: then a try could not be
+    /// made a region, its handler is only reached by the exception, and the method is shown the old way instead.
+    /// </summary>
+    private static void DropDeadCode(IrFunction function, LiftedMethod lifted)
+    {
+        var byStart = function.Blocks.ToDictionary(b => b.StartVa);
+        if (!byStart.TryGetValue(function.EntryVa, out var entry))
+        {
+            return;
+        }
+
+        var reached = new HashSet<ulong> { entry.StartVa };
+        var work = new Stack<IrBlock>();
+        work.Push(entry);
+        while (work.Count > 0)
+        {
+            foreach (ulong next in work.Pop().Successors)
+            {
+                if (byStart.TryGetValue(next, out var block) && reached.Add(next))
+                {
+                    work.Push(block);
+                }
+            }
+        }
+
+        var dead = function.Blocks.Where(b => !reached.Contains(b.StartVa)).ToList();
+        if (dead.Count == 0 || dead.Any(b => lifted.Handlers.Any(h => (ulong)h.HandlerPc == b.StartVa)))
+        {
+            return;
+        }
+
+        function.Blocks.RemoveAll(b => !reached.Contains(b.StartVa));
     }
 
     /// <summary>

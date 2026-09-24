@@ -201,11 +201,11 @@ public sealed class JavaDecompilerTests
     }
 
     /// <summary>
-    /// A loop with two ways in — only an obfuscator writes one — has no goto-free Java form. It is shown with gotos
-    /// and says so, rather than failing.
+    /// A loop with two ways in — Kotlin's coroutines resume into one, obfuscators write them — has no goto-free Java
+    /// form as it stands. The code from the second entry up to the loop's head is copied, so each loop has one way in.
     /// </summary>
     [Fact]
-    public void ALoopWithTwoEntriesIsShownWithGotosAndSaysWhy()
+    public void ALoopWithTwoEntriesIsWrittenByCopyingItsSecondEntry()
     {
         var c = new SyntheticClass("demo/Tangled");
         c.AddMethod(0x0009, "f", "(I)V",
@@ -222,8 +222,35 @@ public sealed class JavaDecompilerTests
             maxStack: 1, maxLocals: 1);
         string java = Java(Reading(("demo/Tangled.class", c.Build())), "demo/Tangled", "f");
 
+        Assert.DoesNotContain("goto", java, StringComparison.Ordinal);
+        Assert.DoesNotContain("// warning", java, StringComparison.Ordinal);
+        Assert.Contains("while (", java, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A jump into the middle of a try — a coroutine resuming inside one — has no Java form at all: a try is only
+    /// entered at its start. It is shown with gotos and says so, rather than failing.
+    /// </summary>
+    [Fact]
+    public void AJumpIntoATryIsShownWithGotosAndSaysWhy()
+    {
+        var c = new SyntheticClass("demo/Resumed");
+        c.AddMethod(0x0009, "f", "(I)V",
+            [
+                0x1A,                    // 0: iload_0
+                0x99, 0x00, 0x08,        // 1: ifeq 9 — into the try's middle
+                0x84, 0x00, 0x01,        // 4: try: iinc 0, 1
+                0x00, 0x00,              // 7: nop, nop
+                0x84, 0x00, 0x02,        // 9: iinc 0, 2
+                0xB1,                    // 12: return
+                0x4C,                    // 13: catch: astore_1
+                0xB1,                    // 14: return
+            ],
+            maxStack: 1, maxLocals: 2,
+            handlers: [(4, 13, 13, "java/lang/RuntimeException")]);
+        string java = Java(Reading(("demo/Resumed.class", c.Build())), "demo/Resumed", "f");
+
         Assert.Contains("// warning: shown with gotos:", java, StringComparison.Ordinal);
-        Assert.Contains("goto", java, StringComparison.Ordinal);
         Assert.DoesNotContain("could not be decompiled", java, StringComparison.Ordinal);
     }
 

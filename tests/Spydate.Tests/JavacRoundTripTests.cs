@@ -122,6 +122,79 @@ public sealed class JavacRoundTripTests
         Assert.True(report.Rate >= minimum, report.ToString());
     }
 
+    /// <summary>
+    /// javac never makes an irreducible loop, but Kotlin's coroutines do: a jump into the middle of a loop. Hand-built
+    /// bytecode with one entry into a loop's middle and one with three entries is written without goto — the code
+    /// from each extra entry to the loop's head copied — and must compute what the original computes for every input.
+    /// </summary>
+    [SkippableFact]
+    public void AnIrreducibleLoopIsCopiedIntoShapeAndMeansTheSame()
+    {
+        var compiled = Require();
+        var irreducible = new SyntheticClass("fixtures/Irreducible", major: 49);
+        irreducible.AddMethod(0x0009, "loop", "(I)I", [
+            0x03, 0x3C,                     // 0: sum = 0
+            0x1A, 0x99, 0x00, 0x06,         // 2: if (n == 0) goto 9, the loop's middle
+            0x84, 0x01, 0x01,               // 6: head: sum += 1
+            0x84, 0x01, 0x0A,               // 9: sum += 10
+            0x84, 0x00, 0xFF,               // 12: n--
+            0x1A, 0x9D, 0xFF, 0xF6,         // 15: if (n > 0) goto 6
+            0x1B, 0xAC,                     // 19: return sum
+        ], maxStack: 2, maxLocals: 2);
+        irreducible.AddMethod(0x0009, "twice", "(I)I", [
+            0x03, 0x3C,                     // 0: sum = 0
+            0x1A, 0x10, 0x05, 0xA3, 0x00, 0x0D, // 2: if (n > 5) goto 18
+            0x1A, 0x99, 0x00, 0x06,         // 8: if (n == 0) goto 15
+            0x84, 0x01, 0x01,               // 12: head: sum += 1
+            0x84, 0x01, 0x14,               // 15: sum += 20
+            0x84, 0x01, 0x32,               // 18: sum += 50
+            0x84, 0x00, 0xFE,               // 21: n -= 2
+            0x1A, 0x9D, 0xFF, 0xF3,         // 24: if (n > 0) goto 12
+            0x1B, 0xAC,                     // 28: return sum
+        ], maxStack: 2, maxLocals: 2);
+        byte[] bytes = irreducible.Build();
+
+        string work = Path.Combine(compiled.Root, "irreducible");
+        string original = Path.Combine(work, "original");
+        Directory.CreateDirectory(Path.Combine(original, "fixtures"));
+        File.WriteAllBytes(Path.Combine(original, "fixtures", "Irreducible.class"), bytes);
+        string driver = Path.Combine(work, "Driver.java");
+        File.WriteAllText(driver, """
+            package fixtures;
+
+            public class Driver {
+                public static void main(String[] args) {
+                    StringBuilder out = new StringBuilder();
+                    for (int n = -3; n <= 12; n++) {
+                        out.append(Irreducible.loop(n)).append(',').append(Irreducible.twice(n)).append(' ');
+                    }
+                    System.out.print(out);
+                }
+            }
+            """);
+
+        var (javacExit, javacOutput) = Run(Path.Combine(compiled.Jdk, "javac"), $"-nowarn -d \"{original}\" -cp \"{original}\" \"{driver}\"");
+        Assert.True(javacExit == 0, javacOutput);
+        var (originalExit, expected) = Run(Path.Combine(compiled.Jdk, "java"), $"-cp \"{original}\" fixtures.Driver");
+        Assert.True(originalExit == 0 && expected.Length > 0, expected);
+
+        string jar = Path.Combine(work, "irreducible.jar");
+        File.WriteAllBytes(jar, SyntheticClass.Jar([("fixtures/Irreducible.class", bytes)]));
+        string java = Decompile(jar, "Irreducible");
+        _output.WriteLine(java);
+        Assert.DoesNotContain("goto", java, StringComparison.Ordinal);
+        Assert.DoesNotContain("// warning", java, StringComparison.Ordinal);
+
+        string again = Path.Combine(work, "again");
+        string source = Path.Combine(work, "Irreducible.java");
+        File.WriteAllText(source, java);
+        (javacExit, javacOutput) = Run(Path.Combine(compiled.Jdk, "javac"), $"-nowarn -encoding UTF-8 -d \"{again}\" \"{source}\" \"{driver}\"");
+        Assert.True(javacExit == 0, $"{javacOutput}\n{java}");
+        var (exit, output) = Run(Path.Combine(compiled.Jdk, "java"), $"-cp \"{again}\" fixtures.Driver");
+        Assert.Equal(0, exit);
+        Assert.Equal(expected, output);
+    }
+
     [SkippableFact]
     public void ErasedGenericsAreWrittenBack()
     {
