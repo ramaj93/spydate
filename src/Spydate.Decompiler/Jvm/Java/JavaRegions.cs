@@ -22,7 +22,10 @@ internal static class JavaRegions
 {
     private const int MaxTries = 256;
 
-    private sealed record TryRegion(int Start, int End, List<(string? Type, int Handler)> Catches);
+    private sealed record TryRegion(int Start, int End, List<(string? Type, int Handler)> Catches)
+    {
+        public Dictionary<int, List<string>> Alternatives { get; init; } = [];
+    }
 
     /// <summary>
     /// Structures the method. Unless <paramref name="legacy"/>, with the <see cref="JavaStructurer"/>, which throws
@@ -63,6 +66,7 @@ internal static class JavaRegions
     private static List<TryRegion> Regions(IReadOnlyList<ExceptionHandler> handlers)
     {
         var byHandler = new Dictionary<int, (int Start, int End, string? Type)>();
+        var alternatives = new Dictionary<int, List<string>>();
         var order = new List<int>();
         foreach (var handler in handlers)
         {
@@ -74,6 +78,16 @@ internal static class JavaRegions
             if (byHandler.TryGetValue(handler.HandlerPc, out var range))
             {
                 byHandler[handler.HandlerPc] = (Math.Min(range.Start, handler.StartPc), Math.Max(range.End, handler.EndPc), range.Type);
+
+                // Another type for the same handler is a multi-catch.
+                if (range.Type is not null && handler.CatchType is { } other && other != range.Type)
+                {
+                    var list = alternatives.TryGetValue(handler.HandlerPc, out var known) ? known : alternatives[handler.HandlerPc] = [];
+                    if (!list.Contains(other))
+                    {
+                        list.Add(other);
+                    }
+                }
             }
             else
             {
@@ -89,7 +103,7 @@ internal static class JavaRegions
             var existing = regions.FirstOrDefault(r => r.Start == start && r.End == end);
             if (existing is null)
             {
-                regions.Add(new TryRegion(start, end, [(type, handler)]));
+                regions.Add(new TryRegion(start, end, [(type, handler)]) { Alternatives = alternatives });
             }
             else
             {
@@ -162,7 +176,10 @@ internal static class JavaRegions
             }
 
             string? variable = BindCatch(byStart[handler], lifted);
-            catches.Add(new JCatch(type, variable, StructureSubgraph(blocks, byStart[handler], join, labels)));
+            catches.Add(new JCatch(type, variable, StructureSubgraph(blocks, byStart[handler], join, labels))
+            {
+                Alternatives = region.Alternatives.TryGetValue(handler, out var more) ? more : [],
+            });
         }
 
         var tryBody = StructureSubgraph(body.OrderBy(b => b.StartVa).ToList(), entry, join, labels);

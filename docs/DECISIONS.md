@@ -1305,4 +1305,50 @@ slot a shrinker reused is two variables, not an update of one.
 All 535,752 classes of Android Studio's JARs still decompile with no crash and no failed method, and
 the methods shown with gotos went from 6,308 to 6,200 (counted once each: nested classes are now written inside
 their outer class, so a sweep that also renders each nested class alone counts them again).
+
+## Erased generics are written back, and the Java view is measured by compiling it again
+
+Stage 5 of the fidelity work. After stage 4, 37 of commons-lang3's 231 top-level classes did not compile again, and
+every one of the 96 errors was the same thing: erasure. javac writes a cast the source made to `T` as nothing, one
+to `T[]` or `E extends Enum<E>` as a cast to the bound's erasure, and gives a local of type `T` no type at all
+when there is no local variable type table (most JARs: Maven's default keeps the variable table but not always the
+type table). Printed as the bytecode says, `return (Object[]) add(...)` in a method returning `T[]` does not
+compile.
+
+**Values are fitted to where the source's type is generic.** A return, a store to a field or local, and a field
+initialiser each know the generic type the value goes to (the method's return signature, the field's, the local's).
+There, a cast javac made to the erasure is a cast to the generic type, and a value not known to have that type
+gets one — `(T) NO_VALUE`, `(B) this`, `(Class<T>) value.getClass()` — an unchecked cast, which is what the
+source wrote. Known means: a local's or parameter's generic type, this class's field through `this`, a field of
+another instance of a generic class with that instance's arguments substituted, a method of this JAR (inherited
+ones through the extends clauses' arguments, an enclosing instance's through `Outer.this`), and JDK collection
+methods from a table. A call whose result the target types (a generic method, a lambda) is left to inference, as
+in the source. The reverse also holds: a cast to a type variable's bound on a value of that variable goes
+(`p.first.compareTo(...)`, not `((Comparable) p.first)`), and so does the cast after `Objects.requireNonNull(x)`.
+
+**Locals get generic types from what they hold, and from where it goes.** A local the tables do not describe is
+typed `T` when every store agrees on an in-scope generic type: `T result = this.reference.get()` for an
+`AtomicReference<T>` field, `T item` from a `List<T>`'s iterator, `T current = array[i]` for a `T[]`. A local that
+only holds a `new` of a generic class takes the arguments of the one type it is returned or stored as:
+`ArrayList<T> out = new ArrayList<>()` for a method returning `List<T>`. Only type variables the method can name —
+its own, and its class's in an instance method — are ever used, so the declaration compiles where it stands.
+
+**What the source had to spell out, spelled out.** A generic static method with no arguments heading a call chain
+infers nothing (`AppendableJoiner.builder().setDelimiter(...).get()` gives `AppendableJoiner<Object>`), so the
+source wrote `AppendableJoiner.<Type>builder()`; the type arguments are recovered by following each call's
+signature down the chain and matching the result against the target. A method declared `throws E` that throws a
+value of `E`'s erasure casts it to `E`. A multi-catch, which the exception table lists as one entry per type with
+one handler, is `catch (A | B e)` again. `<T extends Object>` is `<T>`.
+
+**The harness is in the test suite.** `JavaRecompile` decompiles every top-level class of a JAR into a source
+tree and compiles it again against the JAR, grouping javac's errors by kind. The fixtures' JAR goes through it
+whole, with and without debug information, and each fixture's `main` then runs from the recompiled classes;
+`SPYDATE_RECOMPILE_JAR` points the same test at any JAR (`SPYDATE_RECOMPILE_CLASSPATH` for its dependencies,
+`SPYDATE_RECOMPILE_MIN` for a floor), so a regression on a real library is one command away.
+
+**Measured.** commons-lang3: 247 of its 249 source files (package-info included) compile again, 96 errors down to
+3. The three need what the bytecode cannot say: a raw cast the source wrote between types with one erasure, and a
+local cast to `L[]` whose type only its later uses reveal. The four fixtures round-trip with and without debug
+information, one at a time and as one tree. Android Studio's 921 JARs still decompile with no crash, no failed method and
+the same 6,200 methods shown with gotos.
 jd-gui cannot be measured this way: its obfuscated names overload by return type and clash with packages.

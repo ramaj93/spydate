@@ -372,7 +372,11 @@ public sealed record JTry(CStmt Body, IReadOnlyList<JCatch> Catches) : CStmt
 }
 
 /// <summary>One handler: what it catches (null for any — a <c>finally</c>), what the exception is called, and its body.</summary>
-public sealed record JCatch(string? CatchType, string? Variable, CStmt Body);
+public sealed record JCatch(string? CatchType, string? Variable, CStmt Body)
+{
+    /// <summary>The other types of a multi-catch, <c>catch (A | B e)</c>: javac writes one table entry per type, one handler.</summary>
+    public IReadOnlyList<string> Alternatives { get; init; } = [];
+}
 
 // --- structured statements the Java structurer builds ------------------------------------------------------
 

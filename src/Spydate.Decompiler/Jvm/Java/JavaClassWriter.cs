@@ -345,11 +345,12 @@ internal sealed class JavaClassWriter
     }
 
     /// <summary>A method lifted, its locals given their types, its temporaries folded back, and its <c>&amp;&amp;</c> / <c>||</c> ladders merged.</summary>
-    private static LiftedMethod Prepare(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlySet<string>? reserved)
+    private LiftedMethod Prepare(ClassFile file, JvmMethod method, CodeAttribute code, IReadOnlySet<string>? reserved)
     {
         var lifted = JvmLifter.Lift(file, method, code, reserved);
         JavaLocals.Run(lifted, method);
         JavaInliner.Run(lifted.Function);
+        JavaGenerics.InferLocals(lifted, method, file, FindFile);
 
         // Conditions are merged across blocks, but never across the edge of a try: its boundaries stay blocks.
         var pinned = code.Handlers.SelectMany(h => new[] { (ulong)h.StartPc, (ulong)h.EndPc, (ulong)h.HandlerPc }).ToHashSet();
@@ -1027,7 +1028,7 @@ internal sealed class JavaClassWriter
         else if (initializer is { } init && init.From.Lifted is { } lifted)
         {
             var emitter = new JavaEmitter(naming);
-            string? generic = field.Signature is { } s && JavaGenerics.IsParameterized(s) ? s : null;
+            string? generic = field.Signature;
             if ((field.Access & JvmAccess.Static) != 0)
             {
                 naming.ForwardStatics = file.Fields.SkipWhile(f => !ReferenceEquals(f, field)).Where(f => (f.Access & JvmAccess.Static) != 0)

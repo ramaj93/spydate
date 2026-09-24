@@ -386,7 +386,9 @@ See `DECOMPILER-DESIGN.md`. Summary:
   conditionals, with `JavaSugar` for `synchronized`/`finally`; `JavaDeclarations`
   places each local's declaration; `JavaShortcuts` rebuilds for-each, string
   switches, switch expressions and `assert`; `JavaEmitter` prints Java, with
-  `JavaGenerics` for generic types and casts and `JavaNaming` for names. An
+  `JavaGenerics` for generic types — the tables and signatures that say what a
+  value's generic type is, locals typed from their stores, casts erasure took
+  out written back — and `JavaNaming` for names. An
   irreducible method falls back to the native `Structurer`. `JavaClassWriter`
   decompiles a class's methods first, then writes the class as a whole: enum
   constants, field initialisers, records, and nested, anonymous and local classes
@@ -394,8 +396,9 @@ See `DECOMPILER-DESIGN.md`. Summary:
   tokens into imports once the text is done. Annotations come from
   `Core/Jvm/JvmAnnotations`. `JavaDecompiler` runs it on a large-stack thread. See
   DECISIONS, "Java is decompiled in-house on the native IR", "Java is structured
-  without goto, and its types are recovered" and "Java's shortcuts and nested
-  classes are written the way the source wrote them".
+  without goto, and its types are recovered", "Java's shortcuts and nested
+  classes are written the way the source wrote them" and "Erased generics are
+  written back". The tests' `JavaRecompile` compiles a whole JAR's output again.
 
 ## 5b. User annotations and the project file
 

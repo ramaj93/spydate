@@ -296,12 +296,15 @@ public static class Descriptors
                         continue;   // an empty class bound: only interface bounds follow
                     }
 
+                    // Object as a bound says nothing: <T> is <T:Ljava/lang/Object;>. Checked on the signature, since
+                    // the name may come back as a token or the project's own name for the class.
+                    bool objectBound = string.CompareOrdinal(text, _at, "Ljava/lang/Object;", 0, 18) == 0;
                     if (ReferenceType() is not { } bound)
                     {
                         return null;
                     }
 
-                    if (bound is not ("java.lang.Object" or "Object"))
+                    if (!objectBound && bound is not ("java.lang.Object" or "Object"))
                     {
                         bounds.Add(bound);
                     }

@@ -53,7 +53,8 @@ internal sealed class LocalNamer
                 _untabledNames.Add(parameter.Name);
             }
 
-            if (generic is not null && generic.Count == parameters.Count && JavaGenerics.IsParameterized(generic[i]))
+            // Parameterized, or a type variable (T, T[]): anything the descriptor alone does not say.
+            if (generic is not null && generic.Count == parameters.Count && generic[i] != parameters[i])
             {
                 _signatures[parameter.Name] = generic[i];
             }
@@ -67,6 +68,9 @@ internal sealed class LocalNamer
 
     /// <summary>Generic types, as signatures, of the locals and parameters that have one: <c>Ljava/util/List&lt;Ljava/lang/String;&gt;;</c>.</summary>
     public IReadOnlyDictionary<string, string> Signatures => _signatures;
+
+    /// <summary>A generic type found for a local the tables did not describe.</summary>
+    public void Infer(string name, string signature) => _signatures.TryAdd(name, signature);
 
     /// <summary>The parameters in order, <c>this</c> excluded.</summary>
     public List<JLocal> Parameters { get; } = [];

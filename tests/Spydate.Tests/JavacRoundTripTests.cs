@@ -1,6 +1,6 @@
-using System.Diagnostics;
 using Spydate.Core.Jvm;
 using Spydate.Decompiler.Jvm;
+using Xunit.Abstractions;
 
 namespace Spydate.Tests;
 
@@ -10,9 +10,12 @@ namespace Spydate.Tests;
 /// expressions, booleans and chars kept as ints — and <c>Sugar.java</c> — lambdas, for-each, string and enum
 /// switches, switch expressions, try-with-resources, assert, enums, records, annotations, inner, anonymous and
 /// local classes — and <c>Legacy.java</c>, compiled for Java 8, where inner classes reach private members through
-/// <c>access$000</c> methods and enum switches go through switch maps — compiled with and without debug
-/// information, decompiled, compiled again from the decompiled text, and run: the copy must print exactly what the
-/// original prints.
+/// <c>access$000</c> methods and enum switches go through switch maps — and <c>Generics.java</c> — casts to type
+/// variables erasure takes out, locals of type <c>T</c>, inherited generic methods, explicit type arguments,
+/// multi-catch — compiled with and without debug information, decompiled, compiled again from the decompiled text,
+/// and run: the copy must print exactly what the original prints. The fixtures' JAR is also decompiled whole and
+/// compiled again as one source tree (<see cref="JavaRecompile"/>), and any JAR can be measured the same way by
+/// pointing <c>SPYDATE_RECOMPILE_JAR</c> at it.
 ///
 /// That is the one check that says the output means what the bytecode means, not just that it looks like Java.
 /// It needs a JDK: the tests look for one on JAVA_HOME, on PATH and in Android Studio's bundled runtime, and are
@@ -21,6 +24,15 @@ namespace Spydate.Tests;
 public sealed class JavacRoundTripTests
 {
     private static readonly Lazy<Compiled?> Built = new(Build, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static readonly string[] Fixtures = ["Shapes", "Sugar", "Legacy", "Generics"];
+
+    private readonly ITestOutputHelper _output;
+
+    public JavacRoundTripTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
 
     private sealed record Compiled(string Jdk, string Root, string WithDebug, string WithoutDebug, IReadOnlyDictionary<string, string> Expected);
 
@@ -31,6 +43,8 @@ public sealed class JavacRoundTripTests
     [InlineData("Sugar", false)]
     [InlineData("Legacy", true)]
     [InlineData("Legacy", false)]
+    [InlineData("Generics", true)]
+    [InlineData("Generics", false)]
     public void EveryMethodIsStructuredWithoutAGoto(string name, bool debug)
     {
         var compiled = Require();
@@ -49,6 +63,8 @@ public sealed class JavacRoundTripTests
     [InlineData("Sugar", false)]
     [InlineData("Legacy", true)]
     [InlineData("Legacy", false)]
+    [InlineData("Generics", true)]
+    [InlineData("Generics", false)]
     public void TheDecompiledClassCompilesAndBehavesLikeTheOriginal(string name, bool debug)
     {
         var compiled = Require();
@@ -65,6 +81,68 @@ public sealed class JavacRoundTripTests
         var (exit, output) = Run(Path.Combine(compiled.Jdk, "java"), $"-cp \"{Path.Combine(work, "out")}\" fixtures.{name}");
         Assert.Equal(0, exit);
         Assert.Equal(compiled.Expected[name], output);
+    }
+
+    [SkippableTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EveryClassOfTheJarCompilesAgainAsOneTreeAndRuns(bool debug)
+    {
+        var compiled = Require();
+        string work = Path.Combine(compiled.Root, $"tree-{(debug ? "g" : "nog")}");
+        var report = JavaRecompile.Run(compiled.Jdk, debug ? compiled.WithDebug : compiled.WithoutDebug, work);
+        _output.WriteLine(report.ToString());
+
+        Assert.True(report.Errors == 0, $"{report}\n{report.Output}");
+        foreach (string name in Fixtures)
+        {
+            var (exit, output) = Run(Path.Combine(compiled.Jdk, "java"), $"-cp \"{report.Classes}\" fixtures.{name}");
+            Assert.Equal(0, exit);
+            Assert.Equal(compiled.Expected[name], output);
+        }
+    }
+
+    /// <summary>
+    /// A real JAR through the harness, when <c>SPYDATE_RECOMPILE_JAR</c> names one: the share of its top-level classes
+    /// whose decompiled text compiles again, and the kinds of error left. <c>SPYDATE_RECOMPILE_CLASSPATH</c> adds its
+    /// dependencies; <c>SPYDATE_RECOMPILE_MIN</c> (a percentage) fails the test below it. Skipped otherwise.
+    /// </summary>
+    [SkippableFact]
+    public void ARealJarCompilesAgain()
+    {
+        string? jar = Environment.GetEnvironmentVariable("SPYDATE_RECOMPILE_JAR");
+        Skip.If(string.IsNullOrWhiteSpace(jar), "SPYDATE_RECOMPILE_JAR names no JAR");
+        var compiled = Require();
+
+        string work = Path.Combine(compiled.Root, "real-" + Path.GetFileNameWithoutExtension(jar));
+        var report = JavaRecompile.Run(compiled.Jdk, jar!, work, Environment.GetEnvironmentVariable("SPYDATE_RECOMPILE_CLASSPATH"));
+        _output.WriteLine(report.ToString());
+
+        double minimum = double.TryParse(Environment.GetEnvironmentVariable("SPYDATE_RECOMPILE_MIN"), System.Globalization.CultureInfo.InvariantCulture, out var percent) ? percent / 100 : 0;
+        Assert.True(report.Rate >= minimum, report.ToString());
+    }
+
+    [SkippableFact]
+    public void ErasedGenericsAreWrittenBack()
+    {
+        string java = Decompile(Require().WithoutDebug, "Generics").ReplaceLineEndings("\n");
+
+        // No local variable table: the locals' generic types come from what they hold and where it goes.
+        Assert.Contains("T var1 = this.value.get();", java, StringComparison.Ordinal);
+        Assert.Contains("ArrayList<T> var2 = new ArrayList<>();", java, StringComparison.Ordinal);
+        Assert.Contains("for (T var3 : arg0) {", java, StringComparison.Ordinal);
+        Assert.Contains("return arg0.first.compareTo(arg1.first) > 0 ? arg0.first : arg1.first;", java, StringComparison.Ordinal);
+
+        // Casts the source had to write, which erasure left as nothing or as the bound's erasure.
+        Assert.Contains("return (T) NO_VALUE;", java, StringComparison.Ordinal);
+        Assert.Contains("throw (E) var1;", java, StringComparison.Ordinal);
+        Assert.Contains("return arg0 == null ? null : (Class<T>) arg0.getClass();", java, StringComparison.Ordinal);
+        Assert.Contains("return (T[]) var2;", java, StringComparison.Ordinal);
+
+        Assert.Contains("static final List<String> WORDS = Box.<String>create().add(\"x\").add(\"y\").items();", java, StringComparison.Ordinal);
+        Assert.Contains("catch (NumberFormatException | ArithmeticException var1) {", java, StringComparison.Ordinal);
+        Assert.Contains("static <A extends Comparable<A>, B> A larger(", java, StringComparison.Ordinal);
+        Assert.DoesNotContain("(Comparable)", java, StringComparison.Ordinal);
     }
 
     [SkippableFact]
@@ -193,7 +271,7 @@ public sealed class JavacRoundTripTests
         }
 
         string fixtures = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Java", "fixtures");
-        string sources = string.Join(' ', new[] { "Shapes", "Sugar" }.Select(n => $"\"{Path.Combine(fixtures, n + ".java")}\""));
+        string sources = string.Join(' ', new[] { "Shapes", "Sugar", "Generics" }.Select(n => $"\"{Path.Combine(fixtures, n + ".java")}\""));
         string root = Path.Combine(Path.GetTempPath(), "spydate-javac-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
@@ -230,7 +308,7 @@ public sealed class JavacRoundTripTests
         string withDebug = Jar("-g", "g");
         string withoutDebug = Jar("-g:none", "nog");
         var expected = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (string name in new[] { "Shapes", "Sugar", "Legacy" })
+        foreach (string name in Fixtures)
         {
             var (runExit, output) = Run(Path.Combine(jdk, "java"), $"-cp \"{withDebug}\" fixtures.{name}");
             if (runExit != 0)
@@ -256,19 +334,5 @@ public sealed class JavacRoundTripTests
         return candidates.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c) && File.Exists(Path.Combine(c, OperatingSystem.IsWindows() ? "javac.exe" : "javac")));
     }
 
-    private static (int Exit, string Output) Run(string program, string arguments)
-    {
-        var start = new ProcessStartInfo(program, arguments)
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var process = Process.Start(start)!;
-        var error = process.StandardError.ReadToEndAsync();
-        string output = process.StandardOutput.ReadToEnd();
-        process.WaitForExit();
-        return (process.ExitCode, output + error.Result);
-    }
+    private static (int Exit, string Output) Run(string program, string arguments) => JavaRecompile.Execute(program, arguments);
 }

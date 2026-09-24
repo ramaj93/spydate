@@ -544,7 +544,7 @@ internal sealed partial class JavaEmitter
         Write(attempt.Body, level + 1);
         foreach (var handler in attempt.Catches)
         {
-            string type = handler.CatchType is null ? "Throwable" : _naming.ClassName(handler.CatchType);
+            string type = handler.CatchType is null ? "Throwable" : string.Join(" | ", handler.Alternatives.Prepend(handler.CatchType).Select(_naming.ClassName));
             string variable = handler.Variable ?? "ignored";
             string note = handler.CatchType is null ? " // any: a finally, or a synchronized block's release" : string.Empty;
             Line(level, $"}} catch ({type} {variable}) {{{note}");
@@ -584,7 +584,7 @@ internal sealed partial class JavaEmitter
                 Line(level, $"return {ReturnValue(value)};");
                 return;
             case JThrow thrown:
-                Line(level, $"throw {Expr(thrown.Exception)};");
+                Line(level, $"throw {Expr(Thrown(thrown.Exception))};");
                 return;
             case JYield yielded:
                 Line(level, $"yield {Expr(yielded.Value)};");
@@ -642,6 +642,7 @@ internal sealed partial class JavaEmitter
     {
         var fitted = Fit(Typed(value, _returnType), _returnType);
         string? generic = _method?.Signature is { } signature ? JavaGenerics.ReturnSignature(signature) : null;
+        fitted = Generic(fitted, generic);
         return fitted is JNew created ? Created(created, generic) : Expr(fitted);
     }
 
@@ -671,7 +672,7 @@ internal sealed partial class JavaEmitter
     private string Value(IrExpr value, IrExpr target)
     {
         string? type = (target as JExpr)?.Type;
-        var fitted = Fit(Typed(value, type), type);
+        var fitted = Generic(Fit(Typed(value, type), type), target is JExpr declared ? DeclaredGeneric(declared) : null);
         return fitted is JNew created && target is JExpr expression && GenericOf(expression) is { } generic ? Created(created, generic) : Expr(fitted);
     }
 
@@ -737,9 +738,157 @@ internal sealed partial class JavaEmitter
         _method = method;
         _lifted = lifted;
         _level = level;
-        var fitted = Fit(Typed(value, type), type);
+        var fitted = Generic(Fit(Typed(value, type), type), generic);
         return fitted is JNew created ? Created(created, generic) : Expr(fitted);
     }
+
+    /// <summary>
+    /// A value going where the source's type is generic — a method's generic return, a field or local of a type
+    /// variable or a parameterized type — as the source had to write it. javac erases the type: a cast the source
+    /// wrote to <c>T</c> leaves nothing, one it wrote to <c>T[]</c> leaves a cast to <c>Object[]</c>, and it casts
+    /// a generic call's result to the erasure too. Printed as they are, those do not compile; so the erasure's cast
+    /// is a cast to the generic type, and a value not known to have that type is cast to it — an unchecked cast,
+    /// which is what the source did.
+    /// </summary>
+    private IrExpr Generic(IrExpr value, string? expected)
+    {
+        Witness(value, expected);
+        if (expected is null || value is not JExpr expression || expression is JConst)
+        {
+            return value;
+        }
+
+        bool variable = TypeVariable().IsMatch(expected);
+        bool bare = expected.TrimStart('[').StartsWith('T');
+        if (!variable && !JavaGenerics.IsParameterized(expected))
+        {
+            return value;
+        }
+
+        switch (expression)
+        {
+            case JConditional conditional:
+                return conditional with { Then = (JExpr)Generic(conditional.Then, expected), Else = (JExpr)Generic(conditional.Else, expected) };
+            case JCast cast when cast.CastType is ['L' or '[', ..]:
+                return GenericType(cast.Operand) == expected ? cast.Operand : variable ? new JCast(expected, cast.Operand) : value;
+        }
+
+        if (expression.Type is not ['L' or '[', ..] || GenericType(expression) is var known && known is not null && JavaGenerics.Assignable(known, expected))
+        {
+            return value;
+        }
+
+        // A call's result the target types: inferred from where it goes, as the source's was — unless it is a JDK
+        // method's that returns a class type and whose receiver's type arguments are unknown. A new is only ever its
+        // own class, which a type variable needs a cast to.
+        if ((expression is JDynamic || (expression is JNew && !bare)) && known is null)
+        {
+            return value;
+        }
+
+        if (expression is JCall call && known is null
+            && (!variable || call.Receiver is null || _naming.FindClass(call.Owner) is not null || JCall.ReturnType(call.Descriptor) is "Ljava/lang/Object;" or "[Ljava/lang/Object;"
+                || (GenericType(call.Receiver) is { } receiverType && JavaGenerics.IsParameterized(receiverType))))
+        {
+            return value;
+        }
+
+        // A parameterized type unlike the expected one of the same class had a cast; one of another class may be a subtype.
+        if (!variable && (known is null || JavaGenerics.ClassOf(known) != JavaGenerics.ClassOf(expected)))
+        {
+            return value;
+        }
+
+        return new JCast(expected, expression);
+    }
+
+    /// <summary>Explicit type arguments for a generic static call heading a chain, by the call: see <see cref="JavaGenerics.Witness"/>.</summary>
+    private readonly Dictionary<JCall, string> _witnesses = new(ReferenceEqualityComparer.Instance);
+
+    private void Witness(IrExpr value, string? expected)
+    {
+        if (expected is null || !JavaGenerics.IsParameterized(expected) || value is not JCall last)
+        {
+            return;
+        }
+
+        var chain = new List<JCall>();
+        for (JExpr? at = last; at is JCall call; at = call.Receiver)
+        {
+            chain.Insert(0, call);
+        }
+
+        if (JavaGenerics.Witness(chain, expected, _naming.FindClass) is { } arguments
+            && arguments.Select(a => Descriptors.FieldSignature(a, _naming.ClassName)).ToList() is var written && written.All(w => w is not null))
+        {
+            _witnesses[chain[0]] = $"<{string.Join(", ", written)}>";
+        }
+    }
+
+    /// <summary>
+    /// What a method declared <c>throws E</c> throws: a value of <c>E</c>'s erasure was cast to <c>E</c> in the source —
+    /// a cast javac writes nothing for — or Java would not let the method throw it.
+    /// </summary>
+    private JExpr Thrown(JExpr exception)
+    {
+        if (_method is not { Signature: { } signature } method || exception.Type is not { } type || GenericType(exception) is { } known && known.StartsWith('T'))
+        {
+            return exception;
+        }
+
+        int caret = signature.IndexOf('^');
+        while (caret >= 0 && caret + 1 < signature.Length)
+        {
+            int end = signature.IndexOf(';', caret);
+            if (end < 0)
+            {
+                break;
+            }
+
+            string thrown = signature[(caret + 1)..(end + 1)];
+            if (thrown.StartsWith('T') && JavaGenerics.ErasureIn(thrown, method, _naming.Class) == type)
+            {
+                return new JCast(thrown, exception);
+            }
+
+            caret = signature.IndexOf('^', end);
+        }
+
+        return exception;
+    }
+
+    /// <summary>The generic type a store's target was declared with: a local's from the tables, a field's of this class from its signature.</summary>
+    private string? DeclaredGeneric(JExpr target) => target switch
+    {
+        JLocal local => _lifted?.Locals.Signatures.GetValueOrDefault(local.Name),
+        JField field => OwnFieldSignature(field),
+        _ => null,
+    };
+
+    /// <summary>
+    /// A field of this class's generic signature, where its type variables are this class's: a static field, or one
+    /// of this instance's from an instance method or initialiser.
+    /// </summary>
+    private string? OwnFieldSignature(JField field)
+    {
+        if (field.Owner != _naming.Class.Name || _naming.Class.Fields.FirstOrDefault(f => f.Name == field.Name && f.Descriptor == field.FieldType) is not { Signature: { } signature } declared)
+        {
+            return null;
+        }
+
+        // Through another instance, the variables are that instance's arguments, not this class's.
+        bool staticContext = _method is { } method && (method.Access & JvmAccess.Static) != 0 && method.Name != "<clinit>";
+        return (declared.Access & JvmAccess.Static) != 0 || (!staticContext && field.Instance is JLocal { Kind: JLocalKind.This }) ? signature : null;
+    }
+
+    /// <summary>The generic type an expression is known to have: a local's or parameter's, this class's field's, a call's declared return.</summary>
+    private string? GenericType(JExpr expression) => expression switch
+    {
+        JLocal { Kind: JLocalKind.This } => null,
+        JCall call when JavaGenerics.JdkResult(call, GenericType, _naming.FindClass) is { } wildcard && wildcard.Contains('*') => wildcard,
+        _ when _lifted is not null && _method is not null => JavaGenerics.InScopeOf(expression, _lifted, _method, _naming.Class, _naming.FindClass),
+        _ => null,
+    };
 
     /// <summary>The generic type of what an expression reads, when the class file says: a local's, a parameter's, a field's of this JAR.</summary>
     private string? GenericOf(JExpr expression) => _lifted is null ? null : JavaGenerics.GenericOf(expression, _lifted, _naming.FindClass);
@@ -881,6 +1030,15 @@ internal sealed partial class JavaEmitter
         JBinary binary => BinaryText(binary),
         JNegate negate => ($"-{Expr(negate.Operand, Precedence.Unary)}", Precedence.Unary),
         JCast { Operand: JCall call } cast when JavaGenerics.CastIsRedundant(cast.CastType, call, GenericOf, _naming.FindClass) => Print(call),
+
+        // A value of a type variable cast to its bound's erasure: javac's cast, since the variable erases to Object
+        // where the value was stored; the source's value already had the bound's methods.
+        JCast { CastType: ['L' or '[', ..] } bounded when _method is not null && GenericType(bounded.Operand) is { } variable && variable.TrimStart('[').StartsWith('T')
+                                                     && JavaGenerics.ErasureIn(variable, _method, _naming.Class) == bounded.CastType => Print(bounded.Operand),
+
+        // Objects.requireNonNull(x) returns x's own type: javac's cast after it is its erasure, which x already has.
+        JCast { Operand: JCall { Owner: "java/util/Objects", Name: "requireNonNull", Args: [JExpr checkedValue, ..] } nonNull } nullCheck
+            when checkedValue.Type == nullCheck.CastType => Print(nonNull),
         JCast cast => ($"({CastTypeText(cast.CastType)}) {Expr(cast.Operand, Precedence.Unary)}", Precedence.Cast),
         JInstanceOf test => ($"{Expr(test.Operand, Precedence.Relational)} instanceof {_naming.Type(test.TestedType)}", Precedence.Relational),
         JCompare compare => ($"{CompareOwner(compare)}.compare({Expr(compare.Left)}, {Expr(compare.Right)})", Precedence.Primary),
@@ -1022,6 +1180,8 @@ internal sealed partial class JavaEmitter
         string args = Arguments(call.Args, call.Descriptor, call.Owner, call.Name);
         switch (call)
         {
+            case { Receiver: null } when _witnesses.TryGetValue(call, out var witness):
+                return $"{_naming.ClassName(call.Owner)}.{witness}{name}({args})";
             case { Receiver: null }:
                 return call.Owner == _naming.Class.Name ? $"{name}({args})" : $"{_naming.ClassName(call.Owner)}.{name}({args})";
             case { Kind: JCallKind.Special, Receiver: JLocal { Kind: JLocalKind.This } } when call.Owner != _naming.Class.Name:
@@ -1061,8 +1221,16 @@ internal sealed partial class JavaEmitter
         }
 
         var rivals = Rivals(owner, name, descriptor, parameters);
+        var generics = owner == _naming.Class.Name && _naming.Class.Methods.FirstOrDefault(m => m.Name == name && m.Descriptor == descriptor) is { Signature: { } own } && !own.StartsWith('<')
+            ? JavaGenerics.ParameterSignatures(own)
+            : null;
         return string.Join(", ", args.Select((a, i) =>
         {
+            if (generics is not null && generics.Count == args.Count)
+            {
+                Witness(a, generics[i]);
+            }
+
             string? parameter = i < parameters.Count ? parameters[i] : null;
             var argument = Argument(a, parameter);
 
@@ -1134,7 +1302,9 @@ internal sealed partial class JavaEmitter
 
     /// <summary>A cast's type: a descriptor, or a generic signature when the cast says which overload a lambda is for.</summary>
     private string CastTypeText(string type)
-        => type.Contains('<', StringComparison.Ordinal) && Descriptors.FieldSignature(type, _naming.ClassName) is { } generic ? generic : _naming.Type(type);
+        => (type.Contains('<', StringComparison.Ordinal) || TypeVariable().IsMatch(type)) && Descriptors.FieldSignature(type, _naming.ClassName) is { } generic
+            ? generic
+            : _naming.Type(type);
 
     /// <summary>JDK methods declared with varargs, which the JAR cannot say: their arrays are written out as arguments.</summary>
     private static readonly HashSet<(string Owner, string Name)> JdkVarargs =
