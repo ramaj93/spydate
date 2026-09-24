@@ -1302,4 +1302,7 @@ slot a shrinker reused is two variables, not an update of one.
 
 **Measured.** commons-lang3: 194 of 231 top-level classes compile again as decompiled; the 96 errors in the other
 37 are all generic type inference — `Object` where the source had `T`, `Object[]` for `T[]` — which is stage 5.
+All 535,752 classes of Android Studio's JARs still decompile with no crash and no failed method, and
+the methods shown with gotos went from 6,308 to 6,200 (counted once each: nested classes are now written inside
+their outer class, so a sweep that also renders each nested class alone counts them again).
 jd-gui cannot be measured this way: its obfuscated names overload by return type and clash with packages.
