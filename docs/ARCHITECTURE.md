@@ -28,7 +28,7 @@
                                │
 ┌───────────────┴─────────────────────────────────────────────┐
 │ Spydate.Decompiler (net10.0)                                │
-│  Native: IR · X86Lifter · passes · Structurer · PseudoC     │
+│  Native: IR · lifters · passes · Structurer · PseudoC       │
 │  Managed: ManagedDecompiler (ILSpy) · IlDisassembler        │
 └───────────────▲─────────────────────────────────────────────┘
                 │
@@ -392,7 +392,7 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
 
 See `DECOMPILER-DESIGN.md`. Summary:
 
-- **Native**: `X86Lifter` maps `DecodedInstruction` → IR statements;
+- **Native**: `X86Lifter` and `Arm64Lifter` (`INativeLifter`) map `DecodedInstruction` → IR statements;
   `IrFunction` holds `IrBlock`s; passes simplify; `PseudoCEmitter` prints C‑like
   output. `NativeDecompiler.Decompile(Function)` ties it together.
 - **Managed**: `ManagedAssembly` (metadata browsing: namespaces → types →

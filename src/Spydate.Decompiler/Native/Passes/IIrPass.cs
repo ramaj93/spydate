@@ -10,7 +10,12 @@ public interface IIrPass
     void Run(IrFunction function);
 }
 
-/// <summary>x86 register aliasing helpers used by passes to reason about kills and overlaps.</summary>
+/// <summary>
+/// Register aliasing helpers used by passes to reason about kills and overlaps: x86 and x64, and ARM64, whose
+/// <c>w</c> registers are the low halves of the <c>x</c> registers and whose <c>b</c>/<c>h</c>/<c>s</c>/<c>d</c>/<c>q</c>
+/// registers are views of <c>v</c>. ARM64's stack pointer is written <c>sp</c>, which is also x86's 16-bit one, so
+/// both are the stack pointer <c>rsp</c> here; nothing reads 16-bit x86 code.
+/// </summary>
 public static class RegisterAliases
 {
     private static readonly Dictionary<string, string> Canonical = Build();
@@ -45,6 +50,18 @@ public static class RegisterAliases
             Family($"zmm{i}", $"ymm{i}", $"xmm{i}");
         }
 
+        for (int i = 0; i <= 30; i++)
+        {
+            Family($"x{i}", $"w{i}");
+        }
+
+        for (int i = 0; i < 32; i++)
+        {
+            Family($"v{i}", $"q{i}", $"d{i}", $"s{i}", $"h{i}", $"b{i}");
+        }
+
+        d["wsp"] = "rsp";
+
         return d;
     }
 
@@ -55,7 +72,7 @@ public static class RegisterAliases
 
     /// <summary>
     /// True when writing <paramref name="write"/> completely replaces the value of <paramref name="def"/>.
-    /// On x64, 32-bit GPR writes zero-extend and therefore kill the full 64-bit register.
+    /// On x64 and ARM64, 32-bit GPR writes zero-extend and therefore kill the full 64-bit register.
     /// </summary>
     public static bool Kills(IrExpr write, IrExpr def, int bitness)
     {
@@ -91,7 +108,8 @@ public static class RegisterAliases
     private static bool IsGpr(string name)
     {
         string c = CanonicalOf(name);
-        return c.Length <= 3 && c[0] == 'r' && !c.StartsWith("rip", StringComparison.Ordinal);
+        return (c.Length <= 3 && c[0] == 'r' && !c.StartsWith("rip", StringComparison.Ordinal))
+            || (c.Length is 2 or 3 && c[0] == 'x' && char.IsAsciiDigit(c[1]));
     }
 
     /// <summary>True when the two variables may refer to overlapping storage.</summary>

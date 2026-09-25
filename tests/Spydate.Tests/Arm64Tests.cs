@@ -216,11 +216,12 @@ public class Arm64Tests
 
         Assert.Contains("bl      puts", listing, StringComparison.Ordinal);
         Assert.Contains("\"hello from elf\"", listing, StringComparison.Ordinal);
-        Assert.False(NativeDecompiler.Supports(analysis));
+        Assert.True(NativeDecompiler.Supports(analysis));
+        Assert.Contains("puts(\"hello from elf\")", new NativeDecompiler(analysis).Decompile(main).Text, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void AnAgentReadsArm64AsAssemblyAndIsToldThereIsNoPseudoCYet()
+    public void AnAgentReadsArm64AsPseudoCOrAsAssembly()
     {
         Assert.True(InstructionDecoders.Supports(Architecture.Arm64));
         Assert.False(InstructionDecoders.Supports(Architecture.Arm));
@@ -233,11 +234,10 @@ public class Arm64Tests
         store.Set(session);
         var code = new CodeTools(store);
 
-        // No pseudo-C behind the analysis: the default view is the assembly, and asking for C says why not.
-        Assert.Null(session.Decompiler);
+        Assert.NotNull(session.Decompiler);
         Assert.False(session.CanDebug);
-        Assert.Contains("bl      puts", code.ReadFunction("main"), StringComparison.Ordinal);
-        Assert.Contains("no pseudo-C", code.ReadFunction("main", view: "pseudo_c"), StringComparison.Ordinal);
+        Assert.Contains("puts(\"hello from elf\")", code.ReadFunction("main"), StringComparison.Ordinal);
+        Assert.Contains("bl      puts", code.ReadFunction("main", view: "asm"), StringComparison.Ordinal);
     }
 
     /// <summary>An AArch64 program whose main loads a string and calls puts through the PLT.</summary>
@@ -283,6 +283,71 @@ public class Arm64Tests
         // A call to the C library by name: through a PLT stub on Linux, through an import slot loaded by adrp/ldr on Windows.
         Assert.Contains(functions.SelectMany(f => f.Instructions), i => i.IsCall && (i.BranchTargetVa ?? i.IndirectSlotVa) is { } t
             && analysis.Symbols.TryGet(t, out var s) && s.Name.Split('!')[^1] is "malloc" or "free" or "strlen" or "GetLastError");
+    }
+
+    // ---- pseudo-C ----------------------------------------------------------------------------------
+
+    [Fact]
+    public void AConditionalCompareChainIsOneCondition()
+    {
+        // cmp w0, #1 ; ccmp w1, #2, #0, ne ; cset w0, eq ; ret  —  w0 != 1 && w1 == 2
+        string text = PseudoC(CmpW(0, 1), 0x7A421820, 0x1A9F17E0, Ret);
+
+        Assert.Contains("w0 != 1", text, StringComparison.Ordinal);
+        Assert.Contains("w1 == 2", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("flags>", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheFrameRecordIsNotPartOfTheFunction()
+    {
+        // stp x29, x30, [sp, #-16]! ; mov x29, sp ; bl f ; ldp x29, x30, [sp], #16 ; ret
+        const ulong code = 0x1000;
+        string text = PseudoC(0xA9BF7BFD, 0x910003FD, Bl(code + 8, 0x2000), 0xA8C17BFD, Ret);
+
+        Assert.Contains("sub_2000()", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("x29", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("x30", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("local_", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALoadAtAnOffsetReadsAsTheFieldItIs()
+    {
+        // ldr w8, [x0, #4] ; add w0, w8, #1 ; ret
+        string text = PseudoC(0xB9400408, 0x11000500, Ret);
+
+        Assert.Contains("*(uint32_t*)(x0 + 4) + 1", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ACountedLoopIsALoop()
+    {
+        // loop: sub x0, x0, #1 ; cbnz x0, loop ; ret
+        string text = PseudoC(0xD1000400, 0xB5FFFFE0, Ret);
+
+        Assert.Contains("while", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("goto", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ACallGetsTheArgumentsSetBeforeIt()
+    {
+        // mov w0, #7 ; mov x1, x2 ; b f  (a tail call with two arguments)
+        const ulong code = 0x1000;
+        string text = PseudoC(0x528000E0, 0xAA0203E1, B(code + 8, 0x2000));
+
+        Assert.Contains("return sub_2000(7, x2);", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The pseudo-C of a function made of <paramref name="words"/> at 0x1000.</summary>
+    private static string PseudoC(params uint[] words)
+    {
+        const ulong code = 0x1000;
+        var source = new MemoryCodeSource(Words(words).ToArray(), code, 64);
+        var function = new FunctionDiscovery(source, new Arm64Disassembler(), new SymbolTable()).Discover(code);
+        var decompiler = new NativeDecompiler(64, convention: CallingConvention.Aapcs64, architecture: Architecture.Arm64);
+        return decompiler.Decompile(function).Text;
     }
 
     // ---- encoders for the synthetic code -------------------------------------------------------------

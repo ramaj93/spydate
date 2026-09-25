@@ -1526,3 +1526,33 @@ functions through its PLT (so another library can take their place), and those s
 call to a stub, or a call with the next function right behind it, ends the path rather than running into that
 function — the unwind table says where functions begin, and a call the compiler put last before one never comes
 back. On `libc++_shared.so`, functions running past their declared end went from 714 to 1.
+
+## ARM64 pseudo-C goes through the x86 pipeline, with the convention saying what differs
+
+`Arm64Lifter` lifts ARM64 into the IR `X86Lifter` produces, and from there the passes, the structurer and the
+emitter are the ones x86 uses — no second decompiler. What the passes had taken as given about x86 now comes
+from `CallingConvention`: the stack pointer's name, where an integer and a float result come back, which registers
+carry arguments and which a call destroys, and whether a return address sits on the stack (it does not on ARM64,
+so the first word above the frame is `arg_0`). `RegisterAliases` knows `w0` is the low half of `x0` and `d0` a view
+of `v0`, and that a 32-bit write zero-extends there as on x64. AAPCS64 is the convention for every ARM64 image;
+`x30`, the link register, counts as preserved too, which is what lets the `stp x29, x30` a prologue saves and the
+`ldp` its epilogue restores drop out of the output as `push rbp` does on x86.
+
+Registers keep their names (`x0`, `w8`, `sp`, `d0`), the zero register reads as 0 and swallows writes, and flags are
+what the last compare compared, folded into the condition that reads them. A conditional compare is a chain: if
+the earlier condition held, the flags are this compare's, if not the constant the instruction names — so `cmp;
+ccmp; b.eq` becomes one `&`/`|` of the two comparisons. Flags reach a block down every edge into it, not only a
+fall-through (`b.ne` to a `cset eq` is the same compare): the function is lifted twice, the second time starting each
+block with what its predecessors agree on. An address built from an `adrp` pair is taken from the decoder, which
+already resolved it, so naming a global or a string does not wait on copy propagation. Vector code and system
+operations are kept as inline asm.
+
+Two things found on the way are not ARM64's own. A register set to the address of a local (`add x0, sp, #16`, and
+x64's `lea rcx, [rsp+20h]`) was taken for a frame-pointer alias and removed before call arguments were collected,
+so the call lost the argument; argument recovery now sees through the removed setup, which comes back once the call
+is seen to read it. And a shared object is based at 0, so small numbers land in its loader tables: a constant in
+`.dynsym`, `.rela.*` or another section only the dynamic linker reads is a number, never a pointer.
+
+On IKVM's ARM64 libraries and the APK's `libc++_shared.so` — over 10,000 functions — nothing throws and 8
+conditions are left with unknown flags. Not done: declaring register parameters (x64 does not either), and
+calling-convention signatures read from ARM64 code.

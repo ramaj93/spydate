@@ -63,6 +63,16 @@ public sealed class GlobalNames
         return IsFunction(va) ? $"sub_{hex}" : $"data_{hex}";
     }
 
+    /// <summary>
+    /// An ELF section only the dynamic linker reads: symbol and string tables, hashes, versions, relocations,
+    /// notes. A shared object is based at 0, so small numbers land in these — 0x1000 in a <c>cmp</c> is 4096, not
+    /// a pointer into <c>.dynstr</c>, which no code ever reads.
+    /// </summary>
+    private static bool IsLoaderMetadata(IBinarySection section)
+        => section.Name.StartsWith(".dyn", StringComparison.Ordinal) || section.Name.StartsWith(".gnu.", StringComparison.Ordinal)
+           || section.Name.StartsWith(".rela", StringComparison.Ordinal) || section.Name.StartsWith(".rel.", StringComparison.Ordinal)
+           || section.Name is ".hash" or ".interp" or ".eh_frame_hdr" || section.Name.StartsWith(".note", StringComparison.Ordinal);
+
     /// <summary>Whether the address is code that is entered, rather than data that is read.</summary>
     public bool IsFunction(ulong va)
         => _isFunction(va) || (_symbols is not null && _symbols.TryGet(va, out var s) && s.Kind == SymbolKind.Function);
@@ -73,7 +83,7 @@ public sealed class GlobalNames
         // A non-PIE Linux x64 program lives below 4 GB, so its code loads addresses as 32-bit immediates
         // (mov esi, 0x47F093). A PE x64 image sits above 4 GB and never does, so it keeps the stricter rule.
         bool pointerWide = bits == _image.Bitness || (bits == 32 && _image.Bitness == 64 && _image.Format != BinaryFormat.Pe);
-        if (va == 0 || !pointerWide || SectionAt(va) is not { } section)
+        if (va == 0 || !pointerWide || SectionAt(va) is not { } section || IsLoaderMetadata(section))
         {
             return false;
         }

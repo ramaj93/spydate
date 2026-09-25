@@ -10,7 +10,7 @@ namespace Spydate.Decompiler.Native.Lifting;
 /// statements; unsupported instructions are preserved verbatim as <see cref="IrAsm"/> and a warning is recorded.
 /// The lifter never throws for unexpected input.
 /// </summary>
-public sealed class X86Lifter
+public sealed class X86Lifter : INativeLifter
 {
     private readonly int _bitness;
     private readonly SymbolTable? _symbols;

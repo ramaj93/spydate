@@ -94,7 +94,7 @@ public sealed class StackFramePass : IIrPass
         {
             _fn = fn;
             _ptr = fn.Bitness / 8;
-            _sp = fn.Bitness == 64 ? "rsp" : "esp";
+            _sp = fn.Convention.StackPointer;
             _signatureFor = signatureFor;
         }
 
@@ -252,7 +252,7 @@ public sealed class StackFramePass : IIrPass
         private static bool IsGpr(string reg)
         {
             string c = RegisterAliases.CanonicalOf(reg);
-            return c is "rax" or "rbx" or "rcx" or "rdx" or "rsi" or "rdi" or "rbp" || (c.Length is 2 or 3 && c[0] == 'r' && char.IsDigit(c[1]));
+            return c is "rax" or "rbx" or "rcx" or "rdx" or "rsi" or "rdi" or "rbp" || (c.Length is 2 or 3 && c[0] is 'r' or 'x' && char.IsDigit(c[1]));
         }
 
         /// <summary>"pop ecx" / "pop edx" right after a call only discard arguments; the loaded garbage is dropped.</summary>
@@ -422,10 +422,12 @@ public sealed class StackFramePass : IIrPass
 
         private IrLocal Local(long frameOffset, int bits)
         {
-            string name = frameOffset switch
+            // Above the frame: the return address and then the stack arguments on x86, only arguments on ARM64.
+            string name = (frameOffset, _fn.Convention.ReturnAddressOnStack) switch
             {
-                0 => "return_address",
-                > 0 => $"arg_{frameOffset - _ptr:X}",
+                (0, true) => "return_address",
+                ( > 0, true) => $"arg_{frameOffset - _ptr:X}",
+                ( >= 0, false) => $"arg_{frameOffset:X}",
                 _ => $"local_{-frameOffset:X}",
             };
 
@@ -470,7 +472,7 @@ public sealed class StackFramePass : IIrPass
 
                     var signature = SignatureOf(call);
                     var args = _fn.Bitness == 64
-                        ? RegisterArgs(block, i, byVa, signature, _fn.Convention)
+                        ? RegisterArgs(block, i, byVa, signature, _fn.Convention, Written)
                         : X86Args(block, i, depths is not null && i < depths.Length ? depths[i] : null, signature);
                     if (args.Count == 0)
                     {
@@ -498,11 +500,21 @@ public sealed class StackFramePass : IIrPass
         /// separately in <c>xmm0</c>… and appended after the integers, since nothing at the call site says where
         /// they sat among them.
         /// </summary>
-        private static List<IrExpr> RegisterArgs(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, CalleeSignature signature, CallingConvention convention)
+        /// <summary>
+        /// What a statement writes, seeing through a frame-pointer alias setup this pass took out: <c>lea rcx, [rsp+20h]</c>
+        /// or <c>add x0, sp, #16</c> before a call is the address of a local passed as an argument, and the register is
+        /// still set — the setup comes back once the call is seen to read it.
+        /// </summary>
+        private IrExpr? Written(IrStmt statement)
+            => statement is IrNop nop && _removedOriginals.TryGetValue(nop, out var original) && _aliasSetups.ContainsKey(original)
+                ? IrRewriter.Destination(original)
+                : IrRewriter.Destination(statement);
+
+        private static List<IrExpr> RegisterArgs(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, CalleeSignature signature, CallingConvention convention, Func<IrStmt, IrExpr?> written)
         {
             if (!convention.FloatsShareSlots)
             {
-                var integers = SlotArgs(block, callIndex, byVa, [.. convention.IntegerArguments], signature.IntegerArgumentCount(convention));
+                var integers = SlotArgs(block, callIndex, byVa, [.. convention.IntegerArguments], signature.IntegerArgumentCount(convention), written);
                 int floats = signature.FloatArgumentCount(convention);
                 if (integers.Count < signature.IntegerArgumentCount(convention))
                 {
@@ -511,7 +523,7 @@ public sealed class StackFramePass : IIrPass
 
                 for (int k = 0; k < floats && k < convention.FloatArguments.Count; k++)
                 {
-                    integers.Add(new IrReg(convention.FloatArguments[k], 64));
+                    integers.Add(new IrReg(convention.FloatArguments[k], 64));   // xmm0… or d0…
                 }
 
                 return integers;
@@ -526,10 +538,10 @@ public sealed class StackFramePass : IIrPass
                 slots[k] = signature.IsFloat(k) ? convention.FloatArguments[k] : convention.IntegerArguments[k];
             }
 
-            return SlotArgs(block, callIndex, byVa, slots, signature.ArgumentCount);
+            return SlotArgs(block, callIndex, byVa, slots, signature.ArgumentCount, written);
         }
 
-        private static List<IrExpr> SlotArgs(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, string[] slots, int known)
+        private static List<IrExpr> SlotArgs(IrBlock block, int callIndex, Dictionary<ulong, IrBlock> byVa, string[] slots, int known, Func<IrStmt, IrExpr?> written)
         {
             var defined = new IrReg?[slots.Length];
             var current = block;
@@ -545,7 +557,7 @@ public sealed class StackFramePass : IIrPass
                         return Prefix(defined);
                     }
 
-                    if (IrRewriter.Destination(s) is IrReg r)
+                    if (written(s) is IrReg r)
                     {
                         for (int k = 0; k < slots.Length; k++)
                         {

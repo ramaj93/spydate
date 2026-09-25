@@ -148,7 +148,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ ARM64 decoding: an in-house decoder (base, FP, Advanced SIMD, crypto; checked word by word against
   Go's arm64asm), function discovery, cross-references through `adrp` pairs, switch tables, AArch64 PLT
   stubs, MSVC `.xdata` fragments — ELF `.so` and ARM64 PE, in the window and over MCP
-- ⬜ ARM64 pseudo-C: a lifter into the native IR; and calling-convention signatures for ARM64
+- ✅ ARM64 pseudo-C: `Arm64Lifter` into the native IR, sharing the passes, structurer and emitter; the calling
+  convention (AAPCS64) says what differs
+- ⬜ Calling-convention signatures read from ARM64 code, and declared register parameters
 - ⬜ Signed release builds, installer
 
 ## Phase 5 — Managed (.NET) depth 🚧

@@ -20,6 +20,7 @@ public sealed class NativeDecompiler
     private readonly Func<ulong, int>? _registerArguments;
     private readonly AnnotationStore? _annotations;
     private readonly CallingConvention? _convention;
+    private readonly Core.Binary.Architecture _architecture;
 
     public NativeDecompiler(
         int bitness,
@@ -29,9 +30,11 @@ public sealed class NativeDecompiler
         Func<ulong, int>? registerArguments = null,
         AnnotationStore? annotations = null,
         Func<ulong, CalleeSignature>? signatureFor = null,
-        CallingConvention? convention = null)
+        CallingConvention? convention = null,
+        Core.Binary.Architecture architecture = Core.Binary.Architecture.Unknown)
     {
         _bitness = bitness;
+        _architecture = architecture;
         _convention = convention;
         _symbols = symbols;
         _registerArguments = registerArguments;
@@ -47,12 +50,14 @@ public sealed class NativeDecompiler
             registerArguments: va => RegisterArgumentsFor(analysis, va),
             annotations: analysis.Annotations,
             signatureFor: analysis.SignatureFor,
-            convention: CallingConvention.For(analysis.Image))
+            convention: CallingConvention.For(analysis.Image),
+            architecture: analysis.Disassembler.Architecture)
     {
     }
 
-    /// <summary>Whether the pipeline reads this analysis's code: it lifts x86, and nothing else yet.</summary>
-    public static bool Supports(BinaryAnalysis analysis) => analysis.Disassembler.Architecture is Core.Binary.Architecture.X86 or Core.Binary.Architecture.X64;
+    /// <summary>Whether the pipeline reads this analysis's code: it lifts x86, x64 and ARM64.</summary>
+    public static bool Supports(BinaryAnalysis analysis)
+        => analysis.Disassembler.Architecture is Core.Binary.Architecture.X86 or Core.Binary.Architecture.X64 or Core.Binary.Architecture.Arm64;
 
     /// <summary>
     /// How many register arguments the function at <paramref name="va"/> takes, or -1 when it is not a
@@ -110,7 +115,7 @@ public sealed class NativeDecompiler
 
     public DecompiledFunction Decompile(Function function)
     {
-        var lifter = new X86Lifter(_bitness, _symbols);
+        INativeLifter lifter = _architecture == Core.Binary.Architecture.Arm64 ? new Arm64Lifter(_symbols) : new X86Lifter(_bitness, _symbols);
         var ir = lifter.Lift(function);
         if (_convention is not null)
         {

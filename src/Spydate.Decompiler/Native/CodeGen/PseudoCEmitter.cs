@@ -85,7 +85,7 @@ public sealed class PseudoCEmitter
         }
 
         // Stack slots above the return address are incoming arguments → parameters; the rest are locals.
-        var parameters = fn.Locals.Values.Where(l => l.FrameOffset > 0 && l.Name.StartsWith("arg_", StringComparison.Ordinal) && referenced.Contains(l.Name)).OrderBy(l => l.FrameOffset).ToList();
+        var parameters = fn.Locals.Values.Where(l => l.FrameOffset >= 0 && l.Name.StartsWith("arg_", StringComparison.Ordinal) && referenced.Contains(l.Name)).OrderBy(l => l.FrameOffset).ToList();
         var locals = fn.Locals.Values.Where(l => !parameters.Contains(l) && l.Name != "return_address" && referenced.Contains(l.Name)).OrderByDescending(l => l.FrameOffset).ToList();
 
         // Register parameters come first, under the register's own name — which is what the body calls

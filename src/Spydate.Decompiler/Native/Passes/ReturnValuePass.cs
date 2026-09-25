@@ -19,7 +19,7 @@ public sealed class ReturnValuePass : IIrPass
     {
         ArgumentNullException.ThrowIfNull(function);
 
-        string accumulator = RegisterAliases.CanonicalOf(function.Bitness == 64 ? "rax" : "eax");
+        string accumulator = function.Convention.ReturnRegister;
         bool written = false;
         bool onlyBareReturns = true;
 
