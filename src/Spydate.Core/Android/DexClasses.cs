@@ -59,7 +59,7 @@ public static class DexClasses
         if (super == "com/android/tools/r8/RecordTag")
         {
             super = "java/lang/Record";
-            components = definition.InstanceFields.Select(f => new RecordComponent(f.Ref.Name, f.Ref.Type, SignatureOf(f.Annotations))).ToList();
+            components = Components(definition);
             var helpers = definition.Methods.Where(m => m.Ref.Name.StartsWith("$record$", StringComparison.Ordinal)).Select(m => m.Ref.Name).ToHashSet(StringComparer.Ordinal);
             methods = methods.Where(m => !helpers.Contains(m.Name)
                 && !(m.Name is "equals" or "hashCode" or "toString" && ((m.Access & JvmAccess.Final) != 0 || CallsAny(definition, m, helpers)))).ToList();
@@ -68,7 +68,7 @@ public static class DexClasses
         {
             // Not desugared: a record still, but DEX has no Record attribute. Its instance fields are its components,
             // and the equals, hashCode and toString javac left to ObjectMethods are Java's own again.
-            components = definition.InstanceFields.Select(f => new RecordComponent(f.Ref.Name, f.Ref.Type, SignatureOf(f.Annotations))).ToList();
+            components = Components(definition);
             methods = methods.Where(m => !(m.Name is "equals" or "hashCode" or "toString" && CallsObjectMethods(definition, m))).ToList();
         }
 
@@ -123,6 +123,10 @@ public static class DexClasses
 
         return [.. ByStores(definition.StaticFields, "<clinit>", true), .. ByStores(definition.InstanceFields, "<init>", false)];
     }
+
+    /// <summary>A record's components: its instance fields, in the order the canonical constructor stores them — DEX sorts them by name.</summary>
+    private static List<RecordComponent> Components(DexClass definition)
+        => Ordered(definition).Where(f => (f.Access & DexAccess.Static) == 0).Select(f => new RecordComponent(f.Ref.Name, f.Ref.Type, SignatureOf(f.Annotations))).ToList();
 
     /// <summary>Whether a method's code is a call site bootstrapped by <c>ObjectMethods</c>, as a record's generated methods are.</summary>
     private static bool CallsObjectMethods(DexClass definition, JvmMethod method)

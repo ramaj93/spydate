@@ -21,21 +21,23 @@ internal static class JavaShaping
 
     /// <param name="untabled">Whether a local is one the compiler made up (see <see cref="LocalNamer.IsUntabled"/>).</param>
     /// <param name="generic">Whether an expression's type is known to carry type arguments, which a typed for-each needs.</param>
-    public static CStmt Run(CStmt body, Func<string, bool> untabled, Func<IrExpr, bool>? generic = null)
+    /// <param name="patterns">What rebuilding the method's pattern switches needs; none, and they are left as javac compiled them.</param>
+    public static CStmt Run(CStmt body, Func<string, bool> untabled, Func<IrExpr, bool>? generic = null, JavaPatterns.Context? patterns = null)
     {
         generic ??= _ => false;
+        patterns ??= JavaPatterns.Context.None;
         for (int round = 0; round < Rounds; round++)
         {
             body = Jumps(body);
             var counts = JavaTree.CountLocals(body);
-            body = JavaTree.Rewrite(body, s => Shape(s, counts, untabled, generic));
+            body = JavaTree.Rewrite(body, s => Shape(s, counts, untabled, generic, patterns));
         }
 
         // Temporaries fold back once the structure has put them next to their uses; what that leaves may shape further.
         body = JavaInliner.RunOnTree(body, untabled);
         body = Jumps(body);
         var last = JavaTree.CountLocals(body);
-        body = JavaTree.Rewrite(body, s => Shape(s, last, untabled, generic));
+        body = JavaTree.Rewrite(body, s => Shape(s, last, untabled, generic, patterns));
         return Jumps(body);
     }
 
@@ -190,11 +192,14 @@ internal static class JavaShaping
     // --- shapes -----------------------------------------------------------------------------------
 
     /// <summary>One statement, its children already shaped.</summary>
-    private static CStmt Shape(CStmt statement, IReadOnlyDictionary<string, int> counts, Func<string, bool> untabled, Func<IrExpr, bool> generic) => statement switch
+    private static CStmt Shape(CStmt statement, IReadOnlyDictionary<string, int> counts, Func<string, bool> untabled, Func<IrExpr, bool> generic, JavaPatterns.Context patterns) => statement switch
     {
-        CSeq seq => Sequence(seq, counts, untabled, generic),
-        CIf conditional => Sequence(new CSeq([conditional]), counts, untabled, generic),
+        CSeq seq => Sequence(seq, counts, untabled, generic, patterns),
+        CIf conditional => Sequence(new CSeq([conditional]), counts, untabled, generic, patterns),
         JLoop loop => Loop(loop),
+        // A pattern switch is rebuilt where it is, alone in its block or not: the block around it, if any, then takes
+        // away the statements javac put before it (JavaPatterns.Rebuild).
+        JSwitch { Value: JDynamic { IsPatternDispatch: true } } dispatch => Sequence(new CSeq([dispatch]), counts, untabled, generic, patterns),
         JSwitch dispatch => Switch(dispatch),
         _ => statement,
     };
@@ -205,6 +210,12 @@ internal static class JavaShaping
     /// </summary>
     private static CStmt Switch(JSwitch dispatch)
     {
+        // A pattern switch keeps its default: without it the switch may no longer cover every value, which it must.
+        if (dispatch.Patterns is not null || dispatch.Value is JDynamic { IsPatternDispatch: true })
+        {
+            return dispatch;
+        }
+
         int defaultIndex = dispatch.Cases.SelectMany(c => c.Labels).DefaultIfEmpty(-1).Max();
         var cases = dispatch.Cases.ToList();
         for (int k = cases.Count - 1; k >= 0; k--)
@@ -225,7 +236,7 @@ internal static class JavaShaping
         return cases.Count == 0 && !HasEffect(dispatch.Value) ? CSeq.Empty : dispatch with { Cases = cases };
     }
 
-    private static CStmt Sequence(CSeq seq, IReadOnlyDictionary<string, int> counts, Func<string, bool> untabled, Func<IrExpr, bool> generic)
+    private static CStmt Sequence(CSeq seq, IReadOnlyDictionary<string, int> counts, Func<string, bool> untabled, Func<IrExpr, bool> generic, JavaPatterns.Context patterns)
     {
         var items = new List<CStmt>(seq.Items.Count);
         foreach (var item in seq.Items)
@@ -245,6 +256,7 @@ internal static class JavaShaping
         JavaSugar.TryWithResources(items);
         JavaShortcuts.Assert(items);
         JavaShortcuts.StringSwitch(items, counts, untabled);
+        JavaPatterns.Rebuild(items, counts, untabled, patterns);
         JavaShortcuts.SwitchExpression(items, counts);
         Conditionals(items);
         ReturnsInPlace(items);

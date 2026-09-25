@@ -220,7 +220,7 @@ internal sealed class JavaDeclarations
         JLoop l => (l.Condition is null ? [] : Names(l.Condition))
             .Concat(l.Init is IrAssign init ? Names(init.Dst).Concat(Names(init.Src)) : [])
             .Concat(l.Update is IrAssign update ? Names(update.Dst).Concat(Names(update.Src)) : []),
-        JSwitch s => Names(s.Value),
+        JSwitch s => JavaTree.Guards(s.Patterns).Prepend(s.Value).SelectMany(Names),
         JSynchronized l => Names(l.Lock),
         _ => [],
     };

@@ -178,7 +178,7 @@ public sealed class ApkTests : IDisposable
     }
 
     [Fact]
-    public void ANativeLibraryInsideIsTakenOutAndOpensAsTheElfItIs()
+    public async Task ANativeLibraryInsideIsTakenOutAndOpensAsTheElfItIs()
     {
         string path = WriteApk(("../escape.so", [1, 2, 3]));
         var apk = ApkImage.Load(path);
@@ -201,12 +201,12 @@ public sealed class ApkTests : IDisposable
         // The agent opens it by the JVM's spelling, and reads it as the ELF it is.
         using var store = new SessionStore();
         var tools = new SessionTools(store, McpOptions.Default);
-        string opened = tools.OpenBinaryAsync($"{path}!/lib/x86_64/libnative.so").GetAwaiter().GetResult();
+        string opened = await tools.OpenBinaryAsync($"{path}!/lib/x86_64/libnative.so");
         try
         {
             Assert.Contains("libnative.so", opened, StringComparison.Ordinal);
             Assert.IsType<Spydate.Core.Elf.ElfImage>(store.Current!.Image);
-            Assert.Contains("no entry lib/none.so", tools.OpenBinaryAsync($"{path}!/lib/none.so").GetAwaiter().GetResult(), StringComparison.Ordinal);
+            Assert.Contains("no entry lib/none.so", await tools.OpenBinaryAsync($"{path}!/lib/none.so"), StringComparison.Ordinal);
         }
         finally
         {

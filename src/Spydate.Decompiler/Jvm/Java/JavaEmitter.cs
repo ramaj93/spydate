@@ -75,6 +75,9 @@ internal sealed partial class JavaEmitter
             body = JavaDeclarations.Blocked(body);
             var names = lifted.Locals.Declared.Keys.Where(n => !lifted.Locals.IsCaught(n)).ToHashSet(StringComparer.Ordinal);
 
+            // A pattern's variable is declared by its case label.
+            names.ExceptWith(PatternBindings(body));
+
             // A local class is declared like a variable: just before the first statement that creates it.
             foreach (var created in Descendants(body).OfType<CRaw>().SelectMany(r => JavaRewrite.Evaluated(r.Statement)).SelectMany(JavaRewrite.PostOrder).OfType<JNew>())
             {
@@ -343,6 +346,91 @@ internal sealed partial class JavaEmitter
         return Assignment(init, topLevel: false);
     }
 
+    /// <summary>The variables the pattern switches in a body declare in their labels.</summary>
+    private static IEnumerable<string> PatternBindings(CStmt body)
+    {
+        foreach (var node in Descendants(body))
+        {
+            var patterns = node switch
+            {
+                JSwitch { Patterns: { } own } => own.Values,
+                CRaw raw => JavaRewrite.Evaluated(raw.Statement).SelectMany(JavaRewrite.PostOrder).OfType<JSwitchExpr>().SelectMany(e => e.Patterns?.Values ?? []),
+                _ => [],
+            };
+
+            foreach (var pattern in patterns)
+            {
+                foreach (var binding in Bound(pattern))
+                {
+                    yield return binding;
+                }
+            }
+        }
+
+        // Nested record patterns bind at every depth.
+        static IEnumerable<string> Bound(JCaseLabel pattern)
+        {
+            if (pattern.Binding is { } binding)
+            {
+                yield return binding.Name;
+            }
+
+            foreach (var part in pattern.Components ?? [])
+            {
+                foreach (string name in Bound(part))
+                {
+                    yield return name;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A pattern switch's arm label, without its colon or arrow: <c>case Integer i when i &gt; 3</c>, <c>case RED</c>,
+    /// <c>case null, default</c>, or — for the default arm that is the last, unconditional pattern — that pattern.
+    /// </summary>
+    private string PatternArmLabel(IReadOnlyList<int> armLabels, int?[]? values, IReadOnlyDictionary<int, JCaseLabel> patterns)
+    {
+        var resolved = armLabels.Select(i => values is not null && i < values.Length ? values[i] : i).ToList();
+        var parts = resolved.OfType<int>().Order()
+            .Select(v => v == -1 ? "null" : patterns.TryGetValue(v, out var pattern) ? PatternText(pattern) : v.ToString(CultureInfo.InvariantCulture))
+            .ToList();
+        if (resolved.Contains(null))
+        {
+            if (patterns.ContainsKey(JavaPatterns.NullDefaultKey) && !parts.Contains("null"))
+            {
+                parts.Insert(0, "null");
+            }
+
+            if (patterns.TryGetValue(JavaPatterns.TotalKey, out var total))
+            {
+                parts.Add(PatternText(total));
+            }
+            else if (parts.Count == 0)
+            {
+                return "default";
+            }
+            else
+            {
+                parts.Add("default");
+            }
+        }
+
+        return "case " + string.Join(", ", parts);
+    }
+
+    private string PatternText(JCaseLabel label) => label switch
+    {
+        { Constant.Value: string name, EnumConstant: true } => name,
+        { Constant: { } constant } => Expr(constant),
+        { Type: { } type, Components: { } parts } => $"{_naming.Type(type)}({string.Join(", ", parts.Select(PatternText))})" + Guard(label),
+        { Inferred: true, Binding: { } inferred } => $"var {inferred.Name}" + Guard(label),
+        { Type: { } type, Binding: { } binding } => $"{_naming.Type(type)} {binding.Name}" + Guard(label),
+        _ => "?",
+    };
+
+    private string Guard(JCaseLabel label) => label.Guard is { } guard ? $" when {Condition(guard)}" : string.Empty;
+
     private void WriteSwitch(JSwitch dispatch, int level)
     {
         var breakable = _breakable;
@@ -359,7 +447,8 @@ internal sealed partial class JavaEmitter
         Line(level, $"{LabelPrefix(dispatch.Label)}switch ({Expr(switched)}) {{");
         foreach (var arm in dispatch.Cases)
         {
-            foreach (string label in CaseLabels(arm, values, names))
+            var labels = dispatch.Patterns is { } patterns ? [PatternArmLabel(arm.Labels, values, patterns) + ":"] : CaseLabels(arm, values, names);
+            foreach (string label in labels)
             {
                 Line(level + 1, label);
             }
@@ -402,8 +491,17 @@ internal sealed partial class JavaEmitter
         sb.Append("switch (").Append(Expr(switched)).Append(") {\n");
         foreach (var arm in expression.Arms)
         {
-            var labels = CaseLabels(new CCase(arm.Labels, CSeq.Empty), values, names).ToList();
-            string label = labels is ["default:"] ? "default" : "case " + string.Join(", ", labels.Select(l => l["case ".Length..^1]));
+            string label;
+            if (expression.Patterns is { } patterns)
+            {
+                label = PatternArmLabel(arm.Labels, values, patterns);
+            }
+            else
+            {
+                var labels = CaseLabels(new CCase(arm.Labels, CSeq.Empty), values, names).ToList();
+                label = labels is ["default:"] ? "default" : "case " + string.Join(", ", labels.Select(l => l["case ".Length..^1]));
+            }
+
             Pad(sb, level + 1).Append(label).Append(" -> ");
             var body = arm.Body.Items.Where(i => !JavaTree.IsEmpty(i)).ToList();
             if (body is [CRaw { Statement: JYield only }])
@@ -588,6 +686,10 @@ internal sealed partial class JavaEmitter
                 return;
             case JYield yielded:
                 Line(level, $"yield {Expr(yielded.Value)};");
+                return;
+            case JNoMatch miss:
+                // Only when the switch around it could not be rebuilt: say what the bytecode does here.
+                Line(level, $"// the guard failed: matching goes on from case label {miss.Next.ToString(CultureInfo.InvariantCulture)}");
                 return;
             case JMonitor monitor:
                 Line(level, monitor.Enter
@@ -1503,8 +1605,65 @@ internal sealed partial class JavaEmitter
             return ($"({_naming.Type(dynamic.Type)}) {owner}::{method}{capture}", Precedence.Cast);
         }
 
+        // A pattern switch's dispatch left as javac compiled it: what SwitchBootstraps computes, in Java.
+        if (dynamic.IsPatternDispatch && PatternDispatchText(dynamic) is { } dispatch)
+        {
+            return (dispatch, Precedence.Primary);
+        }
+
         string bootstrap = dynamic.Bootstrap is null ? string.Empty : $" /* {dynamic.Bootstrap.Replace('/', '.')} */";
         return ($"invokedynamic {dynamic.Name}({string.Join(", ", dynamic.Args.Select(a => Expr(a)))}){bootstrap}", Precedence.Primary);
+    }
+
+    /// <summary>
+    /// <c>typeSwitch(value, restart)</c> written out: -1 for null, else the first label from <c>restart</c> on that matches —
+    /// a class by <c>instanceof</c>, a string by <c>equals</c>, an enum constant by identity — else the number of labels.
+    /// Null when a label is one it cannot write, or reading the operands twice could matter.
+    /// </summary>
+    private string? PatternDispatchText(JDynamic dynamic)
+    {
+        if (dynamic.Args is not [var value, var restart])
+        {
+            return null;
+        }
+
+        // Operands read more than once are read once, into variables of a switch expression's block, when they are not simple.
+        var held = new List<string>();
+        string v = value.IsSimple ? Expr(value, Precedence.Primary) : "$value";
+        string r = restart.IsSimple ? Expr(restart, Precedence.Relational) : "$restart";
+        if (!value.IsSimple)
+        {
+            held.Add($"{_naming.Type(value.Type ?? "Ljava/lang/Object;")} $value = {Expr(value)};");
+        }
+
+        if (!restart.IsSimple)
+        {
+            held.Add($"int $restart = {Expr(restart)};");
+        }
+
+        bool enumSwitch = dynamic.Bootstrap == JavaPatterns.EnumSwitch;
+        var labels = dynamic.BootstrapArguments!;
+        var sb = new StringBuilder($"({v} == null ? -1 : ");
+        for (int i = 0; i < labels.Count; i++)
+        {
+            string? test = labels[i] switch
+            {
+                JConst { Value: ClassLiteral type } => $"{v} instanceof {_naming.Type(type.Descriptor)}",
+                JConst { Value: string name } when enumSwitch && value.Type is { } enumType => $"{v} == {_naming.Type(enumType)}.{name}",
+                JConst { Value: string text } => $"{Quote(text)}.equals({v})",
+                JConst { Value: int number } => $"Integer.valueOf({number.ToString(CultureInfo.InvariantCulture)}).equals({v})",
+                _ => null,
+            };
+            if (test is null)
+            {
+                return null;
+            }
+
+            sb.Append(CultureInfo.InvariantCulture, $"{r} <= {i} && {test} ? {i} : ");
+        }
+
+        string chain = sb.Append(labels.Count.ToString(CultureInfo.InvariantCulture)).Append(')').ToString();
+        return held.Count == 0 ? chain : $"switch (0) {{ default -> {{ {string.Join(' ', held)} yield {chain}; }} }}";
     }
 
     private static string CompareOwner(JCompare compare) => compare.Left.Type switch

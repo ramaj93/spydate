@@ -209,7 +209,7 @@ internal static class JavaShortcuts
                 continue;
             }
 
-            var expression = new JSwitchExpr(dispatch.Value, arms, dispatch.Va) { Names = dispatch.Names };
+            var expression = new JSwitchExpr(dispatch.Value, arms, dispatch.Va) { Names = dispatch.Names, Patterns = dispatch.Patterns };
             items[i] = new CRaw(new IrAssign(variable, expression) { Va = dispatch.Va });
         }
     }

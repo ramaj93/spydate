@@ -195,6 +195,11 @@ an `ApkImage` with no archive (`IsPackage` false). `ResourceTable` reads `resour
 `BinaryXml` writes. `NestedFile` (in `Spydate.Core/Archive`) takes a file out of an archive into a cache folder so
 that `app.apk!/lib/<abi>/libfoo.so` opens as the ELF it is. See DECISIONS, "An APK is read in-house".
 
+Java 21's pattern switches are read back by `JavaPatterns`: before structuring, a failed guard's retry becomes a
+`JNoMatch` that ends its path; after, each arm's cast, accessor calls and tests become its label — type, record or
+constant, with a `when` guard — on `JSwitch.Patterns`. A switch that does not read back is decompiled again without
+it, its dispatch spelled out. See DECISIONS, "Pattern switches are rebuilt from their typeSwitch".
+
 ### 3.2 `StringScanner`
 
 Finds printable ASCII and UTF-16LE runs in the raw file bytes (so the overlay is

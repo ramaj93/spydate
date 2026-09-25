@@ -130,7 +130,7 @@ internal static class JavaTree
     /// <summary>Whether control can never run on past the statement: it ends in a jump, a return or a throw on every path.</summary>
     public static bool NeverFallsThrough(CStmt statement) => statement switch
     {
-        CRaw { Statement: IrReturn or JThrow } => true,
+        CRaw { Statement: IrReturn or JThrow or JNoMatch } => true,
         CRaw { Statement: JRegion region } => NeverFallsThrough(region.Body),
         CGoto or CBreak or CContinue or JBreak or JContinue or JExit => true,
         CSeq seq => seq.Items.LastOrDefault(i => !IsEmpty(i)) is { } last && NeverFallsThrough(last),
@@ -139,27 +139,39 @@ internal static class JavaTree
                         || (NeverFallsThrough(attempt.Body) && attempt.Catches.All(c => NeverFallsThrough(c.Body))),
         JSynchronized locked => NeverFallsThrough(locked.Body),
         JLoop { Kind: CLoopKind.Forever } loop => !Descendants(loop.Body).Any(d => d is JBreak b && b.Label == loop.Label),
+
+        // A switch whose default an arm still takes, every arm of which returns, throws or jumps out, and nothing breaks out of.
+        JSwitch { Patterns: null, DefaultLabel: >= 0 } dispatch => dispatch.Cases.Any(c => c.Labels.Contains(dispatch.DefaultLabel))
+            && dispatch.Cases.All(c => NeverFallsThrough(c.Body))
+            && !Descendants(dispatch).Any(d => d is JBreak b && b.Label == dispatch.Label),
         JBlock block => NeverFallsThrough(block.Body) && !Descendants(block.Body).Any(d => d is JBreak b && b.Label == block.Label),
         _ => false,
     };
 
     /// <summary>The tree with locals swapped wherever an expression reads them: in statements, tests, loop headers and locks.</summary>
-    public static CStmt ReplaceLocals(CStmt root, Func<JLocal, JExpr?> replace) => Rewrite(root, statement => statement switch
+    public static CStmt ReplaceLocals(CStmt root, Func<JLocal, JExpr?> replace) => MapExpressions(root, e => e is JLocal local ? replace(local) : null);
+
+    /// <summary>The tree with every expression mapped (<see cref="JavaRewrite.Map(IrExpr, Func{IrExpr, IrExpr?})"/>): in statements, tests, loop headers and locks.</summary>
+    public static CStmt MapExpressions(CStmt root, Func<IrExpr, IrExpr?> map) => Rewrite(root, statement => statement switch
     {
         CRaw { Statement: JRegion } => statement,
-        CRaw raw => raw with { Statement = JavaRewrite.Replace(raw.Statement, replace) },
-        CIf conditional => conditional with { Condition = JavaRewrite.Replace(conditional.Condition, replace) },
+        CRaw raw => raw with { Statement = JavaRewrite.Map(raw.Statement, map) },
+        CIf conditional => conditional with { Condition = JavaRewrite.Map(conditional.Condition, map) },
         JLoop loop => loop with
         {
-            Condition = loop.Condition is null ? null : JavaRewrite.Replace(loop.Condition, replace),
-            Init = loop.Init is null ? null : JavaRewrite.Replace(loop.Init, replace),
-            Update = loop.Update is null ? null : JavaRewrite.Replace(loop.Update, replace),
-            ForEach = loop.ForEach is { } each ? (each.Variable, JavaRewrite.Replace(each.Source, replace)) : null,
+            Condition = loop.Condition is null ? null : JavaRewrite.Map(loop.Condition, map),
+            Init = loop.Init is null ? null : JavaRewrite.Map(loop.Init, map),
+            Update = loop.Update is null ? null : JavaRewrite.Map(loop.Update, map),
+            ForEach = loop.ForEach is { } each ? (each.Variable, JavaRewrite.Map(each.Source, map)) : null,
         },
-        JTry { Resources.Count: > 0 } attempt => attempt with { Resources = attempt.Resources.Select(r => (r.Variable, JavaRewrite.Replace(r.Init, replace))).ToList() },
-        JAssert assertion => assertion with { Condition = JavaRewrite.Replace(assertion.Condition, replace), Message = assertion.Message is null ? null : (JExpr)JavaRewrite.Replace(assertion.Message, replace) },
-        JSwitch dispatch => dispatch with { Value = JavaRewrite.Replace(dispatch.Value, replace) },
-        JSynchronized locked => locked with { Lock = (JExpr)JavaRewrite.Replace(locked.Lock, replace) },
+        JTry { Resources.Count: > 0 } attempt => attempt with { Resources = attempt.Resources.Select(r => (r.Variable, JavaRewrite.Map(r.Init, map))).ToList() },
+        JAssert assertion => assertion with { Condition = JavaRewrite.Map(assertion.Condition, map), Message = assertion.Message is null ? null : (JExpr)JavaRewrite.Map(assertion.Message, map) },
+        JSwitch dispatch => dispatch with
+        {
+            Value = JavaRewrite.Map(dispatch.Value, map),
+            Patterns = dispatch.Patterns?.ToDictionary(p => p.Key, p => p.Value.Guard is { } guard ? p.Value with { Guard = JavaRewrite.Map(guard, map) } : p.Value),
+        },
+        JSynchronized locked => locked with { Lock = (JExpr)JavaRewrite.Map(locked.Lock, map) },
         _ => statement,
     });
 
@@ -177,12 +189,16 @@ internal static class JavaTree
             l.Condition, (l.Init as IrAssign)?.Dst, (l.Init as IrAssign)?.Src, (l.Update as IrAssign)?.Dst, (l.Update as IrAssign)?.Src,
             l.ForEach?.Variable, l.ForEach?.Source,
         }.OfType<IrExpr>(),
-        JSwitch s => [s.Value],
+        JSwitch s => Guards(s.Patterns).Prepend(s.Value),
         JSynchronized l => [l.Lock],
         JTry t => t.Resources.SelectMany(r => new IrExpr[] { r.Variable, r.Init }),
         JAssert a => a.Message is null ? [a.Condition] : [a.Condition, a.Message],
         _ => [],
     };
+
+    /// <summary>A pattern switch's <c>when</c> guards, which are expressions of the switch itself.</summary>
+    public static IEnumerable<IrExpr> Guards(IReadOnlyDictionary<int, JCaseLabel>? patterns)
+        => patterns?.Values.Select(p => p.Guard).OfType<IrExpr>() ?? [];
 
     /// <summary>How many times each local is mentioned anywhere in the tree, read or written.</summary>
     public static Dictionary<string, int> CountLocals(CStmt root)

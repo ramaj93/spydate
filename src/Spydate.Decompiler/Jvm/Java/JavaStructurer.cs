@@ -364,7 +364,7 @@ internal sealed class JavaStructurer
             cases.Add(new CCase(labels, JavaTree.Sequence(arm)));
         }
 
-        return new JSwitch(label, dispatch.Value, cases, dispatch.Va);
+        return new JSwitch(label, dispatch.Value, cases, dispatch.Va) { DefaultLabel = dispatch.Targets.Count - 1 };
     }
 
     /// <summary>How control gets from <paramref name="x"/> to the block at <paramref name="targetVa"/>.</summary>

@@ -17,6 +17,12 @@ internal sealed class LiftedMethod
     /// <summary>For each switch, by the offset of its instruction: the case value of each target index, null for default.</summary>
     public required Dictionary<ulong, int?[]> SwitchValues { get; init; }
 
+    /// <summary>
+    /// The statements a handler that turns what it catches into a <c>MatchException</c> covers, by address: a record
+    /// pattern's accessor calls (<see cref="JavaPatterns"/>).
+    /// </summary>
+    public HashSet<ulong> MatchCovered { get; } = [];
+
     public required LocalNamer Locals { get; init; }
 }
 
@@ -1097,7 +1103,8 @@ internal sealed class JvmLifter
             }
             else
             {
-                dynamic = dynamic with { Bootstrap = bootstrapOwner };
+                // Its static arguments too: for a pattern switch's typeSwitch they are the case labels.
+                dynamic = dynamic with { Bootstrap = bootstrapOwner, BootstrapArguments = bootstrap.Arguments.Select(Constant).ToList() };
             }
         }
 

@@ -193,11 +193,17 @@ public sealed record JSwitchExpr(IrExpr Value, IReadOnlyList<JSwitchArm> Arms, u
 
     public override int Depth => 1 + DepthOf(Value);
 
-    /// <summary>Only the switched value: each arm's statements, its yielded value among them, are statements of their own.</summary>
-    public override IEnumerable<IrExpr> Children => [Value];
+    /// <summary>
+    /// The switched value, and a pattern switch's <c>when</c> guards: each arm's statements, its yielded value among
+    /// them, are statements of their own.
+    /// </summary>
+    public override IEnumerable<IrExpr> Children => Patterns is null ? [Value] : [Value, .. Patterns.Values.Select(p => p.Guard).OfType<IrExpr>()];
 
     /// <summary>Each case value's label, for a switch on a string or an enum.</summary>
     public IReadOnlyDictionary<int, string>? Names { get; init; }
+
+    /// <summary>Each case value's label, for a pattern switch (see <see cref="JSwitch.Patterns"/>).</summary>
+    public IReadOnlyDictionary<int, JCaseLabel>? Patterns { get; init; }
 }
 
 /// <summary>One arm of a switch expression: its case indices and its statements, ending in a <see cref="JYield"/> or a throw.</summary>
@@ -307,6 +313,15 @@ public sealed record JDynamic(string Name, string Descriptor, IReadOnlyList<JExp
 
     /// <summary>The bootstrap method, for a call site that is neither: <c>SwitchBootstraps.typeSwitch</c>.</summary>
     public string? Bootstrap { get; init; }
+
+    /// <summary>
+    /// That bootstrap's static arguments, as constants: a pattern switch's case labels — a class for a type pattern, a
+    /// string for a constant or an enum constant's name, a number. Null for the call sites read another way.
+    /// </summary>
+    public IReadOnlyList<JExpr>? BootstrapArguments { get; init; }
+
+    /// <summary>Whether this is a pattern switch's dispatch: <c>typeSwitch</c> or <c>enumSwitch</c>, labels known.</summary>
+    public bool IsPatternDispatch => Bootstrap is JavaPatterns.TypeSwitch or JavaPatterns.EnumSwitch && BootstrapArguments is not null;
 }
 
 /// <summary><c>a &amp;&amp; b</c> or <c>a || b</c>, rebuilt from the branch ladders a compiler turns them into.</summary>
@@ -411,6 +426,66 @@ public sealed record JSwitch(int Label, IrExpr Value, IReadOnlyList<CCase> Cases
 {
     /// <summary>For a switch on a string or an enum rebuilt from what javac made of it: each case value's label text.</summary>
     public IReadOnlyDictionary<int, string>? Names { get; init; }
+
+    /// <summary>The target index <c>default</c> goes to — the last — whether or not an arm still holds it; -1 when not known.</summary>
+    public int DefaultLabel { get; init; } = -1;
+
+    /// <summary>
+    /// For a pattern switch rebuilt from its <c>typeSwitch</c> (<see cref="JavaPatterns"/>): each case value's label —
+    /// <c>-1</c> is <c>case null</c> — and, under <see cref="JavaPatterns.TotalKey"/>, the pattern the default arm is.
+    /// </summary>
+    public IReadOnlyDictionary<int, JCaseLabel>? Patterns { get; init; }
+
+    /// <summary>
+    /// For a pattern switch rebuilt where it stood alone, before the statements javac put ahead of it were in view: the
+    /// value its dispatch read, its restart index, and how many of its arms' casts read that value — what taking those
+    /// statements away needs. Null once they are gone.
+    /// </summary>
+    public PatternOrigin? Origin { get; init; }
+}
+
+/// <summary>What a rebuilt pattern switch's dispatch read: see <see cref="JSwitch.Origin"/>.</summary>
+public sealed record PatternOrigin(IrExpr Selector, IrExpr Restart, int Bindings, int?[] Values);
+
+/// <summary>
+/// One label of a pattern switch: a type pattern — its type, its variable, and the <c>when</c> guard it may carry — or a
+/// constant, which an enum switch names by the constant's name.
+/// </summary>
+public sealed record JCaseLabel
+{
+    /// <summary>A type pattern's type, as a descriptor.</summary>
+    public string? Type { get; init; }
+
+    /// <summary>The variable a type pattern binds; null for a record pattern, which binds its components instead.</summary>
+    public JLocal? Binding { get; init; }
+
+    /// <summary>A record pattern's components, each a type pattern of its own: <c>Rect(double w, double h)</c>.</summary>
+    public IReadOnlyList<JCaseLabel>? Components { get; init; }
+
+    /// <summary>
+    /// A component whose type is the record's own for it, which only erased reaches the class file: written <c>var</c>,
+    /// which gives it that type with its type arguments — <c>List&lt;ModCommand&gt;</c>, not <c>List</c>.
+    /// </summary>
+    public bool Inferred { get; init; }
+
+    /// <summary>The <c>when</c> condition, if the pattern has one.</summary>
+    public IrExpr? Guard { get; init; }
+
+    /// <summary>A constant label: a string, a number, or (with <see cref="EnumConstant"/>) an enum constant's name.</summary>
+    public JConst? Constant { get; init; }
+
+    public bool EnumConstant { get; init; }
+}
+
+/// <summary>
+/// A pattern switch's guard failing — javac's <c>restart = next; goto dispatch</c> — which sends matching on from label
+/// <see cref="Next"/>. Until the switch is rebuilt with its <c>when</c> guards (<see cref="JavaPatterns"/>) it is a
+/// statement that ends its path, so the loop javac made of the retry never reaches the structurer.
+/// </summary>
+public sealed record JNoMatch(int Next) : IrStmt
+{
+    /// <summary>The dispatch it goes back to, by its switch's address: a pattern switch may hold another.</summary>
+    public ulong Dispatch { get; init; }
 }
 
 /// <summary><c>break label</c>: to just after the labelled block, loop or switch. Printed without the label when it names the innermost loop or switch.</summary>

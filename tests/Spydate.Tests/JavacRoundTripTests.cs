@@ -14,7 +14,8 @@ namespace Spydate.Tests;
 /// local classes — and <c>Legacy.java</c>, compiled for Java 8, where inner classes reach private members through
 /// <c>access$000</c> methods and enum switches go through switch maps — and <c>Generics.java</c> — casts to type
 /// variables erasure takes out, locals of type <c>T</c>, inherited generic methods, explicit type arguments,
-/// multi-catch — compiled with and without debug information, decompiled, compiled again from the decompiled text,
+/// multi-catch — and <c>Patterns.java</c> — Java 21's pattern switches, guards, record patterns flat, nested and
+/// merged, sealed hierarchies — compiled with and without debug information, decompiled, compiled again from the decompiled text,
 /// and run: the copy must print exactly what the original prints. The fixtures' JAR is also decompiled whole and
 /// compiled again as one source tree (<see cref="JavaRecompile"/>), and any JAR can be measured the same way by
 /// pointing <c>SPYDATE_RECOMPILE_JAR</c> at it.
@@ -27,7 +28,7 @@ public sealed class JavacRoundTripTests
 {
     private static readonly Lazy<Compiled?> Built = new(Build, LazyThreadSafetyMode.ExecutionAndPublication);
 
-    private static readonly string[] Fixtures = ["Shapes", "Sugar", "Legacy", "Generics"];
+    private static readonly string[] Fixtures = ["Shapes", "Sugar", "Legacy", "Generics", "Patterns"];
 
     private readonly ITestOutputHelper _output;
 
@@ -47,6 +48,8 @@ public sealed class JavacRoundTripTests
     [InlineData("Legacy", false)]
     [InlineData("Generics", true)]
     [InlineData("Generics", false)]
+    [InlineData("Patterns", true)]
+    [InlineData("Patterns", false)]
     public void EveryMethodIsStructuredWithoutAGoto(string name, bool debug)
     {
         var compiled = Require();
@@ -67,6 +70,8 @@ public sealed class JavacRoundTripTests
     [InlineData("Legacy", false)]
     [InlineData("Generics", true)]
     [InlineData("Generics", false)]
+    [InlineData("Patterns", true)]
+    [InlineData("Patterns", false)]
     public void TheDecompiledClassCompilesAndBehavesLikeTheOriginal(string name, bool debug)
     {
         var compiled = Require();
@@ -124,6 +129,9 @@ public sealed class JavacRoundTripTests
     [InlineData("Generics", "debug")]
     [InlineData("Generics", "release")]
     [InlineData("Generics", "nodesugar")]
+    [InlineData("Patterns", "debug")]
+    [InlineData("Patterns", "release")]
+    [InlineData("Patterns", "nodesugar")]
     public void TheClassFromAnApkCompilesAndBehavesLikeTheOriginal(string name, string mode)
     {
         var compiled = Require();
@@ -429,7 +437,7 @@ public sealed class JavacRoundTripTests
         }
 
         string fixtures = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Java", "fixtures");
-        string sources = string.Join(' ', new[] { "Shapes", "Sugar", "Generics" }.Select(n => $"\"{Path.Combine(fixtures, n + ".java")}\""));
+        string sources = string.Join(' ', new[] { "Shapes", "Sugar", "Generics", "Patterns" }.Select(n => $"\"{Path.Combine(fixtures, n + ".java")}\""));
         string root = Path.Combine(Path.GetTempPath(), "spydate-javac-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>

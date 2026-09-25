@@ -283,18 +283,41 @@ internal sealed class JavaClassWriter
         {
             try
             {
-                result.Lifted = Prepare(facts.File, method, code, reserved);
-                var lifted = result.Lifted;
-                RemoveNullChecks(lifted.Function);
-                EnumComparisons(lifted);
-                FinalFieldCopies(facts.File, method, lifted.Function);
-                result.Body = JavaShaping.Run(
-                    JavaRegions.Structure(lifted),
-                    lifted.Locals.IsUntabled,
-                    e => e is JExpr j && ((JavaGenerics.GenericOf(j, lifted, FindFile) is { } g && JavaGenerics.IsParameterized(g))
+                CStmt Structured(bool patterns)
+                {
+                    result.Lifted = Prepare(facts.File, method, code, reserved);
+                    var lifted = result.Lifted;
+                    RemoveNullChecks(lifted.Function);
+                    EnumComparisons(lifted);
+                    if (patterns)
+                    {
+                        JavaPatterns.Prepare(lifted);
+                    }
 
-                                          // this, in a class with a signature: its type parameters or a supertype's arguments are known.
-                                          || (j is JLocal { Kind: JLocalKind.This } && facts.File.Signature is not null)));
+                    FinalFieldCopies(facts.File, method, lifted.Function);
+                    return JavaShaping.Run(
+                        JavaRegions.Structure(lifted),
+                        lifted.Locals.IsUntabled,
+                        e => e is JExpr j && ((JavaGenerics.GenericOf(j, lifted, FindFile) is { } g && JavaGenerics.IsParameterized(g))
+
+                                              // this, in a class with a signature: its type parameters or a supertype's arguments are known.
+                                              || (j is JLocal { Kind: JLocalKind.This } && facts.File.Signature is not null)),
+                        patterns
+                            ? new JavaPatterns.Context(
+                                lifted.SwitchValues,
+                                type => FindFile(type)?.PermittedSubclasses is { Count: > 0 },
+                                type => FindFile(type)?.RecordComponents?.Count,
+                                lifted.MatchCovered)
+                            : null);
+                }
+
+                // A pattern switch whose arms did not read back is written the way javac compiled it — a loop around its
+                // dispatch, which prints as what SwitchBootstraps computes — rather than half rebuilt.
+                result.Body = Structured(patterns: true);
+                if (JavaPatterns.Unfinished(result.Body))
+                {
+                    result.Body = Structured(patterns: false);
+                }
             }
             catch (NotStructurableException ex)
             {
@@ -398,6 +421,21 @@ internal sealed class JavaClassWriter
             words.RemoveAll(w => w is "static" or "public" or "private" or "protected");
         }
 
+        // A sealed class or interface names what may extend it; one that extends a sealed type and is neither final
+        // nor sealed itself says it opens the hierarchy again, as it had to.
+        // An enum whose constants have bodies is sealed over their classes too, which Java writes as the enum it is.
+        var permitted = keyword is "class" or "interface" ? file.PermittedSubclasses : [];
+        if (permitted is { Count: > 0 })
+        {
+            words.Remove("final");
+            words.Add("sealed");
+        }
+        else if (keyword is "class" or "interface" && !words.Contains("final")
+                 && new[] { file.SuperName }.Concat(file.Interfaces).OfType<string>().Any(s => FindFile(s)?.PermittedSubclasses?.Contains(file.Name) == true))
+        {
+            words.Add("non-sealed");
+        }
+
         var sb = new StringBuilder();
         if (words.Count > 0)
         {
@@ -430,6 +468,11 @@ internal sealed class JavaClassWriter
         if (interfaces.Count > 0)
         {
             sb.Append(file.IsInterface ? " extends " : " implements ").Append(string.Join(", ", interfaces));
+        }
+
+        if (permitted is { Count: > 0 })
+        {
+            sb.Append(" permits ").Append(string.Join(", ", permitted.Select(naming.ClassName)));
         }
 
         // The header is outside the class's body, where its own member classes are not in scope by their simple

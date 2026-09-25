@@ -608,14 +608,27 @@ internal sealed class DalvikLifter
             return null;
         }
 
-        // Named by the table at any of its stores or reads: the table's variable.
+        // Named by the table at every store, or a read of it: the table's variable. A web the table names only in part
+        // — D8 reusing a variable's register for a value of its own, the store inside the variable's range — or by two
+        // names is one variable all the same, and naming each store by its address would make it two.
+        int slot = Slot(register);
+        var names = new HashSet<string?>(StringComparer.Ordinal);
         foreach (int d in members)
         {
             var i = _instructions[_defs[d].Instruction];
-            if (Named(register, i.Address + i.Units) || NamedRead(d, register) is not null)
+            int store = i.Address + i.Units;
+            string? name = _slots.Locals.FirstOrDefault(l => l.Slot == slot && store >= l.StartPc && store <= l.StartPc + l.Length)?.Name;
+            if (name is null && NamedRead(d, register) is int start)
             {
-                return null;
+                name = _slots.Locals.FirstOrDefault(l => l.Slot == slot && l.StartPc == start)?.Name;
             }
+
+            names.Add(name);
+        }
+
+        if (names.Count == 1 && names.First() is not null)
+        {
+            return null;
         }
 
         var types = members.Select(d => _defType[d]).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
@@ -892,6 +905,14 @@ internal sealed class DalvikLifter
         }
 
         string known = KnownType(k, register) ?? expect ?? "I";
+
+        // A variable the table names, read where its range does not reach — D8 reads it before its range starts — is
+        // still that variable: read under the name its store has.
+        if (defs is { Count: > 0 } && !Named(register, address) && defs.All(d => _defs[d].Instruction >= 0) && StoreNamedAt(defs[0], register) is int named)
+        {
+            return _locals.Load(Slot(register), Kind(known), named);
+        }
+
         return _locals.Load(Slot(register), Kind(known), address);
     }
 
@@ -1027,6 +1048,14 @@ internal sealed class DalvikLifter
     private int _temps;
 
     /// <summary>Where the debug table's variable starts that names the register at a read a definition reaches, if any does.</summary>
+    /// <summary>Where the table names a definition's variable: just after its store, or where a read of it is named.</summary>
+    private int? StoreNamedAt(int definition, int register)
+    {
+        var i = _instructions[_defs[definition].Instruction];
+        int store = i.Address + i.Units;
+        return Named(register, store) ? store : NamedRead(definition, register);
+    }
+
     private int? NamedRead(int definition, int register)
     {
         int slot = Slot(register);
@@ -1354,6 +1383,17 @@ internal sealed class DalvikLifter
         };
         var call = new JCall(kind, receiver, owner, target.Name, descriptor, args);
 
+        // A pattern switch D8 desugared: its dispatch is a synthetic helper, and it is the typeSwitch it replaced.
+        if (kind == JCallKind.Static && _dex is not null && SwitchDispatch(_dex, target) is { } dispatch)
+        {
+            Result(k, new JDynamic(dispatch.Bootstrap == JavaPatterns.EnumSwitch ? "enumSwitch" : "typeSwitch", descriptor, args)
+            {
+                Bootstrap = dispatch.Bootstrap,
+                BootstrapArguments = dispatch.Labels,
+            });
+            return;
+        }
+
         // A helper D8 put in its own synthetic class that makes one call with its parameters first — a workaround
         // around a platform bug, like its compareAndSet — is that call.
         if (kind == JCallKind.Static && _dex is not null && Forwarded(_dex, target) is { } forwarded)
@@ -1426,11 +1466,22 @@ internal sealed class DalvikLifter
         }
         else
         {
-            dynamic = dynamic with { Bootstrap = bootstrap };
+            dynamic = dynamic with { Bootstrap = bootstrap, BootstrapArguments = site.Arguments.Select(Constant).ToList() };
         }
 
         Result(k, dynamic);
     }
+
+    /// <summary>A call site's static argument as the constant it is: a class, a string, a number.</summary>
+    private static JExpr Constant(DexValue value) => value switch
+    {
+        { Kind: DexValueKind.Type, Value: string descriptor } => new JConst(new ClassLiteral(descriptor), "Ljava/lang/Class;"),
+        { Kind: DexValueKind.String, Value: string text } => new JConst(text, "Ljava/lang/String;"),
+        { Kind: DexValueKind.Int or DexValueKind.Short or DexValueKind.Byte or DexValueKind.Char, Value: long number } => JConst.Int((int)number),
+        { Kind: DexValueKind.Long, Value: long number } => new JConst(number, "J"),
+        { Kind: DexValueKind.Boolean, Value: bool flag } => new JConst(flag, "Z"),
+        _ => new JUnknown($"{value.Kind.ToString().ToLowerInvariant()} constant"),
+    };
 
     /// <summary>A DEX method handle's kind as the JVM numbers it (JVMS §5.4.3.5), which is what <see cref="JDynamic.TargetKind"/> holds.</summary>
     private static int HandleKind(int dexKind) => dexKind switch
@@ -1515,6 +1566,93 @@ internal sealed class DalvikLifter
     /// The call a D8 synthetic helper forwards to: a static method of a class D8 made (its source file says so) whose
     /// code starts by calling one method with exactly its own parameters, in order, and returns that method's type.
     /// </summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DexFile, Dictionary<DexMethodRef, (string Bootstrap, IReadOnlyList<JExpr> Labels)?>> DispatchCache = new();
+
+    /// <summary>
+    /// D8's desugared <c>typeSwitch</c>: a static <c>switchDispatch(selector, restart)</c> in a synthetic class that returns
+    /// -1 for null, then tries each label from <c>restart</c> on — an <c>instance-of</c> for a type, an enum constant's
+    /// name checked through a cache, a string — returning the label's index, or -2 when none matches. The labels are
+    /// read back in order from what each <c>return k</c> follows; anything else in the helper and it is left a call.
+    /// </summary>
+    private static (string Bootstrap, IReadOnlyList<JExpr> Labels)? SwitchDispatch(DexFile dex, DexMethodRef helper)
+    {
+        if (!helper.Name.StartsWith("switchDispatch", StringComparison.Ordinal) || helper.Proto is not { ReturnType: "I", Parameters: [['L', ..] selector, "I"] })
+        {
+            return null;
+        }
+
+        var cache = DispatchCache.GetValue(dex, _ => []);
+        lock (cache)
+        {
+            if (cache.TryGetValue(helper, out var known))
+            {
+                return known;
+            }
+        }
+
+        (string, IReadOnlyList<JExpr>)? result = null;
+        var definition = dex.Classes.FirstOrDefault(c => c.Descriptor == helper.Owner);
+        var method = definition?.DirectMethods.FirstOrDefault(m => m.Ref == helper);
+        if (definition is { SourceFile: "D8$$SyntheticClass" } && method is { Code: { } code } && (method.Access & DexAccess.Static) != 0)
+        {
+            var labels = new SortedDictionary<long, JExpr>();
+            var constants = new Dictionary<int, long>();
+            JExpr? evidence = null;
+            bool understood = true;
+            foreach (var i in Dalvik.Decode(code.Insns.Span))
+            {
+                switch (i.Opcode)
+                {
+                    case 0x12 or 0x13 or 0x14:
+                        constants[i.A] = i.Literal;
+                        continue;
+                    case 0x1A when i.Index >= 0 && i.Index < dex.Strings.Count:
+                        evidence = new JConst(dex.Strings[i.Index], "Ljava/lang/String;");
+                        constants.Remove(i.A);
+                        continue;
+                    case 0x20 when i.Index >= 0 && i.Index < dex.Types.Count:
+                        evidence = new JConst(new ClassLiteral(dex.Types[i.Index]), "Ljava/lang/Class;");
+                        constants.Remove(i.A);
+                        continue;
+                    case 0x0F when constants.TryGetValue(i.A, out long returned) && returned >= 0:
+                        if (evidence is null || labels.ContainsKey(returned))
+                        {
+                            understood = false;
+                        }
+                        else
+                        {
+                            labels[returned] = evidence;
+                        }
+
+                        evidence = null;
+                        continue;
+                }
+
+                if (Writes(i.Opcode))
+                {
+                    constants.Remove(i.A);
+                }
+            }
+
+            if (understood && labels.Count > 0 && labels.Keys.SequenceEqual(Enumerable.Range(0, labels.Count).Select(n => (long)n)))
+            {
+                // An enum switch's helper takes the enum; a type switch's takes Object, whatever the selector's type.
+                result = (selector == "Ljava/lang/Object;" ? JavaPatterns.TypeSwitch : JavaPatterns.EnumSwitch, labels.Values.ToList());
+            }
+        }
+
+        lock (cache)
+        {
+            cache[helper] = result;
+        }
+
+        return result;
+
+        // Instructions whose first register is the one they write.
+        static bool Writes(byte op) => op is (>= 0x01 and <= 0x0D) or (>= 0x12 and <= 0x1C) or 0x1F or 0x20 or 0x21 or 0x22 or 0x23
+            or (>= 0x2D and <= 0x31) or (>= 0x44 and <= 0x4A) or (>= 0x52 and <= 0x58) or (>= 0x60 and <= 0x66) or (>= 0x7B and <= 0xE2);
+    }
+
     private static (JCallKind Kind, DexMethodRef Target)? Forwarded(DexFile dex, DexMethodRef helper)
     {
         var cache = ForwardCache.GetValue(dex, _ => []);

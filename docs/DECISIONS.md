@@ -1432,3 +1432,35 @@ bootstrap named. D8 only leaves them when told not to desugar, so the round trip
 `--no-desugaring`, which also keeps records extending `java.lang.Record` with ObjectMethods (read as records too).
 **`invoke-polymorphic`** is the call javac wrote with the call site's type; the emitter casts a signature-polymorphic
 call's result and any argument of another type, which `MethodHandle.invokeExact` and `VarHandle` need on either path.
+
+## Pattern switches are rebuilt from their typeSwitch, and fall back to it spelled out
+
+javac 21 compiles `switch (o) { case Integer i when i > 3 -> … }` to a loop: `typeSwitch(o, restart)` — an
+`invokedynamic` whose static arguments are the case labels, returning the first label from `restart` on that
+matches, -1 for null — a `tableswitch` on it, a cast to each pattern's variable, and for a guard that fails,
+`restart = k + 1` and round again. Record patterns call the accessors in a try whose handler throws a
+`MatchException`; consecutive cases on one record are merged into a switch on a component inside one arm; an
+exhaustive switch gets a `default` that throws `MatchException`. `enumSwitch` does the same for enum selectors.
+
+`JavaPatterns` reads it back in two steps. **Before structuring** each retry becomes a `JNoMatch` that ends its
+path, so the loop never reaches the structurer and a guard is an `if` at the top of its arm. **After**, each arm's
+steps are replayed against a pattern tree — the cast, the accessor calls (in javac's try, which the exception table
+marks; or all of a record's components), copies, nested `instanceof` tests — the tests left over become the
+`when` guard, and the switch is on the value again, in label order, `default` last, `case null` where null goes.
+javac's merged cases become one case per inner arm, each finishing the pattern its outer arm began. javac's
+`requireNonNull`, selector copy and restart index go; its `MatchException` default goes when the selector is sealed
+or an enum, and stays otherwise. A component whose type is only its erasure is written `var`.
+
+D8 desugars the call site into a synthetic `switchDispatch(value, restart)` helper — an `instance-of` ladder, enum
+constants checked through a cache — and the table into an `if` chain: the Dalvik lifter reads the helper's labels
+back into the same call site and the chain becomes the switch again. D8 writes `MatchException` as
+`RuntimeException`, leaves null to the default arm (so an unchecked switch is `case null, default`), and drops
+`PermittedSubclasses`, so over DEX an exhaustive switch keeps its `default`.
+
+**Anything not in that shape is not half rebuilt.** A method with a retry or a dispatch left is decompiled again
+without the rewrite: the loop as javac wrote it, the dispatch printed as exactly what `SwitchBootstraps` computes —
+`(v == null ? -1 : restart <= 0 && v instanceof A ? 0 : … : n)`. That compiles and runs the same. Of the 70
+classes with pattern switches in Android Studio's own JARs, none needs it.
+
+Also written for them: `sealed … permits` and `non-sealed` from `PermittedSubclasses`, and a variable the Dalvik
+lifter would have named twice — D8 reusing a register inside a debug variable's range — named once.

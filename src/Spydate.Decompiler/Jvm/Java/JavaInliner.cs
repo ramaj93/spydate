@@ -23,44 +23,52 @@ internal static class JavaNames
 internal static class JavaRewrite
 {
     /// <summary>The expression with every local <paramref name="replace"/> answers for swapped for its answer.</summary>
-    public static IrExpr Replace(IrExpr expression, Func<JLocal, JExpr?> replace) => expression switch
+    public static IrExpr Replace(IrExpr expression, Func<JLocal, JExpr?> replace) => Map(expression, e => e is JLocal local ? replace(local) : null);
+
+    /// <summary>
+    /// The expression rebuilt top-down: each node <paramref name="map"/> answers for is swapped for its answer, whole; the
+    /// others keep their kind with their operands mapped.
+    /// </summary>
+    public static IrExpr Map(IrExpr expression, Func<IrExpr, IrExpr?> map) => map(expression) ?? expression switch
     {
-        JLocal local => replace(local) ?? local,
-        JField f => f with { Instance = f.Instance is null ? null : R(f.Instance, replace) },
-        JArrayElement a => a with { Array = R(a.Array, replace), Index = R(a.Index, replace) },
-        JArrayLength l => l with { Array = R(l.Array, replace) },
-        JCall c => c with { Receiver = c.Receiver is null ? null : R(c.Receiver, replace), Args = c.Args.Select(x => R(x, replace)).ToList() },
-        JNew n => n with { Args = n.Args.Select(x => R(x, replace)).ToList() },
-        JNewArray n => n with { Dimensions = n.Dimensions.Select(x => R(x, replace)).ToList(), Elements = n.Elements?.Select(x => R(x, replace)).ToList() },
-        JAssignExpr { Target: JLocal } a => a with { Value = R(a.Value, replace) },
-        JAssignExpr a => a with { Target = R(a.Target, replace), Value = R(a.Value, replace) },
-        JBinary b => b with { Left = R(b.Left, replace), Right = R(b.Right, replace) },
-        JNegate n => n with { Operand = R(n.Operand, replace) },
-        JCast c => c with { Operand = R(c.Operand, replace) },
-        JInstanceOf i => i with { Operand = R(i.Operand, replace) },
-        JCompare c => c with { Left = R(c.Left, replace), Right = R(c.Right, replace) },
-        JDynamic d => d with { Args = d.Args.Select(x => R(x, replace)).ToList() },
-        JConditional c => c with { Condition = Replace(c.Condition, replace), Then = R(c.Then, replace), Else = R(c.Else, replace) },
-        JLogical l => l with { Left = Replace(l.Left, replace), Right = Replace(l.Right, replace) },
-        IrCondition c => c with { Left = Replace(c.Left, replace), Right = Replace(c.Right, replace) },
-        IrUnary u => u with { Operand = Replace(u.Operand, replace) },
+        JField f => f with { Instance = f.Instance is null ? null : M(f.Instance, map) },
+        JArrayElement a => a with { Array = M(a.Array, map), Index = M(a.Index, map) },
+        JArrayLength l => l with { Array = M(l.Array, map) },
+        JCall c => c with { Receiver = c.Receiver is null ? null : M(c.Receiver, map), Args = c.Args.Select(x => M(x, map)).ToList() },
+        JNew n => n with { Args = n.Args.Select(x => M(x, map)).ToList() },
+        JNewArray n => n with { Dimensions = n.Dimensions.Select(x => M(x, map)).ToList(), Elements = n.Elements?.Select(x => M(x, map)).ToList() },
+        JAssignExpr { Target: JLocal } a => a with { Value = M(a.Value, map) },
+        JAssignExpr a => a with { Target = M(a.Target, map), Value = M(a.Value, map) },
+        JBinary b => b with { Left = M(b.Left, map), Right = M(b.Right, map) },
+        JNegate n => n with { Operand = M(n.Operand, map) },
+        JCast c => c with { Operand = M(c.Operand, map) },
+        JInstanceOf i => i with { Operand = M(i.Operand, map) },
+        JCompare c => c with { Left = M(c.Left, map), Right = M(c.Right, map) },
+        JDynamic d => d with { Args = d.Args.Select(x => M(x, map)).ToList() },
+        JConditional c => c with { Condition = Map(c.Condition, map), Then = M(c.Then, map), Else = M(c.Else, map) },
+        JLogical l => l with { Left = Map(l.Left, map), Right = Map(l.Right, map) },
+        IrCondition c => c with { Left = Map(c.Left, map), Right = Map(c.Right, map) },
+        IrUnary u => u with { Operand = Map(u.Operand, map) },
         _ => expression,
     };
 
-    private static JExpr R(JExpr expression, Func<JLocal, JExpr?> replace) => (JExpr)Replace(expression, replace);
+    private static JExpr M(JExpr expression, Func<IrExpr, IrExpr?> map) => (JExpr)Map(expression, map);
 
     /// <summary>The statement with its expressions rewritten. The target of an assignment to a plain local is left alone.</summary>
-    public static IrStmt Replace(IrStmt statement, Func<JLocal, JExpr?> replace) => statement switch
+    public static IrStmt Replace(IrStmt statement, Func<JLocal, JExpr?> replace) => Map(statement, e => e is JLocal local ? replace(local) : null);
+
+    /// <summary>The statement with its expressions mapped (see <see cref="Map(IrExpr, Func{IrExpr, IrExpr?})"/>); a plain local assigned stays itself.</summary>
+    public static IrStmt Map(IrStmt statement, Func<IrExpr, IrExpr?> map) => statement switch
     {
-        IrAssign { Dst: JLocal } a => a with { Src = Replace(a.Src, replace) },
-        IrAssign a => a with { Dst = Replace(a.Dst, replace), Src = Replace(a.Src, replace) },
-        JExprStmt e => e with { Expression = R(e.Expression, replace) },
-        IrReturn { Value: { } v } r => r with { Value = Replace(v, replace) },
-        JThrow t => t with { Exception = R(t.Exception, replace) },
-        JYield y => y with { Value = R(y.Value, replace) },
-        JMonitor m => m with { Lock = R(m.Lock, replace) },
-        IrBranch b => b with { Condition = Replace(b.Condition, replace) },
-        IrSwitch s => s with { Value = Replace(s.Value, replace) },
+        IrAssign { Dst: JLocal } a => a with { Src = Map(a.Src, map) },
+        IrAssign a => a with { Dst = Map(a.Dst, map), Src = Map(a.Src, map) },
+        JExprStmt e => e with { Expression = M(e.Expression, map) },
+        IrReturn { Value: { } v } r => r with { Value = Map(v, map) },
+        JThrow t => t with { Exception = M(t.Exception, map) },
+        JYield y => y with { Value = M(y.Value, map) },
+        JMonitor m => m with { Lock = M(m.Lock, map) },
+        IrBranch b => b with { Condition = Map(b.Condition, map) },
+        IrSwitch s => s with { Value = Map(s.Value, map) },
         _ => statement,
     };
 
