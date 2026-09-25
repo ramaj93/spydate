@@ -29,6 +29,9 @@
     <Rule color="Address">^[0-9A-Fa-f]{8,16}(?=\s)</Rule>
     <Rule color="Bytes">(?&lt;=^[0-9A-Fa-f]{8,16}\s+)([0-9A-Fa-f]{2}\s)+</Rule>
 
+    <!-- ARM64 branches, in the mnemonic column only: bl is also an x86 register. Before the keywords. -->
+    <Rule color="Branch">(?&lt;=^[0-9A-Fa-f]{8,16}\s+([0-9A-Fa-f]{2}\s)+\s*)(?-i:bc?\.[a-z]{2}|bl?ra[ab]z?|reta[ab]|blr|br|bl|b|cbn?z|tbn?z|eret|brk|udf|svc|hvc|smc)(?![\w.])</Rule>
+
     <Keywords color="Branch">
       <Word>jmp</Word><Word>call</Word><Word>ret</Word><Word>retn</Word><Word>retf</Word><Word>iret</Word><Word>iretq</Word>
       <Word>je</Word><Word>jne</Word><Word>jz</Word><Word>jnz</Word><Word>ja</Word><Word>jae</Word><Word>jb</Word><Word>jbe</Word>
@@ -60,14 +63,18 @@
       <Word>st0</Word><Word>st1</Word><Word>st2</Word><Word>st3</Word><Word>st4</Word><Word>st5</Word><Word>st6</Word><Word>st7</Word>
     </Keywords>
 
+    <!-- ARM64 registers, lower case only, so the upper-case byte column is never taken for one -->
+    <Rule color="Register">(?-i:\b([xw]([12]?[0-9]|30)|xzr|wzr|wsp|[bhsdqv]([12]?[0-9]|3[01]))(\.[0-9]*[bhsdq])?\b)</Rule>
+
     <!-- symbols like kernel32!CreateFileW, sub_140001000, loc_XXXX -->
     <Rule color="Symbol">\b[A-Za-z_][\w.]*![A-Za-z_#][\w@$#]*</Rule>
     <Rule color="Symbol">\b(sub|loc|data|off|unk)_[0-9A-Fa-f]+\b</Rule>
 
     <Rule color="Number">\b0x[0-9A-Fa-f]+\b|\b[0-9A-Fa-f]+h\b|\b\d+\b</Rule>
 
-    <!-- anything else at the mnemonic position -->
-    <Rule color="Mnemonic">(?&lt;=^[0-9A-Fa-f]{8,16}\s+([0-9A-Fa-f]{2}\s)+\s*)[a-z][a-z0-9]*</Rule>
-    <Rule color="Mnemonic">^\s{4,}(?![0-9A-Fa-f]{8})[a-z][a-z0-9]*\b</Rule>
+    <!-- anything else at the mnemonic position. Lower case, matched case-sensitively: the rule set ignores case,
+         and a bare [a-z] took a byte such as A9 for a mnemonic and lost the real one after it. -->
+    <Rule color="Mnemonic">(?&lt;=^[0-9A-Fa-f]{8,16}\s+([0-9A-Fa-f]{2}\s)+\s*)(?-i:[a-z][a-z0-9.]*)</Rule>
+    <Rule color="Mnemonic">^\s{4,}(?![0-9A-Fa-f]{8})(?-i:[a-z][a-z0-9.]*)\b</Rule>
   </RuleSet>
 </SyntaxDefinition>

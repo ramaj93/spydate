@@ -57,6 +57,9 @@ internal sealed class SyntheticElf
 
     private int Word => Is64 ? 8 : 4;
 
+    /// <summary>AArch64 (machine 183): its own PLT stubs and relocation numbers.</summary>
+    private bool IsArm64 => Machine == 183;
+
     public byte[] Build()
     {
         var file = new List<byte>(new byte[0x1000]);   // headers live in the first page
@@ -159,7 +162,7 @@ internal sealed class SyntheticElf
         for (int i = 0; i < Imports.Count; i++)
         {
             rela.AddRange(Word == 8 ? U64(slotVas[i]) : U32((uint)slotVas[i]));
-            rela.AddRange(Word == 8 ? U64(((ulong)(i + 1) << 32) | 7) : U32((uint)(((i + 1) << 8) | 7)));
+            rela.AddRange(Word == 8 ? U64(((ulong)(i + 1) << 32) | (IsArm64 ? 1026UL : 7UL)) : U32((uint)(((i + 1) << 8) | 7)));
             if (Is64)
             {
                 rela.AddRange(U64(0));
@@ -309,6 +312,16 @@ internal sealed class SyntheticElf
     {
         ulong pltVa = Base + (ulong)plt.Offset;
         var bytes = new byte[plt.Size];
+        if (IsArm64)
+        {
+            WriteArm64Plt(bytes, pltVa, slotVas);
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                file[plt.Offset + i] = bytes[i];
+            }
+
+            return;
+        }
 
         // PLT0: push [GOT+8]; jmp [GOT+16] — its jump goes through a slot no import owns.
         if (Is64)
@@ -354,6 +367,32 @@ internal sealed class SyntheticElf
         for (int i = 0; i < bytes.Length; i++)
         {
             file[plt.Offset + i] = bytes[i];
+        }
+    }
+
+    /// <summary>
+    /// AArch64 stubs as the linker writes them: <c>adrp x16, page; ldr x17, [x16, #off]; add x16, x16, #off; br x17</c>.
+    /// PLT0 is left as nops; nothing here calls it.
+    /// </summary>
+    private static void WriteArm64Plt(byte[] bytes, ulong pltVa, List<ulong> slotVas)
+    {
+        for (int i = 0; i + 4 <= 16; i += 4)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i), 0xD503201F);
+        }
+
+        for (int i = 0; i < slotVas.Count; i++)
+        {
+            int at = 16 * (i + 1);
+            ulong stubVa = pltVa + (ulong)at;
+            ulong slot = slotVas[i];
+            long pages = (long)(slot >> 12) - (long)(stubVa >> 12);
+            uint lo = (uint)(slot & 0xFFF);
+            uint adrp = 0x90000010 | (((uint)pages & 3) << 29) | ((((uint)(pages >> 2)) & 0x7FFFF) << 5);
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(at), adrp);
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(at + 4), 0xF9400211 | ((lo / 8) << 10));
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(at + 8), 0x91000210 | (lo << 10));
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(at + 12), 0xD61F0220);
         }
     }
 

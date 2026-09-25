@@ -230,3 +230,9 @@ the length in words in bits 0-17, then Vers, X, E, EpilogCount and CodeWords.
 
 Spydate reduces both forms to the same begin/end pair the x64 table produces, so
 function bounds work the same way on either architecture.
+
+An `.xdata` record can be a fragment too. MSVC splits a shrink-wrapped function into one
+record per unwind state, and every record after the first has unwind codes that reach
+`end_c` (0xE5, "go on with the enclosing scope's codes") where a function's own prologue
+ends with `end` (0xE4). Those records are marked chained, and a function's extent runs to
+the end of the fragments that follow it without a gap.

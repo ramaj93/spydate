@@ -106,10 +106,10 @@ public sealed class BinarySession : IDisposable
     /// <summary>The processor, in the format's own words, for messages.</summary>
     public string MachineName => BinaryImage.MachineName(Image);
 
-    /// <summary>The debugger runs Windows processes; any other format is read, not run.</summary>
-    public bool CanDebug => Image.Format == BinaryFormat.Pe;
+    /// <summary>The debugger runs x86 and x64 Windows processes; anything else is read, not run.</summary>
+    public bool CanDebug => Image.Format == BinaryFormat.Pe && Image.Architecture is Architecture.X86 or Architecture.X64;
 
-    /// <summary>Null when the image is not x86 or x64: there is nothing here that can read it.</summary>
+    /// <summary>Null when there is no decoder for the image's machine (x86, x64 and ARM64 have one): nothing here can read it.</summary>
     public BinaryAnalysis? Analysis { get; }
 
     public NativeDecompiler? Decompiler { get; }

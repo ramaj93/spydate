@@ -34,7 +34,7 @@
                 │
 ┌───────────────┴─────────────────────────────────────────────┐
 │ Spydate.Disassembly (net10.0)                               │
-│  X86Disassembler (Iced) · DecodedInstruction · CFG          │
+│  IInstructionDecoder: X86 (Iced), Arm64 · CFG               │
 │  FunctionDiscovery · BinaryAnalysis (session)               │
 └───────────────▲─────────────────────────────────────────────┘
                 │
@@ -293,13 +293,21 @@ data. Used by the disassembler formatter to render `call [kernel32!ExitProcess]`
 
 ## 4. Disassembly: `Spydate.Disassembly`
 
+- `IInstructionDecoder` is one instruction set's decoder and what analysis needs to know about it: the
+  longest instruction and the alignment, padding, what a function's first bytes look like, which instructions
+  never continue, and switch-table recovery. `InstructionDecoders.For(image)` picks it by `Architecture`.
 - `X86Disassembler` wraps Iced's `Decoder` + `IntelFormatter`
   (`ISymbolResolver` backed by `SymbolTable`). `Decode(code, va, count)`
   yields `DecodedInstruction`s.
+- `Arm64Disassembler` runs the in-house `Arm64Decoder` (one 32-bit word in, an `Arm64Instruction` in its
+  preferred alias out, or null) and a register tracker that puts the address an `adrp` pair builds on the
+  instruction that finishes it (`DataVa`), and the slot a `blr` calls through on the call (`IndirectSlotVa`).
+  See DECISIONS, "ARM64 is decoded in-house".
 - `DecodedInstruction` — arch‑neutral record consumed by the UI and lifter:
   `Va`, `Rva`, `Length`, `Bytes`, `Mnemonic`, `Operands`, `Text`, `Flow`
   (`Next | UnconditionalBranch | ConditionalBranch | Call | Return | IndirectBranch | IndirectCall | Interrupt | Invalid`),
-  `BranchTargetVa`, plus the raw Iced `Instruction` (`Native`) for lifting.
+  `BranchTargetVa`, `IndirectSlotVa`, `DataVa`, plus the raw Iced `Instruction` (`Native`) for lifting x86, or
+  the `Arm64Instruction` (`Arm64`).
 - `BinaryAnalysis.GetSeeds()` — where discovery starts, most trustworthy first:
   entry point, TLS callbacks, exports, non-chained `.pdata` entries, then the
   Control Flow Guard and SafeSEH tables (addresses the image itself declares as

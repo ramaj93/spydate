@@ -411,8 +411,8 @@ public sealed class DebugTools
         // start would reach CreateProcess and come back as a Windows error about an unrecognised file.
         return open.CanDebug
             ? null
-            : $"debugging is not available for {open.Image.Format} files: the debugger runs Windows programs, "
-              + "and this one is read, not run. Everything that reads it still works.";
+            : $"debugging is not available for {(open.Image.Format == Core.Binary.BinaryFormat.Pe ? open.MachineName + " code" : open.Image.Format + " files")}: "
+              + "the debugger runs x86 and x64 Windows programs, and this one is read, not run. Everything that reads it still works.";
     }
 
     /// <summary>

@@ -157,6 +157,11 @@ public static class AsmListing
         {
             comment = literal;
         }
+        else if (ins.DataVa is { } data && analysis.Symbols.TryGet(data, out var dataSym) && !operands.Contains(dataSym.Name, StringComparison.Ordinal))
+        {
+            // ARM64 names a global in two instructions, neither of which shows it: say which one it reached.
+            comment = dataSym.Name;
+        }
 
         if (comment is not null)
         {

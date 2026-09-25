@@ -1,4 +1,5 @@
 using Iced.Intel;
+using Spydate.Disassembly.Arm64;
 
 namespace Spydate.Disassembly;
 
@@ -20,8 +21,8 @@ public enum InstructionFlow
 
 /// <summary>
 /// One decoded machine instruction with formatted text. Immutable. What the decoder knows beyond the text is kept
-/// for the analyses that read it: the raw Iced <see cref="Instruction"/> for x86. UI code should use the text
-/// properties.
+/// for the analyses that read it: the raw Iced <see cref="Instruction"/> for x86, <see cref="Arm64Instruction"/> for
+/// ARM64. UI code should use the text properties.
 /// </summary>
 public sealed record DecodedInstruction
 {
@@ -38,8 +39,18 @@ public sealed record DecodedInstruction
     public ulong? BranchTargetVa { get; init; }
     /// <summary>For <c>call [mem]</c> / <c>jmp [mem]</c> with an absolute or RIP-relative address: the memory slot read.</summary>
     public ulong? IndirectSlotVa { get; init; }
+    /// <summary>
+    /// An address the instruction reads, writes or takes that the decoder worked out across instructions — on ARM64,
+    /// the <c>adrp</c> that set the page and the <c>add</c> or load that finishes it. x86 carries its addresses in the
+    /// instruction itself and leaves this null.
+    /// </summary>
+    public ulong? DataVa { get; init; }
+    /// <summary>How <see cref="DataVa"/> is used: read, written, or only taken.</summary>
+    public XrefKind DataKind { get; init; } = XrefKind.Offset;
     /// <summary>The raw Iced instruction, for x86 (used by the native lifter). Default for any other architecture.</summary>
     public Instruction Native { get; init; }
+    /// <summary>The decoded ARM64 instruction; null for any other architecture.</summary>
+    public Arm64Instruction? Arm64 { get; init; }
 
     public ulong NextVa => Va + (ulong)Length;
 

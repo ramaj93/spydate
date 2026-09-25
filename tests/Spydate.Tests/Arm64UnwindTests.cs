@@ -80,10 +80,33 @@ public class Arm64UnwindTests
     {
         var pe = SyntheticPe.WithArm64ExceptionTable(new[] { (Code, 1u | (8u << 2)) });
 
-        // The machine has no disassembler yet, but the bounds are what analysis consumes.
+        // The bounds are what analysis consumes.
         Assert.Equal(MachineType.Arm64, pe.Machine);
         Assert.False(pe.IsX86Family);
         Assert.Equal(64, pe.Bitness);
         Assert.Equal(Code + 32, Assert.Single(pe.ExceptionTable).EndRva);
+    }
+
+    [Fact]
+    public void AShrinkWrappedFunctionsLaterRecordsAreFragmentsOfIt()
+    {
+        // MSVC gives each unwind state of a shrink-wrapped function a record of its own. The first ends its
+        // unwind codes with end (0xE4); the later ones reach end_c (0xE5), "go on with the enclosing codes" —
+        // here after a save_regp of their own, and with none at all.
+        const uint first = 0x1100;
+        const uint second = 0x1110;
+        const uint third = 0x1120;
+        const uint oneCodeWord = 1u << 27;
+        var pe = SyntheticPe.WithArm64ExceptionTable(
+            new[] { (Code, first), (Code + 0x24, second), (Code + 0x40, third) },
+            new[]
+            {
+                (first, 9 | oneCodeWord), (first + 4, 0xE4FC83E1u),       // set_fp; save_fplr_x; pac_sign_lr; end
+                (second, 7 | oneCodeWord), (second + 4, 0xE1E504C8u),     // save_regp; end_c; set_fp
+                (third, 4 | oneCodeWord), (third + 4, 0xE3E3E4E5u),       // end_c; end
+            });
+
+        Assert.Equal([false, true, true], pe.ExceptionTable.Select(e => e.IsChained));
+        Assert.Equal([(Code, Code + 0x50)], pe.UnwindRanges);
     }
 }

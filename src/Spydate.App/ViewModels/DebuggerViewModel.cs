@@ -826,8 +826,10 @@ public sealed partial class DebuggerViewModel : ObservableObject, IDisposable
         // CreateProcess error about a file Windows does not recognise.
         if (!binary.CanDebug)
         {
-            Status = $"Debugging is not available for {binary.Image.Format} files.";
-            Add($"{binary.DisplayName} is an {binary.Image.Format} binary: Spydate can read and decompile it, but its debugger runs Windows programs only.");
+            // An ARM64 PE is a Windows program too, just not one this machine's debugger runs.
+            string what = binary.Image.Format == Core.Binary.BinaryFormat.Pe ? $"{binary.MachineName} code" : $"{binary.Image.Format} files";
+            Status = $"Debugging is not available for {what}.";
+            Add($"{binary.DisplayName} is {(binary.Image.Format == Core.Binary.BinaryFormat.Pe ? what : $"an {binary.Image.Format} binary")}: Spydate can read it, but its debugger runs x86 and x64 Windows programs only.");
             return;
         }
 

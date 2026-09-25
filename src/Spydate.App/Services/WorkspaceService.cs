@@ -35,10 +35,10 @@ public sealed class OpenedBinary : IDisposable
     public bool IsManaged => Image is PeImage { IsManaged: true };
 
     /// <summary>
-    /// Whether this binary can be run under the debugger. The debugger drives Windows processes, so only a PE
-    /// can; an ELF is read, not run, and says so rather than failing somewhere in the launch.
+    /// Whether this binary can be run under the debugger. The debugger drives x86 and x64 Windows processes, so only
+    /// such a PE can; an ELF or an ARM64 PE is read, not run, and says so rather than failing somewhere in the launch.
     /// </summary>
-    public bool CanDebug => Image.Format == BinaryFormat.Pe;
+    public bool CanDebug => Image.Format == BinaryFormat.Pe && Image.Architecture is Architecture.X86 or Architecture.X64;
 
     /// <summary>The processor, in the format's own words: <c>Amd64</c> for a PE, <c>X86_64</c> for an ELF.</summary>
     public string MachineName => BinaryImage.MachineName(Image);
@@ -46,7 +46,7 @@ public sealed class OpenedBinary : IDisposable
     /// <summary>The container and its width: <c>PE32+</c>, <c>ELF32</c>.</summary>
     public string ContainerName => BinaryImage.ContainerName(Image);
 
-    /// <summary>Native analysis session; null when the machine type is not x86/x64.</summary>
+    /// <summary>Native analysis session; null when there is no decoder for the machine type (x86, x64 and ARM64 have one).</summary>
     public BinaryAnalysis? Analysis { get; }
 
     public NativeDecompiler? NativeDecompiler { get; }

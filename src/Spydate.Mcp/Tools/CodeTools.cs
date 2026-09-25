@@ -97,7 +97,12 @@ public sealed class CodeTools
 
         if (view is "auto")
         {
-            view = "pseudo_c";
+            view = session.Decompiler is null ? "asm" : "pseudo_c";
+        }
+
+        if (view != "asm" && session.Decompiler is null)
+        {
+            return $"there is no pseudo-C for {session.MachineName} code yet; read it with view=asm";
         }
 
         string body;

@@ -172,10 +172,21 @@ public sealed class FunctionDiscovery
                         goto EndPath;
 
                     case InstructionFlow.ConditionalBranch:
-                        if (ins.BranchTargetVa is { } ct)
+                        // A conditional tail call — ARM64's cookie check branching to its failure routine — is
+                        // the same as an unconditional one: the target is somebody else's function.
+                        if (ins.BranchTargetVa is { } ct && ct != entryVa && (_options.IsFunctionStart?.Invoke(ct) ?? false))
                         {
-                            leaders.Add(ct);
-                            work.Push(ct);
+                            if (!callTargets.Contains(ct))
+                            {
+                                callTargets.Add(ct);
+                            }
+
+                            notes.Add($"Conditional tail call at 0x{ins.Va:X} to 0x{ct:X}, which is a function of its own.");
+                        }
+                        else if (ins.BranchTargetVa is { } ct2)
+                        {
+                            leaders.Add(ct2);
+                            work.Push(ct2);
                         }
 
                         leaders.Add(ins.NextVa);

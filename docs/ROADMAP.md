@@ -27,7 +27,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ `RUNTIME_FUNCTION` end addresses as function bounds, with a sweep of the bytes
   the recursive descent never reached
 - ✅ ARM64 unwind format: 8-byte .pdata entries, packed and .xdata forms, both reduced
-  to the same begin/end shape the x64 table produces (ARM64 disassembly is Phase 4)
+  to the same begin/end shape the x64 table produces (ARM64 disassembly came in Phase 4)
 - ✅ Resource leaves decoded: version blocks, manifests (dark XML highlighting) and
   string tables open as text; version info also appears in the overview
 - ✅ Rich header: ids, build numbers and object counts are reported, and the checksum is
@@ -145,7 +145,10 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned
 - ⬜ CLI (`spydate dump/disasm/decompile`) sharing the engine — largely subsumed by the MCP server,
   which is the same headless surface with a different front end
 - ⬜ Plugin API (IAnalyzer / IDocumentProvider)
-- ⬜ ARM64 decoding
+- ✅ ARM64 decoding: an in-house decoder (base, FP, Advanced SIMD, crypto; checked word by word against
+  Go's arm64asm), function discovery, cross-references through `adrp` pairs, switch tables, AArch64 PLT
+  stubs, MSVC `.xdata` fragments — ELF `.so` and ARM64 PE, in the window and over MCP
+- ⬜ ARM64 pseudo-C: a lifter into the native IR; and calling-convention signatures for ARM64
 - ⬜ Signed release builds, installer
 
 ## Phase 5 — Managed (.NET) depth 🚧

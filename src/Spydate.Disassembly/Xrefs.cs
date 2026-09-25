@@ -173,6 +173,18 @@ public sealed class XrefExtractor
                 break;
         }
 
+        // An address the decoder put together across instructions (ARM64's adrp and add): the instruction itself
+        // holds no address to read, so this is its only data reference.
+        if (ins.Arm64 is not null)
+        {
+            if (ins.DataVa is { } built && built != 0 && _source.IsMapped(built))
+            {
+                yield return new Xref(ins.Va, built, ins.DataKind);
+            }
+
+            yield break;
+        }
+
         // Data references. call/jmp [mem] already produced a code reference above, so skip those.
         if (!ins.IsCall && !ins.IsBranch && MemoryTarget(ins.Native) is { } data && _source.IsMapped(data))
         {

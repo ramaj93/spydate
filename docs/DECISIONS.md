@@ -1464,3 +1464,47 @@ classes with pattern switches in Android Studio's own JARs, none needs it.
 
 Also written for them: `sealed … permits` and `non-sealed` from `PermittedSubclasses`, and a variable the Dalvik
 lifter would have named twice — D8 reusing a register inside a debug variable's range — named once.
+
+## ARM64 is decoded in-house, and checked against a second decoder
+
+Phase 4 left one decision open: where an ARM64 decoder comes from — written here, or Capstone through P/Invoke.
+Written here, for the reasons the PE, ELF, DEX and zip readers are, and the one the SQLite decision gave: no native
+dependency, one build for every platform, and hostile bytes that can only ever come back as null, never as a crash
+in native code. A64's fixed 32-bit encoding keeps it tractable. `Arm64Decoder` follows the architecture's encoding
+index group by group — data processing on immediates and on registers, branches and system, loads and stores,
+scalar floating point, Advanced SIMD and the crypto extensions — and writes each instruction in the form the
+architecture prefers (`mov`, `cmp`, `lsl`, `cset`, `ubfx`), in GNU syntax. SVE and SME are not decoded: their words
+are `.inst`, like an unallocated encoding, and end a path.
+
+No reference disassembler is installed here, but Go's toolchain vendors one (`golang.org/x/arch/arm64/arm64asm`).
+The decoder was written from the specification and then compared with it word by word: every word of three real
+libraries (a Linux `.so` and two Windows ARM64 DLLs from IKVM's JDK images, about 75,000 words), 200,000 to 300,000
+random words from each encoding group, and a million from the whole space. Every difference left is one of three:
+an encoding the reference accepts that the architecture reserves (an all-ones logical immediate, an extend shift
+above 4); an instruction newer than the reference (PAC, BTI, LSE atomics, `bfc`, dot products, FP16, CSSC,
+`bc.cond`), checked by hand; or condition 1111, which GNU objdump writes `nv` and the reference `al`. 1,177 of the
+agreeing words, one per mnemonic and operand shape, are a fixture of the test suite, so the comparison holds
+without Go.
+
+The seam is `IInstructionDecoder`. What discovery, the gap sweep, the listing, patches and the tools used to know
+about x86 — how long an instruction can be and where one may start, what padding and a function's first bytes look
+like, which instructions never continue, how a switch reads its table, how to format operands again with current
+names — is asked of it. `X86Disassembler` is one implementation and behaves exactly as before; `Arm64Disassembler`
+is the other.
+
+ARM64 builds an address in two instructions, `adrp` for the page and an `add` or a load for the rest, so no
+instruction says what it refers to. `Arm64Disassembler` runs a register tracker along each straight run of code and
+puts the address it arrives at on the instruction that uses it (`DecodedInstruction.DataVa`), and on a `blr` the
+slot its register was loaded from (`IndirectSlotVa`). That is all cross-references, string comments and import
+names needed to work unchanged. Switch tables are read from the `ldrb`/`ldrh`/`ldrsw` of a table of offsets that
+are scaled and added to a base, bounded by the `cmp` or `subs` before the jump. AArch64 PLT stubs (`adrp x16;
+ldr x17, [x16, #off]; add; br x17`, with or without `bti c`) name calls to imports. MSVC splits a shrink-wrapped
+function into one `.pdata` record per unwind state, and the later records' unwind codes reach `end_c`: those are
+read as fragments, so a function's bounds cover all of it and a branch into a fragment is not a tail call.
+
+What ARM64 does not have yet: pseudo-C (a lifter into the same IR is the next step), calling-convention
+signatures, patching, and the debugger, which runs x86 and x64 Windows processes only. Each says so rather than
+failing. 32-bit ARM and Thumb are not decoded.
+
+Found on the way: the listing's highlighting, whose rules ignore case, took a hex byte such as `A9` for a mnemonic
+and lost the real one after it — on x86 as well as ARM64. The mnemonic is now matched in lower case only.

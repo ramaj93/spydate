@@ -215,10 +215,34 @@ public sealed class PeImage : IBinaryImage, IUnwindInfoSource
     /// table can hold an end at or before its begin — the start is still a real function, so the entry is kept,
     /// and a consumer that wants a range checks the end itself.
     /// </summary>
-    public IReadOnlyList<(uint BeginRva, uint EndRva)> UnwindRanges => _unwindRanges ??= ExceptionTable
-        .Where(rf => !rf.IsChained && rf.BeginRva != 0)
-        .Select(rf => (rf.BeginRva, rf.EndRva))
-        .ToList();
+    public IReadOnlyList<(uint BeginRva, uint EndRva)> UnwindRanges => _unwindRanges ??= Machine is MachineType.Arm64 or MachineType.Arm64Ec or MachineType.Arm64X
+        ? Arm64UnwindRanges()
+        : ExceptionTable
+            .Where(rf => !rf.IsChained && rf.BeginRva != 0)
+            .Select(rf => (rf.BeginRva, rf.EndRva))
+            .ToList();
+
+    /// <summary>
+    /// ARM64 functions with their fragments: a fragment that starts where the function before it ends is more of
+    /// that function, so the function's extent runs to the end of its last fragment.
+    /// </summary>
+    private List<(uint BeginRva, uint EndRva)> Arm64UnwindRanges()
+    {
+        var ranges = new List<(uint BeginRva, uint EndRva)>();
+        foreach (var rf in ExceptionTable.Where(r => r.BeginRva != 0).OrderBy(r => r.BeginRva))
+        {
+            if (!rf.IsChained)
+            {
+                ranges.Add((rf.BeginRva, rf.EndRva));
+            }
+            else if (ranges.Count > 0 && ranges[^1].EndRva == rf.BeginRva)
+            {
+                ranges[^1] = (ranges[^1].BeginRva, rf.EndRva);
+            }
+        }
+
+        return ranges;
+    }
 
     private IReadOnlyList<ExportedSymbol>? _genericExports;
     private IReadOnlyList<ImportedSymbol>? _genericImports;
@@ -1045,10 +1069,71 @@ public sealed class PeImage : IBinaryImage, IUnwindInfoSource
 
             uint word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(header.Span);
             uint words = word & 0x3FFFF;
-            list.Add(new RuntimeFunction(begin, begin + (words * 4), headerRva));
+            list.Add(new RuntimeFunction(begin, begin + (words * 4), headerRva) { IsChained = IsArm64Fragment(headerRva, word) });
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// Whether an ARM64 .xdata record describes a fragment of a function rather than its start. MSVC splits a
+    /// shrink-wrapped function into one record per unwind state, and every record after the first has unwind codes
+    /// that reach <c>end_c</c> (0xE5) — "carry on with the enclosing scope's codes" — where a function's own prologue
+    /// ends with a plain <c>end</c> (0xE4).
+    /// </summary>
+    private bool IsArm64Fragment(uint headerRva, uint header)
+    {
+        uint epilogCount = (header >> 22) & 0x1F;
+        uint codeWords = header >> 27;
+        bool singleEpilog = ((header >> 21) & 1) != 0;
+        uint offset = 4;
+        if (epilogCount == 0 && codeWords == 0)
+        {
+            // Too many for the header: an extension word holds both counts.
+            var extension = ReadAtRva(headerRva + 4, 4);
+            if (extension.Length < 4)
+            {
+                return false;
+            }
+
+            uint extended = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(extension.Span);
+            epilogCount = extended & 0xFFFF;
+            codeWords = (extended >> 16) & 0xFF;
+            offset = 8;
+        }
+
+        if (!singleEpilog)
+        {
+            offset += epilogCount * 4;
+        }
+
+        var codes = ReadAtRva(headerRva + offset, (int)Math.Min(codeWords * 4, 1024)).Span;
+        for (int i = 0; i < codes.Length;)
+        {
+            byte code = codes[i];
+            if (code == 0xE4)
+            {
+                return false;
+            }
+
+            if (code == 0xE5)
+            {
+                return true;
+            }
+
+            // Unwind codes are one to four bytes; the first byte says which.
+            i += code switch
+            {
+                < 0xC0 => 1,
+                0xE0 => 4,
+                0xE7 => 3,
+                < 0xE0 => 2,
+                0xE2 => 2,
+                _ => 1,
+            };
+        }
+
+        return false;
     }
 
     private IReadOnlyList<RuntimeFunction> ParseX64ExceptionTable(DataDirectory dir)

@@ -37,7 +37,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             Warnings = elf.Warnings.ToList();
             if (binary.Analysis is null)
             {
-                Warnings.Insert(0, $"{elf.Header.MachineName} code is not something the native disassembler reads (x86/x64 only); the structure is still shown.");
+                Warnings.Insert(0, $"{elf.Header.MachineName} code is not something the native disassembler reads (x86, x64 and ARM64 only); the structure is still shown.");
             }
 
             return;
@@ -342,7 +342,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
         Warnings = pe.Warnings.ToList();
         if (binary.Analysis is null && !pe.IsManaged)
         {
-            Warnings.Insert(0, $"Machine type {pe.Machine} is not supported by the native disassembler (x86/x64 only).");
+            Warnings.Insert(0, $"Machine type {pe.Machine} is not supported by the native disassembler (x86, x64 and ARM64 only).");
         }
     }
 

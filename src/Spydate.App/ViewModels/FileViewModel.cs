@@ -255,7 +255,11 @@ public sealed partial class FileViewModel : ObservableObject
 
         if (Binary.Analysis is null && !Binary.IsManaged && Binary.Image is not (JarImage or ApkImage))
         {
-            Warnings.Add($"Machine type {Binary.MachineName} is not supported by the native disassembler (x86/x64 only).");
+            Warnings.Add($"Machine type {Binary.MachineName} is not supported by the native disassembler (x86, x64 and ARM64 only).");
+        }
+        else if (Binary.Analysis is not null && Binary.NativeDecompiler is null)
+        {
+            Warnings.Add($"{Binary.MachineName} code is disassembled; pseudo-C is for x86 and x64 only so far.");
         }
 
         if (Binary.Image is ElfImage elf)

@@ -62,13 +62,14 @@ public interface IInstructionDecoder
 public static class InstructionDecoders
 {
     /// <summary>Whether there is a decoder for <paramref name="architecture"/>.</summary>
-    public static bool Supports(Architecture architecture) => architecture is Architecture.X86 or Architecture.X64;
+    public static bool Supports(Architecture architecture) => architecture is Architecture.X86 or Architecture.X64 or Architecture.Arm64;
 
     /// <summary>The decoder for <paramref name="image"/>, or null when its instruction set has none.</summary>
     public static IInstructionDecoder? For(IBinaryImage image, SymbolTable? symbols = null, AsmSyntax syntax = AsmSyntax.Intel)
         => image.Architecture switch
         {
             Architecture.X86 or Architecture.X64 => new X86Disassembler(image.Bitness, symbols, syntax),
+            Architecture.Arm64 => new Arm64.Arm64Disassembler(symbols, syntax),
             _ => null,
         };
 }

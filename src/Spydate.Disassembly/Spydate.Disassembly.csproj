@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>Spydate.Disassembly</RootNamespace>
-    <Description>Spydate disassembly: x86/x64 decoding (Iced), function discovery and control-flow graphs.</Description>
+    <Description>Spydate disassembly: x86/x64 decoding (Iced) and an in-house ARM64 decoder, function discovery and control-flow graphs.</Description>
   </PropertyGroup>
 
   <ItemGroup>

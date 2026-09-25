@@ -1078,7 +1078,17 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
     /// </summary>
     private IReadOnlyList<(uint Rva, ImportedSymbol Import)> FindPltStubs()
     {
-        if (Architecture is not (Architecture.X86 or Architecture.X64) || Imports.Count == 0)
+        if (Imports.Count == 0)
+        {
+            return Array.Empty<(uint, ImportedSymbol)>();
+        }
+
+        if (Architecture == Architecture.Arm64)
+        {
+            return FindArm64PltStubs();
+        }
+
+        if (Architecture is not (Architecture.X86 or Architecture.X64))
         {
             return Array.Empty<(uint, ImportedSymbol)>();
         }
@@ -1121,6 +1131,52 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
                 }
 
                 i += 5;
+            }
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// AArch64 PLT stubs: <c>adrp x16, page</c>, <c>ldr x17, [x16, #off]</c> (the GOT slot), <c>add x16, x16, #off</c>,
+    /// <c>br x17</c> — opened by <c>bti c</c> when branch protection is on, which is then where calls land.
+    /// </summary>
+    private IReadOnlyList<(uint Rva, ImportedSymbol Import)> FindArm64PltStubs()
+    {
+        const uint BtiC = 0xD503245F;
+        var bySlot = Imports.ToDictionary(i => i.SlotRva);
+        var list = new List<(uint, ImportedSymbol)>();
+        var claimed = new HashSet<uint>();
+        foreach (var section in SectionHeaders.Where(s => s.IsExecutable && s.Name.StartsWith(".plt", StringComparison.Ordinal)))
+        {
+            var bytes = SectionBytes(section);
+            ulong start = AddressOf(section);
+            for (int i = 0; i + 8 <= bytes.Length; i += 4)
+            {
+                uint adrp = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(i, 4));
+                uint ldr = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(i + 4, 4));
+                if ((adrp & 0x9F00001F) != 0x90000010 || (ldr & 0xFFC003FF) != 0xF9400211)
+                {
+                    continue;
+                }
+
+                // adrp's 21-bit page offset is immhi:immlo; the ldr's 12-bit offset is scaled by 8.
+                long pages = ((long)(((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)) << 43) >> 43;
+                ulong pc = start + (ulong)i;
+                ulong slotVa = (ulong)((long)(pc & ~0xFFFUL) + (pages << 12)) + (((ldr >> 10) & 0xFFF) * 8);
+                if (VaToRva(slotVa) is not { } slot || !bySlot.TryGetValue(slot, out var import))
+                {
+                    continue;
+                }
+
+                bool landingPad = i >= 4 && System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.Slice(i - 4, 4)) == BtiC;
+                uint stub = (uint)(VaToRva(start) ?? 0) + (uint)(landingPad ? i - 4 : i);
+                if (claimed.Add(stub))
+                {
+                    list.Add((stub, import));
+                }
+
+                i += 4;
             }
         }
 
