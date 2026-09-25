@@ -52,7 +52,8 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
 
         Imports = Guard(BuildImports, "imports", Array.Empty<ImportedSymbol>());
         Exports = Guard(BuildExports, "exports", Array.Empty<ExportedSymbol>());
-        PltStubs = Guard(FindPltStubs, "PLT stubs", Array.Empty<(uint, ImportedSymbol)>());
+        PltStubs = Guard(() => FindPltStubs(Imports.ToDictionary(i => i.SlotRva)), "PLT stubs", Array.Empty<(uint, ImportedSymbol)>());
+        LocalPltStubs = Guard<IReadOnlyList<(uint Rva, string Name)>>(() => FindPltStubs(LocalSlots()).Select(s => (s.Rva, s.Import.Name!)).ToList(), "PLT stubs", Array.Empty<(uint, string)>());
         UnwindRanges = Guard(() => EhFrame.Read(this), ".eh_frame", Array.Empty<(uint, uint)>());
 
         EntryPointRva = Header.Entry != 0 && VaToRva(Header.Entry) is { } entry && RvaToOffset(entry) is not null ? entry : 0;
@@ -129,6 +130,13 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
 
     /// <summary>Each PLT stub and the import it jumps to.</summary>
     public IReadOnlyList<(uint Rva, ImportedSymbol Import)> PltStubs { get; }
+
+    /// <summary>
+    /// PLT stubs for functions this image defines itself but exports, so that another library can take their place:
+    /// a shared library calls its own public functions through the PLT. Named <c>name@plt</c>, as objdump names them,
+    /// so they stay apart from the definition.
+    /// </summary>
+    public IReadOnlyList<(uint Rva, string Name)> LocalPltStubs { get; }
 
     public IReadOnlyList<ExportedSymbol> Exports { get; }
 
@@ -1023,6 +1031,30 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
         _ => true,
     };
 
+    /// <summary>
+    /// The GOT slots of functions this image defines and calls through its own PLT, each as the <c>name@plt</c> its stub
+    /// is called by.
+    /// </summary>
+    private Dictionary<uint, ImportedSymbol> LocalSlots()
+    {
+        var slots = new Dictionary<uint, ImportedSymbol>();
+        foreach (var reloc in Relocations)
+        {
+            if (reloc.SymbolIndex <= 0 || reloc.SymbolIndex >= DynamicSymbols.Count || !IsImportSlot(reloc.Type))
+            {
+                continue;
+            }
+
+            var symbol = DynamicSymbols[reloc.SymbolIndex];
+            if (symbol.IsDefined && symbol.Name.Length > 0 && VaToRva(reloc.Offset) is { } slot)
+            {
+                slots.TryAdd(slot, new ImportedSymbol(string.Empty, symbol.Name + "@plt", null, slot, IsDelayLoad: false));
+            }
+        }
+
+        return slots;
+    }
+
     private IReadOnlyList<ImportedSymbol> BuildImports()
     {
         var list = new List<ImportedSymbol>();
@@ -1076,16 +1108,16 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
     /// by their bytes rather than by counting entries, because the layout depends on the linker and on whether
     /// control-flow protection is on (<c>.plt.sec</c>).
     /// </summary>
-    private IReadOnlyList<(uint Rva, ImportedSymbol Import)> FindPltStubs()
+    private IReadOnlyList<(uint Rva, ImportedSymbol Import)> FindPltStubs(IReadOnlyDictionary<uint, ImportedSymbol> bySlot)
     {
-        if (Imports.Count == 0)
+        if (bySlot.Count == 0)
         {
             return Array.Empty<(uint, ImportedSymbol)>();
         }
 
         if (Architecture == Architecture.Arm64)
         {
-            return FindArm64PltStubs();
+            return FindArm64PltStubs(bySlot);
         }
 
         if (Architecture is not (Architecture.X86 or Architecture.X64))
@@ -1093,7 +1125,6 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
             return Array.Empty<(uint, ImportedSymbol)>();
         }
 
-        var bySlot = Imports.ToDictionary(i => i.SlotRva);
         ulong gotBase = Dynamic.FirstOrDefault(d => d.Tag == ElfDynamicEntry.PltGot)?.Value
                         ?? (SectionHeader(".got.plt") is { } gotPlt ? AddressOf(gotPlt) : 0);
         var list = new List<(uint, ImportedSymbol)>();
@@ -1141,10 +1172,9 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
     /// AArch64 PLT stubs: <c>adrp x16, page</c>, <c>ldr x17, [x16, #off]</c> (the GOT slot), <c>add x16, x16, #off</c>,
     /// <c>br x17</c> — opened by <c>bti c</c> when branch protection is on, which is then where calls land.
     /// </summary>
-    private IReadOnlyList<(uint Rva, ImportedSymbol Import)> FindArm64PltStubs()
+    private IReadOnlyList<(uint Rva, ImportedSymbol Import)> FindArm64PltStubs(IReadOnlyDictionary<uint, ImportedSymbol> bySlot)
     {
         const uint BtiC = 0xD503245F;
-        var bySlot = Imports.ToDictionary(i => i.SlotRva);
         var list = new List<(uint, ImportedSymbol)>();
         var claimed = new HashSet<uint>();
         foreach (var section in SectionHeaders.Where(s => s.IsExecutable && s.Name.StartsWith(".plt", StringComparison.Ordinal)))
@@ -1244,6 +1274,14 @@ public sealed class ElfImage : IBinaryImage, IUnwindInfoSource, ISymbolSource
         {
             // Name the stub after the import, once: calls to it then read as calls to the import itself.
             if (import.Name is { } name && named.Add(name))
+            {
+                list.Add(new ImageSymbol(name, rva, 0, ImageSymbolKind.Stub));
+            }
+        }
+
+        foreach (var (rva, name) in LocalPltStubs)
+        {
+            if (named.Add(name))
             {
                 list.Add(new ImageSymbol(name, rva, 0, ImageSymbolKind.Stub));
             }

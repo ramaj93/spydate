@@ -243,6 +243,14 @@ public sealed class FunctionDiscovery
                             }
                         }
 
+                        // A call with another function right behind it cannot come back there: it is a call that
+                        // never returns — a throw helper, a fail-fast — which the compiler put last.
+                        if (ins.NextVa != entryVa && (_options.IsFunctionStart?.Invoke(ins.NextVa) ?? false))
+                        {
+                            notes.Add($"Call at 0x{ins.Va:X} is followed by another function; it does not return.");
+                            goto EndPath;
+                        }
+
                         break;
 
                     case InstructionFlow.IndirectCall:
@@ -258,6 +266,12 @@ public sealed class FunctionDiscovery
                                 notes.Add($"Call at 0x{ins.Va:X} does not return; the bytes after it are not code.");
                                 goto EndPath;
                             }
+                        }
+
+                        if (ins.NextVa != entryVa && (_options.IsFunctionStart?.Invoke(ins.NextVa) ?? false))
+                        {
+                            notes.Add($"Call at 0x{ins.Va:X} is followed by another function; it does not return.");
+                            goto EndPath;
                         }
 
                         break;

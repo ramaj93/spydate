@@ -1508,3 +1508,21 @@ failing. 32-bit ARM and Thumb are not decoded.
 
 Found on the way: the listing's highlighting, whose rules ignore case, took a hex byte such as `A9` for a mnemonic
 and lost the real one after it — on x86 as well as ARM64. The mnemonic is now matched in lower case only.
+
+## A release build is read as R8 and the NDK write it, and a flood of warnings is summed up
+
+An R8-shrunk release APK opened with 17,807 warnings, all one: "the line table moves past the end of the code".
+R8 gives every method that maps pc to line the same way one shared debug table, as long as the longest of them, so
+for a short method it runs on past the code. That is the table working: the runtime reads it up to the method's
+end, and so does the parser now — it had thrown, and each such method lost its lines and local names with it.
+
+The warnings also stalled the window for seconds: the Overview laid out one line per warning in a list that does
+not virtualise, and the Warnings pane took them one notification at a time. Both now show `WarningDigest`: one line
+per kind of warning with a count of the others like it, at most a hundred lines.
+
+Its ARM64 libraries showed two things about clang's output for Android. A shared library calls its own exported
+functions through its PLT (so another library can take their place), and those stubs name no import: they are now
+`name@plt`, as objdump names them, so a call to `std::terminate` through one is known never to return. And a tail
+call to a stub, or a call with the next function right behind it, ends the path rather than running into that
+function — the unwind table says where functions begin, and a call the compiler put last before one never comes
+back. On `libc++_shared.so`, functions running past their declared end went from 714 to 1.

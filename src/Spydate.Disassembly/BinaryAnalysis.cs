@@ -71,6 +71,9 @@ public sealed class BinaryAnalysis
     /// <summary>Function extents declared by the x64 unwind table, keyed by start VA.</summary>
     private readonly Dictionary<ulong, ulong> _bounds = new();
 
+    /// <summary>Linker stubs the image declares (ELF PLT entries): a jump to one leaves the function, like a call.</summary>
+    private readonly HashSet<ulong> _stubs = new();
+
     private readonly ConcurrentDictionary<ulong, CalleeSignature> _signatureCache = new();
     private readonly Lock _signatureGate = new();
     private ImportSignatures? _signatures;
@@ -135,6 +138,11 @@ public sealed class BinaryAnalysis
                     _bounds[image.RvaToVa(begin)] = image.RvaToVa(end);
                 }
             }
+        }
+
+        if (image is ISymbolSource declared)
+        {
+            _stubs.UnionWith(declared.Symbols.Where(s => s.Kind == ImageSymbolKind.Stub).Select(s => image.RvaToVa(s.Rva)));
         }
 
     }
@@ -680,7 +688,8 @@ public sealed class BinaryAnalysis
     }
 
     /// <summary>
-    /// True when the unwind table says a function begins at <paramref name="va"/>.
+    /// True when the unwind table says a function begins at <paramref name="va"/>, or the image declares a linker
+    /// stub there — a PLT entry, which a tail call jumps to and nothing includes.
     ///
     /// Only entries that stand for a whole function count. A chained entry describes a piece of one
     /// that has been moved elsewhere — a cold path, usually — and a jump into that is a jump within
@@ -690,7 +699,7 @@ public sealed class BinaryAnalysis
     {
         lock (_noReturnGate)
         {
-            return _bounds.ContainsKey(va);
+            return _bounds.ContainsKey(va) || _stubs.Contains(va);
         }
     }
 

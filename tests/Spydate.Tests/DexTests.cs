@@ -94,6 +94,31 @@ public sealed class DexTests
         Assert.Equal(DexValueKind.Null, inner["name"]!.Kind);
     }
 
+    [Fact]
+    public void ADebugTableSharedWithLongerMethodsStopsAtThisOnesEnd()
+    {
+        // R8 gives every method that maps pc to line the same way one shared table, as long as the longest of them:
+        // for a two-unit method it goes on past the end. That is the table working, not damage — the runtime reads
+        // it up to the method's end, and so does the parser, without a warning and keeping the lines it has.
+        var dex = new SyntheticDex();
+        var code = new SyntheticDex.Code(1, 0, 0, [0x0012, 0x000E])   // const/4 v0, #0 ; return-void
+        {
+            HasDebug = true,
+            LineStart = 1,
+
+            // One line per code unit: address 0, then +1 at a time, well past the two units there are.
+            DebugProgram = [0x0F, 0x1E, 0x1E, 0x1E, 0x1E],
+        };
+        dex.Class("Lcom/example/Short;", 0x0001, "Ljava/lang/Object;", null)
+            .Method("f", "V", [], 0x0009, code);
+
+        var parsed = DexFile.Parse(dex.Build());
+
+        Assert.Empty(parsed.Warnings);
+        var debug = Assert.Single(parsed.Classes).DirectMethods.Single().Code!.Debug!;
+        Assert.Equal([(0, 2), (1, 3), (2, 4)], debug.Lines);
+    }
+
     [Theory]
     [InlineData(new byte[] { 0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 0x34 })]
     [InlineData(new byte[] { (byte)'d', (byte)'e', (byte)'x', (byte)'\n', (byte)'0', (byte)'3', (byte)'5', 0 })]

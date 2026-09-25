@@ -594,14 +594,21 @@ public sealed class DexFile
                     int adjusted = op - 0x0A;
                     line += -4 + (adjusted % 15);
                     address += adjusted / 15;
-                    lines.Add((address, line));
+                    if (address <= units)
+                    {
+                        lines.Add((address, line));
+                    }
+
                     break;
                 }
             }
 
+            // R8 shares one debug table among all the methods that map pc to line the same way, so it runs as far as
+            // the longest of them; what lies past this method's code is the others'. The runtime stops here too.
             if (address > units)
             {
-                throw new DexFormatException($"The line table moves to {address}, past the {units} code units.");
+                locals.AddRange(open.Values.OrderBy(l => l.Register).Select(l => l with { End = units }));
+                return new DexDebugInfo(line, parameters, lines, locals);
             }
         }
 

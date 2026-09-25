@@ -242,8 +242,9 @@ public sealed partial class FileViewModel : ObservableObject
         Explorer.Clear();
         Explorer.Add(ExplorerTreeBuilder.Build(Binary));
 
+        // Digested: a file can repeat one complaint for every method it holds, and each line is a list item.
         Warnings.Clear();
-        foreach (string w in Binary.Image.Warnings)
+        foreach (string w in WarningDigest.Summarize(Binary.Image.Warnings))
         {
             Warnings.Add(w);
         }
@@ -276,10 +277,6 @@ public sealed partial class FileViewModel : ObservableObject
         else if (Binary.Image is ApkImage apk)
         {
             Log($"{apk.Classes.Count:N0} classes in {Binary.Bytecode?.Namespaces.Count ?? 0} packages from {apk.DexFiles.Count} DEX file(s); nothing in Dalvik code has an address, so there are no functions to discover.");
-            foreach (string warning in apk.Warnings.Take(20))
-            {
-                Warnings.Add(warning);
-            }
         }
         else if (Binary.Analysis?.Pdb is { } pdb)
         {

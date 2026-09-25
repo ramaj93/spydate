@@ -34,7 +34,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
                 .Where(s => s.Name.StartsWith(".debug_", StringComparison.Ordinal) || s.Name == ".gnu_debuglink")
                 .Select(s => new PropertyRow(s.Name, $"{s.Size:N0} bytes", s.Name == ".gnu_debuglink" ? "debug info is in a separate file" : null))
                 .ToList();
-            Warnings = elf.Warnings.ToList();
+            Warnings = WarningDigest.Summarize(elf.Warnings).ToList();
             if (binary.Analysis is null)
             {
                 Warnings.Insert(0, $"{elf.Header.MachineName} code is not something the native disassembler reads (x86, x64 and ARM64 only); the structure is still shown.");
@@ -99,7 +99,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             }
 
             Debug = new List<PropertyRow>();
-            Warnings = jar.Warnings.ToList();
+            Warnings = WarningDigest.Summarize(jar.Warnings).ToList();
             return;
         }
 
@@ -166,7 +166,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             BuildTitle = "Native libraries";
             Build = apk.NativeLibraries.Select(l => new PropertyRow(l.Abi, l.Name, $"{l.Entry.Size:N0} bytes")).ToList();
             Debug = new List<PropertyRow>();
-            Warnings = apk.Warnings.ToList();
+            Warnings = WarningDigest.Summarize(apk.Warnings).ToList();
             return;
         }
 
@@ -339,7 +339,7 @@ public sealed class OverviewDocumentViewModel : DocumentViewModel
             d.CodeView is { } cv ? cv.PdbPath : $"size 0x{d.SizeOfData:X} at 0x{d.PointerToRawData:X}",
             d.CodeView is { } cv2 ? $"{cv2.Guid:D} age {cv2.Age}" : null)).ToList();
 
-        Warnings = pe.Warnings.ToList();
+        Warnings = WarningDigest.Summarize(pe.Warnings).ToList();
         if (binary.Analysis is null && !pe.IsManaged)
         {
             Warnings.Insert(0, $"Machine type {pe.Machine} is not supported by the native disassembler (x86, x64 and ARM64 only).");

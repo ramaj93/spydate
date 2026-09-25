@@ -187,6 +187,22 @@ public class Arm64Tests
     }
 
     [Fact]
+    public void ACallWithAnotherFunctionRightBehindItDoesNotReturn()
+    {
+        // f: bl throw_helper — and g starts at the next instruction. A compiler puts a call that never returns last,
+        // so the bytes after it are g, not more of f.
+        const ulong f = 0x1000;
+        const ulong g = 0x1004;
+        var source = new MemoryCodeSource(Words(Bl(f, 0x1100), Ret, Ret).ToArray(), f, 64);
+        var options = DiscoveryOptions.Default with { IsFunctionStart = va => va == g };
+
+        var function = new FunctionDiscovery(source, new Arm64Disassembler(), new SymbolTable(), options).Discover(f);
+
+        Assert.Equal(1, function.InstructionCount);
+        Assert.Equal(g, function.EndVa);
+    }
+
+    [Fact]
     public void ACallThroughThePltReadsAsTheImport()
     {
         var elf = HelloElf();
