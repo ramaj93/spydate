@@ -78,7 +78,7 @@ public sealed class BinarySession : IDisposable
         Path = path;
         Image = image;
         Analysis = analysis;
-        Decompiler = analysis is null ? null : new NativeDecompiler(analysis);
+        Decompiler = analysis is null || !NativeDecompiler.Supports(analysis) ? null : new NativeDecompiler(analysis);
         Project = project;
         Discovery = discovery;
         Bytecode = managed is null ? bytecode : new DotNetReading(managed);
@@ -311,7 +311,7 @@ public sealed class BinarySession : IDisposable
         var embeddedMembers = embedded is null ? null : new MemberAnnotationStore { Source = AnnotationSource.Agent };
         var embeddedReading = embedded is null ? null : new JvmReading(embedded, embeddedMembers);
 
-        if (image.Architecture is not (Architecture.X86 or Architecture.X64))
+        if (!InstructionDecoders.Supports(image.Architecture))
         {
             return new BinarySession(full, image, null, null, DiscoveryState.None, managed: managed, managedLoadError: managedError, bytecode: embeddedReading, members: embeddedMembers);
         }

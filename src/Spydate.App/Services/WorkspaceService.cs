@@ -23,7 +23,7 @@ public sealed class OpenedBinary : IDisposable
         Bytecode = managed is null ? bytecode : new DotNetReading(managed);
         ManagedLoadError = managedLoadError;
         Project = project;
-        NativeDecompiler = analysis is null ? null : new NativeDecompiler(analysis);
+        NativeDecompiler = analysis is null || !NativeDecompiler.Supports(analysis) ? null : new NativeDecompiler(analysis);
         Patches = patches ?? new PatchStore();
         Breakpoints = breakpoints ?? new BreakpointStore();
         Notes = notes ?? new NoteStore();
@@ -305,7 +305,7 @@ public sealed class WorkspaceService : IDisposable
             return new OpenedBinary(image, null, null, null, jarProject, notes: jarNotes, bytecode: reading, members: members);
         }
 
-        BinaryAnalysis? analysis = image.Architecture is Architecture.X86 or Architecture.X64 ? new BinaryAnalysis(image) : null;
+        BinaryAnalysis? analysis = InstructionDecoders.Supports(image.Architecture) ? new BinaryAnalysis(image) : null;
         analysis?.LoadPdbSymbols();
 
         // A launcher with the application's JAR appended (launch4j and the like) is two files in one: the PE only

@@ -165,7 +165,7 @@ public sealed class CodeTools
 
         foreach (var instruction in decoded)
         {
-            string operands = analysis.Disassembler.FormatOperands(instruction.Native);
+            string operands = analysis.Disassembler.FormatOperands(instruction);
             sb.Append(CultureInfo.InvariantCulture, $"0x{instruction.Va:X}  {instruction.Mnemonic}");
             if (operands.Length > 0)
             {

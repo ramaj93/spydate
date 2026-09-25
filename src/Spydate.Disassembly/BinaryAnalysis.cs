@@ -86,7 +86,8 @@ public sealed class BinaryAnalysis
         Image = image;
         Symbols = SymbolTable.FromImage(image);
         Source = new ImageCodeSource(image);
-        Disassembler = new X86Disassembler(image.Bitness, Symbols, syntax);
+        Disassembler = InstructionDecoders.For(image, Symbols, syntax)
+            ?? throw new ArgumentException($"There is no decoder for {image.Architecture} code.", nameof(image));
         options ??= DiscoveryOptions.Default;
         _options = options;
         var discoveryOptions = options.IsNoReturn is null ? options with { IsNoReturn = IsNoReturn } : options;
@@ -144,7 +145,7 @@ public sealed class BinaryAnalysis
 
     public ICodeSource Source { get; }
 
-    public X86Disassembler Disassembler { get; }
+    public IInstructionDecoder Disassembler { get; }
 
     /// <summary>Result of looking for the image's PDB, once <see cref="LoadPdbSymbols"/> has run.</summary>
     public PdbLoadResult? Pdb { get; private set; }
@@ -172,7 +173,7 @@ public sealed class BinaryAnalysis
             lock (_signatureGate)
             {
                 // Signatures come from the Windows DLLs a PE imports from; another format has none to read yet.
-                return _signatures ??= Image is PeImage pe ? ImportSignatures.For(pe) : null;
+                return _signatures ??= Image is PeImage pe && Disassembler.Architecture is Architecture.X86 or Architecture.X64 ? ImportSignatures.For(pe) : null;
             }
         }
     }
@@ -201,6 +202,12 @@ public sealed class BinaryAnalysis
 
     private CalleeSignature ComputeSignature(ulong va)
     {
+        // What a function takes is read from x86 calling conventions; another instruction set has none here yet.
+        if (Disassembler.Architecture is not (Architecture.X86 or Architecture.X64))
+        {
+            return CalleeSignature.Unknown;
+        }
+
         if (Symbols.TryGet(va, out var symbol) && symbol.Kind == SymbolKind.Import)
         {
             return Signatures?.LookupSymbol(symbol.Name) ?? CalleeSignature.Unknown;
@@ -304,7 +311,7 @@ public sealed class BinaryAnalysis
     }
 
     /// <summary>Whether the image's machine type is supported by the x86 disassembler.</summary>
-    public bool CanDisassemble => Image.Architecture is Architecture.X86 or Architecture.X64;
+    public bool CanDisassemble => InstructionDecoders.Supports(Image.Architecture);
 
     /// <summary>Functions discovered so far, sorted by entry VA.</summary>
     public IReadOnlyList<Function> Functions => _functions.Values.OrderBy(f => f.EntryVa).ToList();
@@ -505,7 +512,8 @@ public sealed class BinaryAnalysis
 
             var span = body.Span;
             bool atLimit = false;
-            for (int offset = 0; offset < span.Length && !atLimit; offset++)
+            int step = Disassembler.InstructionAlignment;
+            for (int offset = 0; offset < span.Length && !atLimit; offset += step)
             {
                 // ConcurrentDictionary.Count takes every lock, so it is checked periodically rather
                 // than per byte - the loop runs once for each byte of every executable section.
@@ -515,13 +523,13 @@ public sealed class BinaryAnalysis
                     atLimit = _functions.Count >= maxFunctions;
                 }
 
-                if (covered[offset] || FunctionPrologues.IsPadding(span[offset]))
+                if (covered[offset] || Disassembler.IsPadding(span[offset..], betweenFunctions: true))
                 {
                     continue;
                 }
 
                 int window = Math.Min(16, span.Length - offset);
-                if (!FunctionPrologues.LooksLikeFunctionStart(span.Slice(offset, window), Image.Bitness))
+                if (!Disassembler.LooksLikeFunctionStart(span.Slice(offset, window)))
                 {
                     continue;
                 }
@@ -548,7 +556,7 @@ public sealed class BinaryAnalysis
                     }
                 }
 
-                offset = (int)Math.Max((long)offset, (long)(function.EndVa - sectionStart) - 1);
+                offset = (int)Math.Max((long)offset, (long)(function.EndVa - sectionStart) - step);
             }
         }
 
@@ -626,7 +634,7 @@ public sealed class BinaryAnalysis
             return function;
         }
 
-        return CrtHelpers.Identify(function, Image) is { } helper ? function.WithName(helper) : function;
+        return Disassembler.Architecture is Architecture.X86 or Architecture.X64 && CrtHelpers.Identify(function, Image) is { } helper ? function.WithName(helper) : function;
     }
 
     /// <summary>

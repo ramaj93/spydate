@@ -1,4 +1,3 @@
-using Iced.Intel;
 using Spydate.Core.Symbols;
 
 namespace Spydate.Disassembly;
@@ -63,14 +62,12 @@ public sealed record DiscoveryOptions
 /// </summary>
 public sealed class FunctionDiscovery
 {
-    private const int MaxInstructionLength = 15;
-
     private readonly ICodeSource _source;
-    private readonly X86Disassembler _disassembler;
+    private readonly IInstructionDecoder _disassembler;
     private readonly SymbolTable _symbols;
     private readonly DiscoveryOptions _options;
 
-    public FunctionDiscovery(ICodeSource source, X86Disassembler disassembler, SymbolTable symbols, DiscoveryOptions? options = null)
+    public FunctionDiscovery(ICodeSource source, IInstructionDecoder disassembler, SymbolTable symbols, DiscoveryOptions? options = null)
     {
         _source = source;
         _disassembler = disassembler;
@@ -211,7 +208,7 @@ public sealed class FunctionDiscovery
                         goto EndPath;
 
                     case InstructionFlow.Return:
-                    case InstructionFlow.Interrupt when IsTerminatingInterrupt(ins):
+                    case InstructionFlow.Interrupt when _disassembler.NeverContinues(ins):
                         goto EndPath;
 
                     case InstructionFlow.Interrupt:
@@ -271,7 +268,7 @@ public sealed class FunctionDiscovery
             SweepGaps(entryVa, end, instructions, leaders, notes);
         }
 
-        var blocks = BuildBlocks(instructions, leaders, jumpTables);
+        var blocks = BuildBlocks(instructions, leaders, jumpTables, _disassembler);
         return new Function(entryVa, name, blocks, callTargets, indirectSlots, notes)
         {
             BoundsEnd = boundsEnd,
@@ -305,7 +302,7 @@ public sealed class FunctionDiscovery
         // Without a range check, the function's own extent is the only thing keeping an over-long read
         // from picking up the next switch's targets.
         Func<ulong, bool>? accept = boundsEnd is { } end ? target => target >= entryVa && target < end : null;
-        return JumpTables.TryRecover(trailing, _source, accept);
+        return _disassembler.RecoverJumpTable(trailing, _source, accept);
     }
 
     private bool IsNoReturn(ulong va) => _options.IsNoReturn?.Invoke(va) ?? false;
@@ -333,7 +330,7 @@ public sealed class FunctionDiscovery
             // Bytes between functions and between blocks are padded; that is not missing code.
             if (IsPadding(cursor))
             {
-                cursor++;
+                cursor += (ulong)_disassembler.InstructionAlignment;
                 continue;
             }
 
@@ -358,8 +355,8 @@ public sealed class FunctionDiscovery
 
             if (!sweptAny)
             {
-                // Not code (jump table, embedded data): step past this byte and keep looking.
-                cursor++;
+                // Not code (jump table, embedded data): step past it and keep looking.
+                cursor += (ulong)_disassembler.InstructionAlignment;
             }
         }
 
@@ -369,18 +366,8 @@ public sealed class FunctionDiscovery
         }
     }
 
-    /// <summary>int3 / nop filler the linker inserts between blocks.</summary>
-    private bool IsPadding(ulong va)
-    {
-        var b = _source.Read(va, 1);
-        return b.Length == 1 && b.Span[0] is 0xCC or 0x90;
-    }
-
-    private static bool IsTerminatingInterrupt(DecodedInstruction ins)
-        => ins.Mnemonic is "int3" or "ud2" or "hlt"
-           // int 0x29 is __fastfail: the process is gone before the next instruction. Match the
-           // decoded immediate, not the formatted text, which depends on formatter options.
-           || (ins.Native.Mnemonic == Mnemonic.Int && ins.Native.Immediate8 == 0x29);
+    /// <summary>Filler the linker inserts between blocks.</summary>
+    private bool IsPadding(ulong va) => _disassembler.IsPadding(_source.Read(va, _disassembler.InstructionAlignment).Span);
 
     /// <summary>Decodes linearly from <paramref name="va"/>, refetching chunks so instructions never straddle a chunk end.</summary>
     private IEnumerable<DecodedInstruction> DecodeLinear(ulong va)
@@ -399,7 +386,7 @@ public sealed class FunctionDiscovery
             foreach (var ins in _disassembler.DecodeLazy(chunk, current, _source.ImageBase))
             {
                 // Near the end of a full chunk the decoder may see a truncated instruction; refetch instead.
-                if (fullChunk && ins.Va + MaxInstructionLength > current + (ulong)chunk.Length && ins.Flow == InstructionFlow.Invalid)
+                if (fullChunk && ins.Va + (ulong)_disassembler.MaxInstructionLength > current + (ulong)chunk.Length && ins.Flow == InstructionFlow.Invalid)
                 {
                     break;
                 }
@@ -411,7 +398,7 @@ public sealed class FunctionDiscovery
                     yield break;
                 }
 
-                if (fullChunk && ins.NextVa + MaxInstructionLength > current + (ulong)chunk.Length)
+                if (fullChunk && ins.NextVa + (ulong)_disassembler.MaxInstructionLength > current + (ulong)chunk.Length)
                 {
                     current = ins.NextVa;
                     goto Refetch;
@@ -427,7 +414,7 @@ public sealed class FunctionDiscovery
         }
     }
 
-    private static List<BasicBlock> BuildBlocks(SortedDictionary<ulong, DecodedInstruction> instructions, HashSet<ulong> leaders, List<JumpTable> jumpTables)
+    private static List<BasicBlock> BuildBlocks(SortedDictionary<ulong, DecodedInstruction> instructions, HashSet<ulong> leaders, List<JumpTable> jumpTables, IInstructionDecoder decoder)
     {
         var blocks = new List<BasicBlock>();
         var current = new List<DecodedInstruction>();
@@ -513,7 +500,7 @@ public sealed class FunctionDiscovery
                     }
 
                     break;
-                case InstructionFlow.Interrupt when !IsTerminatingInterrupt(last):
+                case InstructionFlow.Interrupt when !decoder.NeverContinues(last):
                     if (byVa.ContainsKey(last.NextVa))
                     {
                         b.AddSuccessor(last.NextVa);

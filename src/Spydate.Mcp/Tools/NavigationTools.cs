@@ -598,7 +598,7 @@ public sealed class NavigationTools
             return "-";
         }
 
-        string operands = analysis.Disassembler.FormatOperands(instruction.Native);
+        string operands = analysis.Disassembler.FormatOperands(instruction);
         return operands.Length == 0 ? instruction.Mnemonic : $"{instruction.Mnemonic} {operands}";
     }
 

@@ -51,6 +51,9 @@ public sealed class NativeDecompiler
     {
     }
 
+    /// <summary>Whether the pipeline reads this analysis's code: it lifts x86, and nothing else yet.</summary>
+    public static bool Supports(BinaryAnalysis analysis) => analysis.Disassembler.Architecture is Core.Binary.Architecture.X86 or Core.Binary.Architecture.X64;
+
     /// <summary>
     /// How many register arguments the function at <paramref name="va"/> takes, or -1 when it is not a
     /// function this analysis can read - an import thunk, or an address outside the code.

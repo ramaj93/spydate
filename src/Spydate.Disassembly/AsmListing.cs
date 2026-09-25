@@ -136,7 +136,7 @@ public static class AsmListing
         sb.Append(ins.Mnemonic);
 
         // Re-format operands now so symbols discovered after decoding (sub_XXXX) are shown.
-        string operands = ins.Flow == InstructionFlow.Invalid ? ins.Operands : analysis.Disassembler.FormatOperands(ins.Native);
+        string operands = ins.Flow == InstructionFlow.Invalid ? ins.Operands : analysis.Disassembler.FormatOperands(ins);
         if (operands.Length > 0)
         {
             sb.Append(' ', Math.Max(1, OperandColumn - ins.Mnemonic.Length)).Append(operands);
@@ -194,7 +194,7 @@ public static class AsmListing
     /// </summary>
     private static string Decode(Core.Project.Patch patch, BinaryAnalysis analysis, ulong va)
     {
-        if (analysis.Image.VaToRva(va) is not { } rva || rva != patch.Rva)
+        if (analysis.Image.VaToRva(va) is not { } rva || rva != patch.Rva || analysis.Disassembler.Architecture is not (Core.Binary.Architecture.X86 or Core.Binary.Architecture.X64))
         {
             return string.Empty;
         }

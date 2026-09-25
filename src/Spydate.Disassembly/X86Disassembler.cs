@@ -1,4 +1,5 @@
 using Iced.Intel;
+using Spydate.Core.Binary;
 using Spydate.Core.Symbols;
 
 namespace Spydate.Disassembly;
@@ -16,7 +17,7 @@ public enum AsmSyntax
 /// x86 / x64 disassembler built on Iced. Thread-safe for concurrent <see cref="Decode"/> calls
 /// (each call creates its own decoder and formatter).
 /// </summary>
-public sealed class X86Disassembler
+public sealed class X86Disassembler : IInstructionDecoder
 {
     private readonly SymbolTable? _symbols;
 
@@ -35,6 +36,12 @@ public sealed class X86Disassembler
     public int Bitness { get; }
 
     public AsmSyntax Syntax { get; }
+
+    public Architecture Architecture => Bitness == 64 ? Architecture.X64 : Architecture.X86;
+
+    public int MaxInstructionLength => 15;
+
+    public int InstructionAlignment => 1;
 
     /// <summary>
     /// Decodes instructions from <paramref name="code"/> which is located at virtual address <paramref name="va"/>.
@@ -60,6 +67,9 @@ public sealed class X86Disassembler
     /// Re-formats an instruction's operands with the current symbol table (symbols discovered after the
     /// original decode — e.g. <c>sub_XXXX</c> names — are picked up).
     /// </summary>
+    public string FormatOperands(DecodedInstruction instruction) => instruction.Flow == InstructionFlow.Invalid ? instruction.Operands : FormatOperands(instruction.Native);
+
+    /// <inheritdoc cref="FormatOperands(DecodedInstruction)"/>
     public string FormatOperands(in Instruction instruction)
     {
         var formatter = CreateFormatter();
@@ -134,6 +144,20 @@ public sealed class X86Disassembler
             };
         }
     }
+
+    public bool IsPadding(ReadOnlySpan<byte> code, bool betweenFunctions = false)
+        => code.Length > 0 && (betweenFunctions ? FunctionPrologues.IsPadding(code[0]) : code[0] is 0xCC or 0x90);
+
+    public bool LooksLikeFunctionStart(ReadOnlySpan<byte> code) => FunctionPrologues.LooksLikeFunctionStart(code, Bitness);
+
+    public bool NeverContinues(DecodedInstruction instruction)
+        => instruction.Mnemonic is "int3" or "ud2" or "hlt"
+           // int 0x29 is __fastfail: the process is gone before the next instruction. Match the
+           // decoded immediate, not the formatted text, which depends on formatter options.
+           || (instruction.Native.Mnemonic == Mnemonic.Int && instruction.Native.Immediate8 == 0x29);
+
+    public JumpTable? RecoverJumpTable(IReadOnlyList<DecodedInstruction> trailing, ICodeSource source, Func<ulong, bool>? accept)
+        => JumpTables.TryRecover(trailing, source, accept);
 
     private static InstructionFlow Classify(in Instruction instr, out ulong? target, out ulong? slot)
     {

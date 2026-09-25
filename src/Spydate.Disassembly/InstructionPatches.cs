@@ -61,6 +61,11 @@ public static class InstructionPatches
     {
         ArgumentNullException.ThrowIfNull(analysis);
 
+        if (NotX86(analysis) is { } unsupported)
+        {
+            return unsupported;
+        }
+
         if (count < 1)
         {
             return PatchProposal.Failed("nothing to do");
@@ -92,6 +97,11 @@ public static class InstructionPatches
     public static PatchProposal InvertBranch(BinaryAnalysis analysis, ulong va)
     {
         ArgumentNullException.ThrowIfNull(analysis);
+
+        if (NotX86(analysis) is { } unsupported)
+        {
+            return unsupported;
+        }
 
         var bytes = analysis.Image.ReadAtVa(va, 16);
         if (bytes.Length == 0)
@@ -148,6 +158,11 @@ public static class InstructionPatches
     public static PatchProposal Assemble(BinaryAnalysis analysis, ulong va, string? text)
     {
         ArgumentNullException.ThrowIfNull(analysis);
+
+        if (NotX86(analysis) is { } unsupported)
+        {
+            return unsupported;
+        }
 
         var encoded = X86Assembler.Encode(text, analysis.Image.Is64Bit, va);
         if (!encoded.Ok)
@@ -226,8 +241,8 @@ public static class InstructionPatches
             return string.Empty;
         }
 
-        var plain = new X86Disassembler(analysis.Image.Is64Bit ? 64 : 32, symbols: null, analysis.Disassembler.Syntax);
-        return string.Join("; ", plain.Decode(bytes, va, analysis.Image.ImageBase).Select(d => d.Text));
+        var plain = InstructionDecoders.For(analysis.Image, symbols: null, analysis.Disassembler.Syntax);
+        return plain is null ? string.Empty : string.Join("; ", plain.Decode(bytes, va, analysis.Image.ImageBase).Select(d => d.Text));
     }
 
     /// <summary>The bytes as they are now, or null when the address is not in the file.</summary>
@@ -253,6 +268,12 @@ public static class InstructionPatches
             new Patch { Rva = rva, Bytes = bytes, Original = original, Comment = comment },
             null);
     }
+
+    /// <summary>The assembler and the NOP are x86's; another instruction set cannot be patched here yet.</summary>
+    private static PatchProposal? NotX86(BinaryAnalysis analysis)
+        => analysis.Disassembler.Architecture is Architecture.X86 or Architecture.X64
+            ? null
+            : PatchProposal.Failed($"patching {analysis.Disassembler.Architecture} code is not supported yet");
 
     private sealed class Collector : CodeWriter
     {

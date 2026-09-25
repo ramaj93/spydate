@@ -19,8 +19,9 @@ public enum InstructionFlow
 }
 
 /// <summary>
-/// One decoded machine instruction with formatted text. Immutable. The raw Iced
-/// <see cref="Instruction"/> is exposed for the lifter; UI code should use the text properties.
+/// One decoded machine instruction with formatted text. Immutable. What the decoder knows beyond the text is kept
+/// for the analyses that read it: the raw Iced <see cref="Instruction"/> for x86. UI code should use the text
+/// properties.
 /// </summary>
 public sealed record DecodedInstruction
 {
@@ -37,8 +38,8 @@ public sealed record DecodedInstruction
     public ulong? BranchTargetVa { get; init; }
     /// <summary>For <c>call [mem]</c> / <c>jmp [mem]</c> with an absolute or RIP-relative address: the memory slot read.</summary>
     public ulong? IndirectSlotVa { get; init; }
-    /// <summary>Raw Iced instruction (used by the native lifter).</summary>
-    public required Instruction Native { get; init; }
+    /// <summary>The raw Iced instruction, for x86 (used by the native lifter). Default for any other architecture.</summary>
+    public Instruction Native { get; init; }
 
     public ulong NextVa => Va + (ulong)Length;
 

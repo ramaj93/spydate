@@ -62,7 +62,7 @@ public class RealBinaryTests
                 _output.WriteLine($"loc_{block.StartVa:X}:");
                 foreach (var ins in block.Instructions)
                 {
-                    _output.WriteLine($"  {ins.Va:X}  {ins.Mnemonic,-8} {analysis.Disassembler.FormatOperands(ins.Native)}");
+                    _output.WriteLine($"  {ins.Va:X}  {ins.Mnemonic,-8} {analysis.Disassembler.FormatOperands(ins)}");
                 }
             }
 
